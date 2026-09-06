@@ -231,3 +231,34 @@ def test_confirmed_spend_cannot_reuse_stale_cash_for_second_event(tmp_path):
             )
 
     asyncio.run(run())
+
+
+def test_live_cash_fak_rounds_limit_down_to_tick_without_raising_budget(tmp_path):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    async def run():
+        async with controlled_runtime(tmp_path / "live.sqlite") as r:
+            await fund(r)
+            t = replace(token(r), tick=10000)
+            r.add_tokens([t])
+            r.update_preferences({"maxBuyPriceCents": "98.7"})
+            r.book(t.token_id, [(90000, 100_000_000)], [(100000, 10_000_000)])
+            r.client.ready = True
+            r.start()
+            await flush()
+            oid = next(iter(r.store.intents()))
+            order = r.native.cache.order(ClientOrderId(oid))
+            r.client._http_client.create_market_order = Mock(
+                return_value=SimpleNamespace(takerAmount=10_000_000)
+            )
+            r.client._expected_venue_order_id = Mock(return_value=VenueOrderId("venue-1"))
+            r.client._post_signed_order = AsyncMock()
+            await r.client._submit_market_order(SimpleNamespace(order=order), None)
+            args = r.client._http_client.create_market_order.call_args.args[0]
+            assert args.price == 0.98 and args.amount == 1 and args.order_type == "FAK"
+            assert r.store.intent(oid)["cash"] == 1_000_000
+            assert not r.business["cycles"]  # Signing result never becomes a Fill.
+
+    asyncio.run(run())

@@ -302,11 +302,16 @@ class LiveExecution(PolymarketExecutionClient):
         if o.side != OrderSide.BUY or not o.is_quote_quantity:
             self.deny(o, "仅使用有现金上限的BUY市价FAK")
             return
+        tick = r.tokens[i["token_id"]].tick
+        executable_limit = min(i["limit"] // tick * tick, SCALE - tick)
+        if executable_limit <= 0:
+            self.deny(o, "当前价格上限内没有合法 tick")
+            return
         args = MarketOrderArgsV2(
             token_id=i["token_id"],
             amount=float(Decimal(i["cash"]) / SCALE),
             side="BUY",
-            price=float(Decimal(i["limit"]) / SCALE),
+            price=float(Decimal(executable_limit) / SCALE),
             order_type="FAK",
             user_usdc_balance=float(Decimal(r.cash()) / SCALE),
         )

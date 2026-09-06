@@ -181,3 +181,35 @@ def test_cross_event_current_ready_then_lifecycle(tmp_path):
     # Both are currently READY; earlier has 5% progress versus event's 10%.
     assert list(r.business["cycles"]) == ["earlier"]
     r.close()
+
+
+def test_multilevel_fak_records_group_native_fills(tmp_path):
+    from pm_nautilus.views import records
+
+    r, clock, t = setup(tmp_path)
+    r.book("1", [(15000, 100_000_000)], [(20000, 20_000_000), (30000, 20_000_000)])
+    r.start()
+    page = records(r, 20)
+    assert page["totalCount"] == 1
+    row = page["records"][0]
+    assert row["type"] == "OPEN" and row["quantity"] == "40"
+    assert row["amount"] == "1" and row["price"] == "0.025"
+    assert len(r.business["targets"]) == 2  # UI grouping never merges actual targets.
+    r.close()
+
+
+def test_existing_cycle_freeze_and_new_fill_target_use_current_settings(tmp_path):
+    r, clock, t = setup(tmp_path)
+    r.book("1", [(90000, 100_000_000)], [(100000, 5_000_000)])
+    r.start()
+    assert r.business["cycles"]["event"]["spent"] == 500000
+    r.update_preferences(
+        {"orderAmount": "2", "targetSellPriceMultiplier": "3", "stopLossEnabled": False}
+    )
+    r.book("1", [(90000, 100_000_000)], [(100000, 10_000_000)])
+    cycle = r.business["cycles"]["event"]
+    assert cycle["spent"] == cycle["budget"] == 1_000_000
+    assert cycle["stop"]["enabled"] is True
+    assert sorted(x["price"] for x in r.business["targets"].values()) == [150000, 300000]
+    assert r.validate()["ok"]
+    r.close()

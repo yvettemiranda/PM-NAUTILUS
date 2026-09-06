@@ -169,6 +169,7 @@ def dashboard(r, service=None, limit=20, live_enabled=False):
 
 def records(r, limit):
     out = []
+    groups = {}
     qty = {}
     basis = {}
     for _, e in r.store.events():
@@ -199,20 +200,46 @@ def records(r, limit):
             pnl = amount - used
             qty[key] = before - q
             basis[key] = basis.get(key, 0) - used
-        out.append(
-            {
-                "id": str(e.trade_id),
-                "type": kind,
-                "eventTitle": t.event_title,
-                "marketQuestion": t.question,
-                "marketUrl": f"https://polymarket.com/event/{t.slug}" if t.slug else None,
-                "direction": t.direction,
-                "price": str(e.last_px),
-                "quantity": units(q),
-                "amount": units(amount),
-                "realizedPnl": units(pnl),
-                "occurredAt": iso(e.ts_event),
-                "winningOutcome": None,
-            }
-        )
+        group_key = str(e.client_order_id)
+        gross = e.info.get("pm_gross", q)
+        if group_key in groups:
+            group = groups[group_key]
+            group["quantity_micros"] += q
+            group["amount_micros"] += amount
+            group["gross"] += gross
+            group["weighted"] += micros(e.last_px.as_decimal()) * gross
+            group["pnl"] += pnl or 0
+            row = group["row"]
+            row.update(
+                quantity=units(group["quantity_micros"]),
+                amount=units(group["amount_micros"]),
+                price=units(group["weighted"] // group["gross"]),
+                realizedPnl=units(group["pnl"]) if pnl is not None else None,
+            )
+            if e.order_side == OrderSide.SELL:
+                row["type"] = kind
+            continue
+        row = {
+            "id": group_key,
+            "type": kind,
+            "eventTitle": t.event_title,
+            "marketQuestion": t.question,
+            "marketUrl": f"https://polymarket.com/event/{t.slug}" if t.slug else None,
+            "direction": t.direction,
+            "price": str(e.last_px),
+            "quantity": units(q),
+            "amount": units(amount),
+            "realizedPnl": units(pnl),
+            "occurredAt": iso(e.ts_event),
+            "winningOutcome": None,
+        }
+        groups[group_key] = {
+            "row": row,
+            "quantity_micros": q,
+            "amount_micros": amount,
+            "gross": gross,
+            "weighted": micros(e.last_px.as_decimal()) * gross,
+            "pnl": pnl or 0,
+        }
+        out.append(row)
     return {"records": list(reversed(out))[:limit], "totalCount": len(out)}

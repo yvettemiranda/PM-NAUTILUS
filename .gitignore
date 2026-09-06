@@ -20,3 +20,5 @@ artifacts/private/
 
 backups/
 compose.live.yaml
+
+artifacts/

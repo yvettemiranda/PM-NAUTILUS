@@ -1,0 +1,20 @@
+# New independent HTTPS virtual host; replace domain/certificate paths locally.
+server {
+    listen 443 ssl;
+    server_name pm.example.com;
+    ssl_certificate /etc/letsencrypt/live/pm.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/pm.example.com/privkey.pem;
+    location / {
+        proxy_pass http://127.0.0.1:8765;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Authorization $http_authorization;
+        proxy_read_timeout 60s;
+    }
+}
+server {
+    listen 80;
+    server_name pm.example.com;
+    return 301 https://$host$request_uri;
+}

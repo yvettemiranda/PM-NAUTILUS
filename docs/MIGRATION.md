@@ -21,7 +21,7 @@ Mac：macOS 26.6.2 arm64，CPython 3.12.14；v1 wheel 要求 macOS 26+ arm64。L
 - `strategy.py`：Nautilus Strategy 编排同一套规则；正式周期从真实非零 Fill 推进；异步买单提交先占用现金、暂锁 Event，终态或 Fill 才能释放/转换。
 - `execution.py`：Nautilus 原生执行事件路径与 TEST 窄模拟扩展；保留完整 FAK、净份额费用和按价位消费。默认 Sandbox 的普通报价币手续费/深度刷新不能直接作为规则一致性证据。
 - `live.py`：继承所选官方适配器；仅本程序订单；使用官方签名、账户、订单查询和框架核对。v1 对 FAILED 只日志、MATCHED 提前入账，故本应用必须等待官方 CONFIRMED 回报再形成可支配 Fill，未知/未确认资金及互斥继续占用，不能把取消请求当结果；迟到确认通过原生事件去重接入。该差异需要专门测试。
-- `market.py`：公开全分页 Event 发现/栏目同步、元数据标准化、正式 Condition 结果；Nautilus 公开数据适配器负责实时订单簿订阅及行情事件。
+- `market.py`：公开全分页 Event 发现/栏目同步、元数据标准化、正式 Condition 结果；公开 WS 传输将完整快照/增量归一后送入 Nautilus DataEngine 的原生 OrderBookDeltas；避开官方数据工厂中不必要的私有环境凭据依赖，TEST 无私有连接。
 - `redemption.py`：正式结算识别与实际回款分离；仅跟踪本程序已确认取得的权利。按所配置钱包/当前 collateral/standard 或 neg-risk 路径生成并提交官方合约交易；提交前持久化可恢复身份，重启查询原事务，收到成功收据并核对实际可用余额后才确认回款。TEST 使用同一状态机和模拟响应。
 - `app.py`：API、控制来源与身份校验、500ms 轻量快照、模式隔离；前端不接触私钥。
 
@@ -81,7 +81,7 @@ Mac：macOS 26.6.2 arm64，CPython 3.12.14；v1 wheel 要求 macOS 26+ arm64。L
 
 ## 一致性、恢复与发布关口
 
-配置/控制请求在本模式事件循环中串行执行；网络等待不得持有跨远端 SQLite 事务。保存提交意图及归属→占用→提交 Nautilus 订单→原生回报持久化→幂等业务投影→释放已确认终态剩余占用。未知请求不重发新订单。买入回报按实际价格生成目标；新 Fill 用当前 A/B，但周期预算和止损设置以第一笔 Fill 当时规则冻结。
+配置/控制请求在本模式事件循环中串行执行；网络等待不得持有跨远端 SQLite 事务。保存提交意图及归属→占用→提交 Nautilus 订单→原生回报持久化→幂等业务投影→释放已确认终态剩余占用。未知请求不重发新订单。买入回报按实际价格生成目标；新 Fill 用接收时的当前 A/B；该目标价及首 Fill 冻结参数同时保存于原生成交事件，崩溃重放不读取后来配置重新计算。周期预算和止损设置以第一笔 Fill 当时规则冻结。
 
 正式结算先留权利及应收，再提交赎回；签名或提交结果不明时保留交易标识和保守状态，只查询原交易。外部全钱包余额是实际账户事实，程序只按自身成交/赎回改变自有周期；不把手动仓纳入目标或赎回调用。若所选官方合约的赎回会覆盖同Condition手动资产，须验证并阻止自动赎回混合权利，避免接管。
 
@@ -95,3 +95,5 @@ Mac：macOS 26.6.2 arm64，CPython 3.12.14；v1 wheel 要求 macOS 26+ arm64。L
 - [当前适配器文档](https://nautilustrader.io/docs/latest/integrations/polymarket/)：只作为核查差异入口，不能混作 v1 API。
 - [Polymarket 仓位与赎回](https://docs.polymarket.com/trading/positions/manage)：pUSD 与标准/负风险抵押适配器。
 - [Polymarket 当前合约](https://docs.polymarket.com/resources/contracts)。
+
+赎回现金与 CONFIRMED 权利的 cash_included 标记随实际余额快照原子持久化；到账后不再把该金额叠加为未收应收，但权利持续跟踪直到原生 SETTLEMENT Fill 归账。本地结算意图没有远端订单副作用，重启后清理未执行意图并继续本地结算；已持久化 Fill 幂等重放。

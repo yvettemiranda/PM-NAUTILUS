@@ -105,6 +105,9 @@ class LiveExecution(PolymarketExecutionClient):
         self.reconciliation_task = None
         self._release_verified = False
         self._pending_native = set()
+        self._pending_conversions = set()
+        self._boot_intents = set(owner.store.intents())
+        self._sync_lock = asyncio.Lock()
         # Historical snapshot only supports native journal reconstruction. No LIVE
         # order can pass until current account and own venue state are reconciled.
         amount = Money(Decimal(owner.store.get("last_cash", 0)) / SCALE, pUSD)
@@ -135,6 +138,7 @@ class LiveExecution(PolymarketExecutionClient):
             ):
                 return
             self._pending_native.add(key)
+        r.freeze_fill_rules(event)
         r.store.journal(event)
         super()._send_order_event(event)
 
@@ -161,6 +165,8 @@ class LiveExecution(PolymarketExecutionClient):
                 pending.add(msg.id)
             else:
                 pending.discard(msg.id)
+            if status == "FAILED":
+                i.setdefault("failed_trades", {})[msg.id] = micros(msg.last_qty(venue))
             i["pending_trades"] = sorted(pending)
             r.store.save_intent(oid, i)
             if status != "CONFIRMED":
@@ -169,6 +175,12 @@ class LiveExecution(PolymarketExecutionClient):
             o = self._cache.order(oid)
             if o is None or msg.market != t.condition_id or msg.get_asset_id(venue) != t.token_id:
                 raise ValueError("实际成交身份与本程序意图不匹配")
+            if o.is_quote_quantity and str(oid) not in self._pending_conversions:
+                base = i.get("base_quantity")
+                if not base:
+                    raise ValueError("恢复订单缺少持久化的签名份额，不能猜测转换")
+                self._pending_conversions.add(str(oid))
+                self._send_quote_to_base_update(o, VenueOrderId(venue), quantity(base))
             gross = micros(msg.last_qty(venue))
             p = micros(msg.last_px(venue))
             if gross <= 0 or not 0 < p < SCALE:
@@ -207,7 +219,7 @@ class LiveExecution(PolymarketExecutionClient):
                     "pm_kind": i["kind"],
                     "pm_generation": i["generation"],
                     "venue_trade_id": msg.id,
-                    "transaction_hash": msg.transaction_hash,
+                    "transaction_hash": getattr(msg, "transaction_hash", None),
                     "confirmation": "CONFIRMED",
                 },
             )
@@ -325,35 +337,69 @@ class LiveExecution(PolymarketExecutionClient):
             return
         i["venue_id"] = str(venue)
         i["submitted_ns"] = r.now
+        if kwargs.get("base_quantity") is not None:
+            i["base_quantity"] = micros(kwargs["base_quantity"].as_decimal())
         r.store.save_intent(order.client_order_id, i)
         self._cache.add_venue_order_id(order.client_order_id, venue)
         await super()._post_signed_order(order, signed_order, **kwargs)
 
     async def _update_account_state(self):
+        confirmed_claims = {
+            key
+            for key, claim in self.owner.business["claims"].items()
+            if claim["state"] == "CONFIRMED"
+        }
+        cutoff = self.owner.store.db.execute(
+            "SELECT coalesce(max(seq),0) FROM native_events"
+        ).fetchone()[0]
         await super()._update_account_state()
         # LiveExecutionEngine processes account messages on its queue.
         await asyncio.sleep(0)
-        self.owner.store.put("last_cash", int(Decimal(str(self._collateral_balance_pusd)) * SCALE))
+        with self.owner.store.transaction():
+            self.owner.store.put(
+                "last_cash", int(Decimal(str(self._collateral_balance_pusd)) * SCALE)
+            )
+            self.owner.store.put("cash_covered_seq", cutoff)
+            for key in confirmed_claims:
+                self.owner.business["claims"][key]["cash_included"] = True
+            self.owner.store.put("business", self.owner.business)
 
     async def sync_owned(self):
+        async with self._sync_lock:
+            await self._sync_owned()
+
+    async def _sync_owned(self):
         r = self.owner
-        intents = r.store.intents()
-        if intents:
-            after = max(0, min(i["created"] for i in intents.values()) // 1_000_000_000 - 1)
+        intents = r.store.intents(active_only=True)
+        poll_start = r.now
+        if r.store.has_history():
+            after_ns = min(
+                [i["created"] for i in intents.values()]
+                + [r.store.get("last_trade_poll", poll_start) - 300_000_000_000]
+            )
+            after = max(0, after_ns // 1_000_000_000 - 1)
             raw = await asyncio.to_thread(
                 self._http_client.get_trades, params=TradeParams(after=after)
             )
             for trade in raw:
                 self.ingest_trade(self._decoder_trade_report.decode(msgspec.json.encode(trade)))
             await asyncio.sleep(0)
-        for oid, i in r.store.intents().items():
+            r.store.put("last_trade_poll", poll_start)
+        filled = {}
+        for oid in intents:
+            rows = r.store.order_fills(oid)
+            filled[oid] = (
+                {e.info.get("venue_trade_id") for e in rows},
+                sum(e.info.get("pm_gross", 0) for e in rows),
+            )
+        for oid, i in r.store.intents(active_only=True).items():
             if i["kind"] == "SETTLEMENT" or i.get("terminal"):
                 continue
             o = self._cache.order(ClientOrderId(oid))
             venue = i.get("venue_id")
             if not venue:
                 # No signed identity persisted means no post_order was permitted.
-                if o and not o.is_closed:
+                if oid in self._boot_intents and o and not o.is_closed:
                     self.generate_order_rejected(
                         o.strategy_id,
                         o.instrument_id,
@@ -368,18 +414,18 @@ class LiveExecution(PolymarketExecutionClient):
                 continue
             if str(result.get("asset_id")) != i["token_id"]:
                 raise ValueError("订单查询身份不一致")
-            associated = set(result.get("associate_trades", []))
-            confirmed = set()
-            gross = 0
-            for _, e in r.store.events():
-                if isinstance(e, OrderFilled) and str(e.client_order_id) == oid:
-                    confirmed.add(e.info.get("venue_trade_id"))
-                    gross += e.info.get("pm_gross", 0)
+            associated = set(result.get("associate_trades") or [])
+            confirmed, gross = filled.get(oid, (set(), 0))
+            failed = i.get("failed_trades", {})
             # All matched quantity must be represented by finalized venue responses.
             # Missing/deferred records retain the reservation; never infer zero fill.
             matched = micros(result.get("size_matched", 0))
             status = str(result.get("status", "")).upper()
-            if i.get("pending_trades") or not associated.issubset(confirmed) or gross < matched:
+            if (
+                i.get("pending_trades")
+                or not associated.issubset(confirmed | failed.keys())
+                or gross + sum(failed.values()) < matched
+            ):
                 continue
             if status in {"CANCELED", "CANCELLED", "MATCHED", "FILLED", "EXPIRED"}:
                 i = r.store.intent(oid)
@@ -479,6 +525,10 @@ class LiveExecution(PolymarketExecutionClient):
             try:
                 await self.sync_owned()
                 await self.generate_position_status_reports(None)
+                if not self.owner.validate()["ok"]:
+                    raise ValueError("LIVE账本校验未通过")
+                self.ready = True
+                self.owner.store.put("live_error", None)
                 self.owner.drain()
             except Exception as exc:
                 self.ready = False
@@ -491,4 +541,27 @@ class LiveExecution(PolymarketExecutionClient):
         if self.reconciliation_task:
             self.reconciliation_task.cancel()
             await asyncio.gather(self.reconciliation_task, return_exceptions=True)
-        await self._disconnect()
+            self.reconciliation_task = None
+        self.owner.pause()
+        engine = self.owner.native.execution
+        # The pinned engine enqueues commands with call_soon_threadsafe. Let those
+        # callbacks run, then dispatch all already accepted commands before waiting
+        # for the adapter's network tasks. The journal retains unknown remote results.
+        await asyncio.sleep(0)
+        while engine.cmd_qsize():
+            await asyncio.sleep(0)
+        pending = [task for task in self._tasks if not task.done()]
+        if pending:
+            await asyncio.wait(pending, timeout=5)
+        try:
+            await self._disconnect()
+        finally:
+            try:
+                await self.cancel_pending_tasks()
+            finally:
+                # Stopping the engine only queues sentinels. SQLite must remain open
+                # until native events ahead of those sentinels have been applied.
+                self.owner.native.stop()
+                queues = [engine.get_cmd_queue_task(), engine.get_evt_queue_task()]
+                await asyncio.gather(*(task for task in queues if task), return_exceptions=True)
+                self._set_connected(False)

@@ -61,6 +61,8 @@ async def flush():
 def test_confirmed_only_dedup_and_native_recovery(tmp_path):
     async def run():
         def factory(r):
+            if r.store.get("last_cash") is None:
+                r.store.put("last_cash", 100_000_000)
             return LiveExecution(
                 r,
                 HTTP(),

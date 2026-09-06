@@ -17,3 +17,6 @@ logs/
 *.key
 .DS_Store
 artifacts/private/
+
+backups/
+compose.live.yaml

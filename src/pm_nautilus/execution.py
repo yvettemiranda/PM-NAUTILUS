@@ -42,6 +42,7 @@ class TestExecution(ExecutionClient):
     def _send_order_event(self, event):
         # Commit before the native engine applies a simulated fact. Recovery can
         # replay a crash after this point; never regenerate a different fill.
+        self.owner.freeze_fill_rules(event)
         self.owner.store.journal(event)
         super()._send_order_event(event)
 

@@ -121,6 +121,7 @@ function showMessage(message, error = false) {
 }
 
 function formatMoney(value, signed = false) {
+  if (value === null || value === undefined || value === "") return "—";
   const amount = Number(value);
   if (!Number.isFinite(amount)) return "—";
   const prefix = signed && amount > 0 ? "+" : "";
@@ -128,11 +129,13 @@ function formatMoney(value, signed = false) {
 }
 
 function formatCents(value) {
+  if (value === null || value === undefined || value === "") return "—";
   const cents = Number(value) * 100;
   return Number.isFinite(cents) ? `${cents.toFixed(2)}¢` : "—";
 }
 
 function formatQuantity(value) {
+  if (value === null || value === undefined || value === "") return "—";
   const quantity = Number(value);
   if (!Number.isFinite(quantity)) return "—";
   return quantity.toLocaleString("zh-CN", {
@@ -142,6 +145,7 @@ function formatQuantity(value) {
 }
 
 function formatClock(value) {
+  if (value === null || value === undefined || value === "") return "—";
   const date = new Date(value);
   return Number.isFinite(date.getTime())
     ? new Intl.DateTimeFormat("zh-CN", {
@@ -154,6 +158,7 @@ function formatClock(value) {
 }
 
 function formatDate(value) {
+  if (value === null || value === undefined || value === "") return "—";
   const date = new Date(value);
   return Number.isFinite(date.getTime())
     ? new Intl.DateTimeFormat("zh-CN", {
@@ -258,11 +263,11 @@ function renderRunControls() {
   runToggle.title = runToggle.disabled && liveView ? "LIVE 尚未由服务器启用" : "";
   runToggle.setAttribute(
     "aria-label",
-    liveView
+    liveView && !ui.dashboard?.liveExecutionEnabled
       ? "LIVE 尚未开放，无法启动"
       : running
-        ? "暂停 TEST 自动买入"
-        : "开始 TEST 自动交易",
+        ? `暂停 ${ui.displayMode} 自动买入`
+        : `开始 ${ui.displayMode} 自动交易`,
   );
 
   const capital = $("#initial-capital");
@@ -270,6 +275,8 @@ function renderRunControls() {
   capital.disabled = !capitalEditable;
   capital.title = capitalEditable
     ? ""
+    : liveView
+      ? "实际余额由服务器账户查询更新，不能在页面修改"
     : running
       ? "修改总模拟资金前请先暂停TEST"
       : "总模拟资金仅能在暂停且没有交易记录时修改；如已有记录请先重置TEST";
@@ -422,21 +429,26 @@ function tradeRecordMarkup(record) {
 
 async function loadTradeRecords({ silent = false } = {}) {
   if (ui.tradeRecordsLoading) return;
+  const mode = ui.displayMode;
   ui.tradeRecordsLoading = true;
   ui.tradeRecordsError = null;
   renderTradeRecords();
   try {
     const response = await api(`/api/test/trade-records?limit=${TRADE_RECORD_LIMIT}`);
+    if (mode !== ui.displayMode) return;
     ui.tradeRecords = Array.isArray(response.records) ? response.records : [];
     ui.tradeRecordTotalCount = Number(response.totalCount) || 0;
     ui.tradeRecordsLoaded = true;
   } catch (error) {
+    if (mode !== ui.displayMode) return;
     ui.tradeRecordsError = error.message;
     if (!silent) showMessage(`交易记录加载失败：${error.message}`, true);
   } finally {
-    ui.tradeRecordsLoading = false;
-    ui.tradeRecordsLoadedAt = Date.now();
-    renderTradeRecords();
+    if (mode === ui.displayMode) {
+      ui.tradeRecordsLoading = false;
+      ui.tradeRecordsLoadedAt = Date.now();
+      renderTradeRecords();
+    }
   }
 }
 
@@ -663,6 +675,7 @@ function applyDashboard(dashboard) {
   renderModeControl();
   $("#cash-note").textContent = `可用 ${formatMoney(dashboard.portfolio.availableCash)} · 已占用 ${formatMoney(dashboard.portfolio.reservedCash)} · 待赎回 ${formatMoney(dashboard.portfolio.pendingRedemption)}`;
   $("#redemption-status").textContent = (dashboard.redemptions || []).map(c => `${c.condition_id.slice(0, 10)}… ${c.state}${c.error ? `：${c.error}` : ""}`).join(" · ");
+  $("#redemption-status").hidden = !$("#redemption-status").textContent;
   ui.preferences = dashboard.preferences;
   ui.strategyStatus = dashboard.strategy.status;
   ui.events = dashboard.marketScan.events ?? [];

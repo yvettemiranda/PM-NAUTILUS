@@ -65,23 +65,42 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 runtime = Runtime(
                     root / "LIVE" / "state.sqlite", mode="LIVE", live_factory=live_factory(settings)
                 )
+                # Activation may fail after native queues/private tasks have started.
+                # Register ownership before awaiting it so cleanup still reaches them.
+                runtimes["LIVE"] = runtime
                 await runtime.client.activate()
                 await attach("LIVE", runtime, wallet)
             else:
                 cold["LIVE"] = Store(root / "LIVE" / "state.sqlite", "LIVE")
             yield
         finally:
+            failures = []
             for r in runtimes.values():
-                r.pause()
+                try:
+                    r.pause()
+                except Exception as exc:
+                    failures.append(exc)
             for service in services.values():
-                await service.close()
+                try:
+                    await service.close()
+                except Exception as exc:
+                    failures.append(exc)
             for r in runtimes.values():
-                if r.mode == "LIVE":
-                    await r.client.shutdown()
-                r.close()
+                try:
+                    if r.mode == "LIVE":
+                        # shutdown drains native callbacks while SQLite is still open.
+                        await r.client.shutdown()
+                    else:
+                        r.native.stop()
+                except Exception as exc:
+                    failures.append(exc)
+                finally:
+                    r.store.close()
             for s in cold.values():
                 s.close()
             lock.close()
+            if failures:
+                raise ExceptionGroup("组件关闭失败", failures)
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.runtimes = runtimes
@@ -175,14 +194,22 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
 
     @app.get("/api/health")
     async def health():
-        return {
-            "status": "ok",
+        failures = {
+            mode: service.scan_status.get("serviceError") or "market_task_stopped"
+            for mode, service in services.items()
+            if service.scan_status.get("serviceError")
+            or (service.loop_task is not None and service.loop_task.done() and not service.closed)
+        }
+        body = {
+            "status": "degraded" if failures else "ok",
             "version": "0.1.0",
             "mode": "TEST",
             "strategyStatus": runtimes["TEST"].status,
             "liveExecutionEnabled": live_enabled,
             "revision": os.getenv("PM_GIT_REVISION", "local"),
+            "backgroundErrors": failures,
         }
+        return JSONResponse(body, status_code=503 if failures else 200)
 
     @app.get("/api/dashboard")
     async def get_dashboard(mode: str = "TEST", limit: int = 20):

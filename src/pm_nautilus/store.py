@@ -33,6 +33,8 @@ class Store:
         CREATE TABLE IF NOT EXISTS intents(
           order_id TEXT PRIMARY KEY,event_id TEXT NOT NULL,token_id TEXT NOT NULL,
           side TEXT NOT NULL,payload TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS intents_active ON intents(event_id,json_extract(payload,'$.terminal'));
+        CREATE INDEX IF NOT EXISTS native_fill_order ON native_events(kind,json_extract(CAST(payload AS TEXT),'$.client_order_id'));
         """)
         self.serializer = MsgSpecSerializer(encoding=msgspec.json)
         if self.get("mode") not in (None, mode):
@@ -106,6 +108,15 @@ class Store:
             )
         ]
 
+    def order_fills(self, order_id):
+        return [
+            self.serializer.deserialize(r[0])
+            for r in self.db.execute(
+                "SELECT payload FROM native_events WHERE kind='OrderFilled' AND json_extract(CAST(payload AS TEXT),'$.client_order_id')=? ORDER BY seq",
+                (str(order_id),),
+            )
+        ]
+
     def save_token(self, token):
         self.db.execute(
             "INSERT INTO tokens VALUES(?,?) ON CONFLICT(token_id) DO UPDATE SET payload=excluded.payload",
@@ -159,10 +170,18 @@ class Store:
             ),
         )
 
-    def intents(self):
-        return {
-            r[0]: json.loads(r[1]) for r in self.db.execute("SELECT order_id,payload FROM intents")
-        }
+    def intents(self, active_only=False, event_id=None):
+        clauses = []
+        params = []
+        if active_only:
+            clauses.append("json_extract(payload,'$.terminal')=0")
+        if event_id is not None:
+            clauses.append("event_id=?")
+            params.append(event_id)
+        query = "SELECT order_id,payload FROM intents"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        return {r[0]: json.loads(r[1]) for r in self.db.execute(query, params)}
 
     def has_history(self):
         return self.db.execute("SELECT 1 FROM intents LIMIT 1").fetchone() is not None

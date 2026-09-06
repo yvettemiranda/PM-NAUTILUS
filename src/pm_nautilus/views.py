@@ -80,7 +80,8 @@ def dashboard(r, service=None, limit=20, live_enabled=False):
         values.append(value)
         costs += c["cost"]
     pending = [c for c in r.business["claims"].values() if c["state"] != "CREDITED"]
-    receivable = sum(c["amount"] for c in pending)
+    receivable = sum(c["amount"] for c in pending if not c.get("cash_included"))
+    claim_value = sum(c["amount"] for c in pending)
     claim_cost = sum(c["cost"] for c in pending)
     value = None if None in values else sum(values)
     total = None if value is None else r.cash() + value + receivable
@@ -148,7 +149,7 @@ def dashboard(r, service=None, limit=20, live_enabled=False):
             "totalFunds": units(total),
             "realizedPnl": units(r.business["realized"]),
             "unrealizedPnl": units(
-                None if value is None else value + receivable - costs - claim_cost
+                None if value is None else value + claim_value - costs - claim_cost
             ),
             "positionValue": units(value),
             "availableCash": units(r.cash() - r.held_cash()),

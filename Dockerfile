@@ -6,6 +6,8 @@ RUN pip install --no-cache-dir uv==0.8.22
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 COPY src ./src
+COPY LICENSES ./LICENSES
+COPY NOTICE.md ./NOTICE.md
 RUN uv sync --frozen --no-dev && useradd --uid 10001 --create-home pm && mkdir /data && chown pm:pm /data
 USER pm
 EXPOSE 8765

@@ -142,6 +142,7 @@ class MarketService:
         self.closed = False
         self.loop_task = None
         self.on_resolution = None
+        self.subscription_lock = asyncio.Lock()
 
     async def get(self, url, **params):
         response = await self.http.get(url, params=params)
@@ -217,6 +218,12 @@ class MarketService:
             r.store.put("scan", self.scan_status)
 
     async def sync_subscriptions(self):
+        async with self.subscription_lock:
+            await self._sync_subscriptions()
+
+    async def _sync_subscriptions(self):
+        if self.closed:
+            return
         # Batch size limits one socket, never the monitored universe. Stable sorted
         # chunks bound connections; changed chunks are invalid until fresh snapshots.
         ids = sorted(self.runtime.monitored)
@@ -226,9 +233,13 @@ class MarketService:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         for group in groups - self.tasks.keys():
+            if self.closed:
+                return
             self.tasks[group] = asyncio.create_task(self.socket(group))
 
     def message(self, msg, allowed):
+        if self.closed:
+            return
         r = self.runtime
         kind = msg.get("event_type")
         ts = int(msg.get("timestamp", 0)) * 1_000_000
@@ -253,7 +264,10 @@ class MarketService:
         elif kind == "book":
             tid = msg.get("asset_id")
             if tid in allowed and msg.get("market") == r.tokens[tid].condition_id:
-                levels = lambda side: [(micros(x["price"]), micros(x["size"])) for x in msg[side]]
+
+                def levels(side):
+                    return [(micros(x["price"]), micros(x["size"])) for x in msg[side]]
+
                 r.book(tid, levels("bids"), levels("asks"), ts)
         elif kind == "tick_size_change":
             tid = msg.get("asset_id")
@@ -314,14 +328,22 @@ class MarketService:
     async def run(self):
         last_scan = 0
         while not self.closed:
-            if asyncio.get_running_loop().time() - last_scan >= 300:
-                await self.scan()
-                last_scan = asyncio.get_running_loop().time()
-            self.runtime.refresh_eligibility()
-            self.runtime.drain()
-            await self.sync_subscriptions()
-            if self.on_resolution:
-                await self.on_resolution()
+            try:
+                if asyncio.get_running_loop().time() - last_scan >= 300:
+                    await self.scan()
+                    last_scan = asyncio.get_running_loop().time()
+                self.runtime.refresh_eligibility()
+                self.runtime.drain()
+                await self.sync_subscriptions()
+                if self.on_resolution:
+                    await self.on_resolution()
+                self.scan_status.pop("serviceError", None)
+            except Exception as exc:
+                # Keep the service observable and retryable, without silently
+                # leaving a dead task behind a RUNNING UI.
+                self.runtime.pause()
+                self.scan_status["serviceError"] = type(exc).__name__
+                self.runtime.store.put("scan", self.scan_status)
             await asyncio.sleep(5)
 
     async def close(self):
@@ -330,4 +352,5 @@ class MarketService:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        self.tasks.clear()
         await self.http.aclose()

@@ -1,6 +1,7 @@
 """Shared Strategy, durable Event cycles, targets, stop observations and control."""
 
 from dataclasses import asdict
+from copy import deepcopy
 from pathlib import Path
 from uuid import uuid4
 
@@ -70,6 +71,7 @@ class Runtime:
         self.dirty = set()
         self.evaluations = {}
         self.replaying = False
+        self.faulted = None
         self.native = Native(self, clock)
         self.strategy = PMStrategy(self)
         self.client = TestExecution(self) if mode == "TEST" else live_factory(self)
@@ -112,11 +114,18 @@ class Runtime:
         return micros(balance.as_decimal()) if balance else 0
 
     def held_cash(self):
-        return sum(
+        reserved = sum(
             i["cash"] - i.get("spent", 0)
-            for i in self.store.intents().values()
+            for i in self.store.intents(active_only=True).values()
             if i["side"] == "BUY" and not i.get("terminal", False)
         )
+        if self.mode == "LIVE":
+            reserved += sum(
+                e.info.get("pm_amount", 0)
+                for _, e in self.store.events(self.store.get("cash_covered_seq", 0))
+                if isinstance(e, OrderFilled) and e.order_side == OrderSide.BUY
+            )
+        return reserved
 
     def add_tokens(self, tokens, official_tags=None):
         for t in tokens:
@@ -165,8 +174,12 @@ class Runtime:
             self.project(seq, e)
         # Unsigned initialized orders have no venue side effect in TEST. The native
         # journal replays fills before releasing their reservations.
-        if self.mode == "TEST":
-            for oid, i in self.store.intents().items():
+        if self.mode == "TEST" or any(
+            i["kind"] == "SETTLEMENT" for i in self.store.intents(active_only=True).values()
+        ):
+            for oid, i in self.store.intents(active_only=True).items():
+                if self.mode != "TEST" and i["kind"] != "SETTLEMENT":
+                    continue
                 o = self.native.cache.order(ClientOrderId(oid))
                 if o is None or o.is_closed:
                     i["terminal"] = True
@@ -183,8 +196,9 @@ class Runtime:
                             self.now,
                         )
                     else:
-                        self.client.cancel_order(
-                            type("Cancel", (), {"client_order_id": o.client_order_id})()
+                        TestExecution.cancel_order(
+                            self.client,
+                            type("Cancel", (), {"client_order_id": o.client_order_id})(),
                         )
 
     def on_native(self, event):
@@ -196,8 +210,24 @@ class Runtime:
         if intent["generation"] != self.store.generation:
             return
         seq = self.store.journal(event)
-        if seq > self.business["cursor"]:
+        if seq > self.business["cursor"] and not self.faulted:
             self.project(seq, event)
+
+    def freeze_fill_rules(self, event):
+        if isinstance(event, OrderFilled) and event.order_side == OrderSide.BUY:
+            intent = self.store.intent(event.client_order_id)
+            t = self.tokens[intent["token_id"]]
+            event.info.setdefault(
+                "pm_rules",
+                {
+                    "budget": self.preferences.budget,
+                    "stop_enabled": self.preferences.stopLossEnabled,
+                    "stop_multiplier": micros(self.preferences.stopLossMultiplier),
+                    "target": target_price(
+                        micros(event.last_px.as_decimal()), t.tick, self.preferences
+                    ),
+                },
+            )
 
     def project(self, seq, event):
         intent = self.store.intent(getattr(event, "client_order_id", ""))
@@ -205,6 +235,19 @@ class Runtime:
             return
         tid = intent["token_id"]
         t = self.tokens[tid]
+        previous_business = deepcopy(self.business)
+        previous_book = deepcopy(self.books[tid])
+        try:
+            self._project_transaction(seq, event, intent, t)
+        except Exception as exc:
+            self.business.clear()
+            self.business.update(previous_business)
+            self.books[tid] = previous_book
+            self.faulted = f"业务投影未提交，等待重启重放: {type(exc).__name__}"
+            self.store.put("status", "PAUSED")
+            raise
+
+    def _project_transaction(self, seq, event, intent, t):
         with self.store.transaction():
             if isinstance(event, OrderFilled):
                 self.apply_fill(event, intent, t)
@@ -242,19 +285,22 @@ class Runtime:
         targets = self.business["targets"]
         cycle = cycles.get(t.event_id)
         if e.order_side == OrderSide.BUY:
+            frozen = info.get("pm_rules", {})
             if cycle is None:
                 cycle = {
                     "id": str(e.trade_id),
                     "token_id": t.token_id,
-                    "budget": self.preferences.budget,
+                    "budget": frozen.get("budget", self.preferences.budget),
                     "spent": 0,
                     "quantity": 0,
                     "cost": 0,
                     "sold": False,
                     "stop": asdict(
                         StopLoss(
-                            self.preferences.stopLossEnabled,
-                            micros(self.preferences.stopLossMultiplier),
+                            frozen.get("stop_enabled", self.preferences.stopLossEnabled),
+                            frozen.get(
+                                "stop_multiplier", micros(self.preferences.stopLossMultiplier)
+                            ),
                         )
                     ),
                 }
@@ -275,7 +321,7 @@ class Runtime:
                 "id": key,
                 "event_id": t.event_id,
                 "token_id": t.token_id,
-                "price": target_price(p, t.tick, self.preferences),
+                "price": frozen.get("target", target_price(p, t.tick, self.preferences)),
                 "qty": qty,
                 "created": e.ts_event,
             }
@@ -318,10 +364,7 @@ class Runtime:
         cycle = self.business["cycles"].get(eid)
         if cycle is None or cycle["quantity"]:
             return
-        active = any(
-            i["event_id"] == eid and not i.get("terminal", False)
-            for i in self.store.intents().values()
-        )
+        active = bool(self.active_intents(eid))
         if active:
             return
         if cycle["stop"]["state"] == "EXITING" and eid not in self.business["banned"]:
@@ -332,13 +375,10 @@ class Runtime:
         }
 
     def active_intents(self, eid):
-        return {
-            o: i
-            for o, i in self.store.intents().items()
-            if i["event_id"] == eid and not i.get("terminal", False)
-        }
+        return self.store.intents(active_only=True, event_id=eid)
 
-    def evaluate(self, eid):
+    def evaluate(self, eid, dispatch=True):
+        self.evaluations[eid] = "NO_WINNER", None
         cycle = self.business["cycles"].get(eid)
         ids = self.events.get(eid, set())
         active = self.active_intents(eid)
@@ -356,24 +396,27 @@ class Runtime:
             )
             bid = max((p for p, q in available_bids if q), default=None)
             stop.observe(bid, b.bid.version, self.now, b.ready)
-            cycle["stop"] = asdict(stop)
-            if stop.state == "EXITING":
+            if dispatch:
+                cycle["stop"] = asdict(stop)
+            if dispatch and stop.state == "EXITING":
                 if eid not in self.business["banned"]:
                     self.business["banned"].append(eid)
                 self.cancel_buys(eid)
                 self.business["targets"] = {
                     k: v for k, v in self.business["targets"].items() if v["event_id"] != eid
                 }
-            self.store.put("business", self.business)
+            if dispatch:
+                self.store.put("business", self.business)
             if b.ready and not any(i["side"] == "SELL" for i in active.values()):
                 if stop.state == "EXITING" and bid and cycle["quantity"] >= t.min_size:
-                    self.submit(
-                        t,
-                        "SELL",
-                        cycle["quantity"],
-                        min(p for p, q in available_bids if q),
-                        kind="STOP",
-                    )
+                    if dispatch:
+                        self.submit(
+                            t,
+                            "SELL",
+                            cycle["quantity"],
+                            min(p for p, q in available_bids if q),
+                            kind="STOP",
+                        )
                     return
                 targets = [
                     Target(v["id"], v["price"], v["qty"], v["created"])
@@ -383,13 +426,14 @@ class Runtime:
                 batches = sell_batches(available_bids, targets, t.min_size, t.fees)
                 if batches:
                     batch = batches[0]
-                    self.submit(
-                        t,
-                        "SELL",
-                        batch.quantity,
-                        batch.limit,
-                        targets=[x.id for x in batch.targets],
-                    )
+                    if dispatch:
+                        self.submit(
+                            t,
+                            "SELL",
+                            batch.quantity,
+                            batch.limit,
+                            targets=[x.id for x in batch.targets],
+                        )
                     return
             if cycle["sold"] or stop.state in ("ARMED", "EXITING", "STOPPED"):
                 self.evaluations[eid] = "NO_WINNER", None
@@ -422,7 +466,7 @@ class Runtime:
         if winner:
             status = "READY"
         self.evaluations[eid] = status, winner
-        if winner and self.status == "RUNNING":
+        if dispatch and winner and self.status == "RUNNING":
             # Evaluation is synchronous with persistence and dispatch; no await may
             # be inserted here without repeating the complete decision.
             self.submit(
@@ -434,10 +478,16 @@ class Runtime:
             )
 
     def drain(self):
+        if self.faulted:
+            return
         # One pass plus exits created by fills. Do not turn zero-time liquidity into
         # an unbounded new-cycle loop. A later event/control tick permits re-entry.
         pending = self.dirty
         self.dirty = set()
+        # Current readiness must be established before cross-Event cash allocation.
+        # Preview pass has no order, stop, budget or journal side effects.
+        for eid in pending:
+            self.evaluate(eid, dispatch=False)
 
         def key(eid):
             ready = self.evaluations.get(eid, ("NO_WINNER", None))[0] == "READY"
@@ -508,7 +558,7 @@ class Runtime:
 
     def cancel_buys(self, eid=None):
         count = 0
-        for oid, intent in self.store.intents().items():
+        for oid, intent in self.store.intents(active_only=True, event_id=eid).items():
             if (
                 intent["side"] == "BUY"
                 and not intent.get("terminal", False)
@@ -535,12 +585,14 @@ class Runtime:
         self.cancel_buys()
 
     def update_preferences(self, changes, capital=None):
+        if self.faulted:
+            raise ValueError(self.faulted)
         new = Preferences(**(self.preferences.model_dump() | changes))
         if new.budget < self.preferences.budget and any(
             i["side"] == "BUY"
             and not i.get("terminal")
             and i["event_id"] not in self.business["cycles"]
-            for i in self.store.intents().values()
+            for i in self.store.intents(active_only=True).values()
         ):
             raise ValueError("在途首笔买单尚未确认，需等待终态后再降低每轮金额")
         initial = self.store.get("initial_capital")
@@ -569,6 +621,8 @@ class Runtime:
 
     def validate(self):
         errors = []
+        if self.faulted:
+            errors.append(self.faulted)
         if self.business.get("recovery_error"):
             errors.append(self.business["recovery_error"])
         if self.store.db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
@@ -590,8 +644,16 @@ class Runtime:
                 and target_qty != c["quantity"]
             ):
                 errors.append(f"{eid}:目标覆盖不一致")
+        cycle_instruments = {
+            str(instrument_id(self.tokens[c["token_id"]])) for c in self.business["cycles"].values()
+        }
+        for position in self.native.cache.positions_open():
+            if str(position.instrument_id) not in cycle_instruments:
+                errors.append(f"{position.instrument_id}:框架持仓缺少业务周期")
         if self.mode == "TEST" and self.test_cash() < 0:
             errors.append("模拟现金为负")
+        if self.mode == "TEST" and self.test_cash() != self.cash():
+            errors.append("模拟现金与原生成交事件不一致")
         if self.held_cash() > self.cash():
             errors.append("在途现金占用超过可用余额")
         return {"ok": not errors, "errors": errors, "mode": self.mode}

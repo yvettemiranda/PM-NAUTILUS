@@ -266,6 +266,10 @@ class RedemptionService:
             # Refresh the actual venue cash balance first. The settlement native
             # event closes own inventory; it never invents spendable LIVE cash.
             await r.client._update_account_state()
+            if not claim.get("cash_included"):
+                return
+            claim["error"] = None
+            r.store.put("business", r.business)
             r.settlement_fill(claim)
 
     async def run_once(self):

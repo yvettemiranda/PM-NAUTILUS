@@ -115,6 +115,11 @@ class Native:
             elif hasattr(e, "client_order_id"):
                 ExecutionEngine.process(self.execution, e)
         self.owner.replaying = False
+        from nautilus_trader.model.identifiers import ClientOrderId, VenueOrderId
+
+        for oid, intent in self.owner.store.intents().items():
+            if intent.get("venue_id") and self.cache.order(ClientOrderId(oid)) is not None:
+                self.cache.add_venue_order_id(ClientOrderId(oid), VenueOrderId(intent["venue_id"]))
         self.bus.subscribe("events.order.*", self.owner.on_native, priority=100)
         for component in (self.data, self.risk, self.execution, strategy):
             component.start()

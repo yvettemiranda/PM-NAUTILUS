@@ -23,7 +23,7 @@
 - artifacts/FULL_SOURCE.md：所有受控文本文件完整内容（含锁文件，无省略）；SOURCE_MANIFEST.json逐文件SHA256及最终提交。
 - artifacts/PM-NAUTILUS-source.zip为完整源码；PM-NAUTILUS.bundle保留分段Git历史。以git log及manifest为最终交付版本，不把代码验证SHA误认为后续纯文档提交SHA。
 - .reference/下保存原项目、公开短测、缺陷复现及Linux证据，不入Git。runtime/ui-preview、runtime/ui-acceptance为开发样本，不作为正式账本。
-- 临时UI服务已在确认PAUSED后SIGTERM停止；Linux验收容器已healthy验证后停止，临时Lima pm-verify已请求停机，保留镜像/卷供复验，不作为生产服务。
+- 临时UI服务已在确认PAUSED后SIGTERM停止；Linux验收容器已healthy验证后停止，临时Lima pm-verify已确认停止，保留镜像/卷供复验，不作为生产服务。
 
 ## 实际外部缺项
 1. 根指令仅拟定首次私有上传目标yvettemiranda/PM-NAUTILUS。已核对gh登录yvettemiranda(id169894659)，当时同名仓库不存在；尚缺首次目标确认，未创建远端/推送，未运行远端CI。

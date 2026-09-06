@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>PM-NAUTILUS</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <h1 class="sr-only">PM-NAUTILUS</h1>
+
+      <header class="topbar">
+        <button
+          id="mode-toggle"
+          class="mode-toggle"
+          type="button"
+          data-mode="TEST"
+          aria-label="当前 TEST 模式，点击切换到 LIVE"
+        >TEST</button>
+        <div class="topbar-actions">
+          <button id="run-toggle" class="button primary" type="button">START</button>
+          <button
+            id="config-toggle"
+            class="button secondary"
+            type="button"
+            aria-expanded="false"
+            aria-controls="config-panel"
+          >
+            配置
+          </button>
+        </div>
+      </header>
+
+      <p id="live-lock" class="inline-note" hidden>
+        LIVE 尚未开放；纸面闭环和长期 TEST 验证完成前不能启用。
+      </p>
+
+      <section id="config-panel" class="config-panel" hidden>
+        <form id="config-form">
+          <div class="section-heading config-heading">
+            <div>
+              <span class="eyebrow">SETUP</span>
+              <h2>交易配置</h2>
+            </div>
+            <button id="config-close" class="icon-button" type="button" aria-label="关闭配置">×</button>
+          </div>
+
+          <div class="config-grid">
+            <fieldset class="config-block category-block">
+              <legend class="sr-only">市场类别</legend>
+              <div class="category-heading">
+                <span aria-hidden="true">市场类别</span>
+                <label class="all-category-option">
+                  <input id="all-categories" type="checkbox" />
+                  <span>全选</span>
+                </label>
+              </div>
+              <div id="category-options" class="chip-options" aria-label="选择市场类别"></div>
+              <p id="category-note" class="field-note">栏目同步自 Polymarket 首页。</p>
+            </fieldset>
+
+            <fieldset class="config-block">
+              <legend>市场类型</legend>
+              <div class="check-options">
+                <label><input id="binary-market" type="checkbox" value="BINARY" /><span>二元市场</span></label>
+                <label><input id="ternary-market" type="checkbox" value="TERNARY" /><span>三元市场</span></label>
+                <label><input id="multi-market" type="checkbox" value="MULTI" /><span>多元市场（4+）</span></label>
+              </div>
+            </fieldset>
+
+            <div class="config-block">
+              <div class="config-label">买入价范围</div>
+              <div class="price-range-fields">
+                <label class="price-bound">
+                  <span>最低</span>
+                  <span class="unit-input">
+                    <input
+                      id="min-buy-price"
+                      type="number"
+                      min="0.1"
+                      max="99"
+                      step="0.1"
+                      inputmode="decimal"
+                      aria-label="最低买入价（美分）"
+                    />
+                    <span>¢</span>
+                  </span>
+                </label>
+                <span class="duration-separator" aria-hidden="true">至</span>
+                <label class="price-bound">
+                  <span>最高</span>
+                  <span class="unit-input">
+                    <input
+                      id="max-buy-price"
+                      type="number"
+                      min="0.1"
+                      max="99"
+                      step="0.1"
+                      inputmode="decimal"
+                      aria-label="最高买入价（美分）"
+                    />
+                    <span>¢</span>
+                  </span>
+                </label>
+              </div>
+              <p class="field-note">最低和最高价格均包含在筛选范围内，可按 0.1¢ 调整。</p>
+            </div>
+
+            <div class="config-block target-formula-block">
+              <div class="subsection-heading">
+                <span>目标卖价公式</span>
+                <small>后续新买入生效</small>
+              </div>
+              <output
+                id="target-sell-formula"
+                class="formula-preview"
+                tabindex="0"
+                aria-keyshortcuts="ArrowLeft ArrowRight Home End"
+              >卖价=min(99¢,tick↑max(买价+1¢,买价×1.5))</output>
+              <div class="formula-fields">
+                <label class="field">
+                  <span>加价</span>
+                  <span class="unit-input">
+                    <input
+                      id="target-sell-increase"
+                      type="number"
+                      min="0"
+                      max="99"
+                      step="any"
+                      inputmode="decimal"
+                      required
+                      aria-label="目标卖价加价参数（美分）"
+                    />
+                    <span>¢</span>
+                  </span>
+                </label>
+                <label class="field">
+                  <span>倍数</span>
+                  <span class="unit-input multiplier-input">
+                    <input
+                      id="target-sell-multiplier"
+                      type="number"
+                      min="0"
+                      step="any"
+                      inputmode="decimal"
+                      required
+                      aria-label="目标卖价倍数参数"
+                    />
+                    <span>×</span>
+                  </span>
+                </label>
+              </div>
+              <p class="field-note">上限 99¢；不改已有卖单。</p>
+            </div>
+
+            <div class="range-fields config-block">
+              <div class="duration-field range-field">
+                <div class="range-heading">
+                  <span>市场总时长</span>
+                  <strong><span id="min-duration-value">1</span>–<span id="max-duration-value">30</span>天</strong>
+                </div>
+                <div class="duration-inputs">
+                  <label class="duration-bound">
+                    <span>最短</span>
+                    <span class="unit-input">
+                      <input id="min-market-duration" type="number" min="1" max="365" step="1" value="1" inputmode="numeric" />
+                      <span>天</span>
+                    </span>
+                  </label>
+                  <span class="duration-separator" aria-hidden="true">至</span>
+                  <label class="duration-bound">
+                    <span>最长</span>
+                    <span class="unit-input">
+                      <input id="max-market-duration" type="number" min="1" max="365" step="1" value="30" inputmode="numeric" />
+                      <span>天</span>
+                    </span>
+                  </label>
+                </div>
+              </div>
+              <div class="range-field">
+                <div class="range-heading">
+                  <span>最低买卖盘比例</span>
+                  <strong>≥<span id="bid-ask-ratio-value">50</span>%</strong>
+                </div>
+                <input
+                  id="bid-ask-ratio"
+                  type="range"
+                  min="1"
+                  max="100"
+                  step="1"
+                  value="50"
+                  aria-label="最低买卖盘比例"
+                  aria-valuetext="至少50%"
+                />
+              </div>
+              <div class="range-field">
+                <div class="range-heading">
+                  <span>生命周期进度</span>
+                  <strong>≤<span id="market-progress-value">20</span>%</strong>
+                </div>
+                <input
+                  id="market-progress-filter"
+                  type="range"
+                  min="1"
+                  max="100"
+                  step="1"
+                  value="20"
+                  aria-label="允许买入的最大生命周期进度"
+                  aria-valuetext="不超过20%"
+                />
+              </div>
+            </div>
+
+            <div class="test-settings config-block">
+              <div class="subsection-heading">
+                <span id="settings-mode">TEST 设置</span>
+                <small>仅影响模拟账户</small>
+              </div>
+              <div class="money-fields">
+                <label class="field">
+                  <span id="capital-label">总模拟资金</span>
+                  <span class="unit-input">
+                    <input id="initial-capital" type="number" min="0.01" step="0.01" inputmode="decimal" />
+                    <span>U</span>
+                  </span>
+                </label>
+                <label class="field">
+                  <span>每 Event 每轮金额</span>
+                  <span class="unit-input">
+                    <input id="order-amount" type="number" min="0.01" step="0.01" inputmode="decimal" />
+                    <span>U</span>
+                  </span>
+                </label>
+              </div>
+              <p class="field-note">首次成交时冻结为该 Event 本轮的累计现金投入上限；买入费用从实际获得份额中扣除。</p>
+              <div class="stop-loss-settings">
+                <label class="stop-loss-toggle">
+                  <input id="stop-loss-enabled" type="checkbox" />
+                  <span>启用主动止损</span>
+                </label>
+                <label class="field stop-loss-multiplier-field">
+                  <span>买入均价倍数</span>
+                  <span class="unit-input multiplier-input">
+                    <input
+                      id="stop-loss-multiplier"
+                      type="number"
+                      min="0.000001"
+                      max="0.999999"
+                      step="any"
+                      inputmode="decimal"
+                      required
+                      aria-label="主动止损的买入均价倍数"
+                    />
+                    <span>×</span>
+                  </span>
+                </label>
+              </div>
+              <p class="field-note">默认 0.40×；新鲜可成交买盘连续约 30 秒低于止损线后主动退出。只影响后续新周期。</p>
+              <button id="reset-test" class="button danger" type="button">重置TEST</button>
+            </div>
+          </div>
+
+          <div class="config-actions">
+            <button id="save-config" class="button primary save-config" type="submit">保存配置</button>
+          </div>
+        </form>
+      </section>
+
+      <p id="cash-note" class="inline-note" aria-live="polite"></p>
+      <p id="redemption-status" class="inline-note"></p>
+      <section id="portfolio" class="portfolio" aria-label="资金与持仓">
+        <article><span>总资金</span><strong id="total-funds">—</strong></article>
+        <article><span>已实现</span><strong id="realized-pnl">—</strong></article>
+        <article><span>未实现</span><strong id="unrealized-pnl">—</strong></article>
+        <article><span>持仓价值</span><strong id="position-value">—</strong></article>
+        <article><span>单数</span><strong id="portfolio-position-count">—</strong></article>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading">
+          <div>
+            <span class="eyebrow">PORTFOLIO</span>
+            <h2>当前持仓</h2>
+          </div>
+          <span id="position-count" class="count">0个</span>
+        </div>
+        <div id="positions" class="position-list" aria-live="polite"></div>
+        <div id="position-list-controls" class="load-more position-list-controls" hidden>
+          <button id="toggle-positions" class="button secondary compact-button" type="button">展开其余持仓</button>
+          <span id="position-display-count" class="count">当前显示0 / 0</span>
+        </div>
+      </section>
+
+      <section id="trade-records-panel" class="panel trade-records-panel" aria-label="交易记录">
+        <button
+          id="trade-records-toggle"
+          class="trade-records-toggle"
+          type="button"
+          aria-expanded="false"
+          aria-controls="trade-records-content"
+          aria-label="展开交易记录"
+        >
+          <span class="trade-records-heading">
+            <span class="eyebrow">ACTIVITY</span>
+            <span class="trade-records-title">交易记录</span>
+          </span>
+          <span class="trade-records-toggle-state">
+            <span id="trade-records-count" class="count">展开</span>
+            <strong aria-hidden="true">⌄</strong>
+          </span>
+        </button>
+        <div id="trade-records-content" hidden>
+          <div id="trade-records" class="trade-record-list" aria-live="polite"></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading scan-heading">
+          <div class="scan-title">
+            <span class="eyebrow">DISCOVERY</span>
+            <div class="heading-line">
+              <h2>扫描事件</h2>
+              <span id="candidate-count" class="count">0个</span>
+            </div>
+            <span id="scan-refresh-state" class="scan-state" role="status" aria-live="polite">等待首次扫描</span>
+          </div>
+          <button
+            id="sort-toggle"
+            class="sort-toggle"
+            type="button"
+            data-sort-toggle
+            aria-label="当前按市场进度正序，点击切换为倒序"
+          ><strong aria-hidden="true">↑</strong></button>
+        </div>
+
+        <div id="candidates" class="market-list" aria-live="polite"></div>
+
+        <div class="load-more">
+          <button id="load-more" class="button secondary" type="button">再显示20个</button>
+          <span id="display-count" class="count">当前显示0 / 0</span>
+        </div>
+      </section>
+
+      <p id="message" role="status" aria-live="polite"></p>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

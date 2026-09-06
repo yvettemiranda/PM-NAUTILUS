@@ -1,0 +1,13 @@
+.git
+.reference
+.venv
+runtime
+.env
+.env.*
+*.sqlite*
+*.key
+*.pem
+__pycache__
+.pytest_cache
+.ruff_cache
+artifacts

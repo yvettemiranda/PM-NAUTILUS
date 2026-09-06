@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pm-nautilus"
+version = "0.1.0"
+description = "PM-SMALL rules on NautilusTrader with isolated TEST and LIVE execution"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "nautilus_trader==1.231.0",
+  "py-clob-client-v2==1.0.1",
+  "fastapi==0.116.1",
+  "uvicorn==0.35.0",
+  "httpx==0.28.1",
+  "websockets==15.0.1",
+  "web3==7.13.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==8.4.2", "ruff==0.13.0"]
+
+[project.scripts]
+pm-nautilus = "pm_nautilus.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pm_nautilus"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

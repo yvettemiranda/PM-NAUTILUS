@@ -1,0 +1,27 @@
+services:
+  app:
+    build:
+      context: .
+      target: base
+      args:
+        GIT_REVISION: ${PM_GIT_REVISION:?Set the exact git commit}
+    image: pm-nautilus:${PM_GIT_REVISION}
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 45s
+    ports:
+      - "127.0.0.1:${PM_PORT:-8765}:8765"
+    environment:
+      PM_UI_PASSWORD: ${PM_UI_PASSWORD:?Set a UI password of at least 16 characters}
+      PM_ALLOWED_HOSTS: ${PM_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      PM_LIVE_ENABLED: "false"
+      PM_DATA_DIR: /data
+    volumes:
+      - ./runtime/server:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

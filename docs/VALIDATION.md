@@ -16,7 +16,7 @@
 | 前端 | Node `--check src/pm_nautilus/web/app.js` 通过；无单独前端编译步骤，原生静态HTML/CSS/JS由FastAPI提供 |
 | 公开行情到模拟成交 | 实际 Gamma/WS：采样100个公开Event，选10个完整Event、108个合格Token；10个READY，14笔原生模拟Fill，10个持仓，现金4.37U；同库重启现金4.37U，数量/预算/目标/现金核对通过，结束PAUSED。日志 `.reference/public-smoke.log`，重跑 `scripts/public_smoke.py` |
 | Linux | Linux aarch64 / Debian bookworm / Python3.12.14：最终代码 e91563f5723609f126ed540d9bd3d3d36f795de6 镜像68项通过（2.84秒），生产base镜像启动成功；`.reference/linux-verified-68.log` |
-| GitHub/自有服务器 | 未上传、未部署。账户已核对，但首次上传目标及服务器地址/SSH用户/目录仍缺；CI文件已准备，未宣称远端CI通过 |
+| GitHub/自有服务器 | 2026-09-07 已创建公开仓库并推送 main；双架构CI通过，详情见下节。服务器由用户明确推迟至重装电脑后，尚未部署 |
 
 公开行情短测使用独立临时目录、100U初始资金，每轮10U、进度100%、最长365天、比例1%、全部市场类型的明确开发设置，便于在有限时间内产生可验证成交。这不是产品默认配置，也不是正式长期TEST；生产发现仍为全部分页，无10个Event/108Token上限。此前默认设置的短测只有真实盘口、没有成交，不计为成交端到端成功。
 
@@ -44,7 +44,7 @@
 
 ## 剩余真实环境验收
 
-实际钱包类型/签名及资金账户、CLOB权限/授权、POL余额、RPC、标准及neg-risk真实链上交易、真实服务器架构/HTTPS入口、远端CI均未实际验收。现有代码仅支持EOA和单所有者Safe；其他钱包不能冒充已支持。缺这些条件不影响本地源码、部署配置和可控验证交付。
+实际钱包类型/签名及资金账户、CLOB权限/授权、POL余额、RPC、标准及neg-risk真实链上交易、真实服务器架构/HTTPS入口均未实际验收。现有代码仅支持EOA和单所有者Safe；其他钱包不能冒充已支持。缺这些条件不影响本地源码、部署配置和可控验证交付。
 
 依赖目前产生2项弃用警告（Starlette/AnyIO别名、websockets legacy）；不影响本次通过结果，固定依赖升级时复核，不在迁移中随意换版本。
 
@@ -52,4 +52,19 @@
 
 使用真实Docker、非root UID10001、只读rootfs、临时/tmp、全部capability删除、no-new-privileges及独立持久卷。启动检查版本SHA与代码一致、健康ok、TEST/PAUSED/LIVE=false；未认证dashboard返回401，认证后HTML/JS/API可读。首次保存每轮2U，再restart同一容器同一数据卷，仍读取2U、现金100U、相同generation、LIVE独立1U，最后恢复TEST默认1U，未START。证据 `.reference/container-first.json`、`.reference/container-restart.json`。
 
-Compose在缺PM_GIT_REVISION时明确拒绝，补完整SHA后config --quiet通过。Linux x86_64仅有CI矩阵配置，尚未实际运行，不冒称双架构均实测。该临时Linux环境不等于已部署用户自有服务器。
+Compose在缺PM_GIT_REVISION时明确拒绝，补完整SHA后config --quiet通过。2026-09-07 又通过 GitHub Actions 实测 Linux x86_64 与 ARM64，见下节。该临时Linux环境不等于已部署用户自有服务器。
+
+
+## 2026-09-07 公开发布与恢复验证
+
+用户明确授权公开上传、服务器延后。仓库为 [yvettemiranda/PM-NAUTILUS](https://github.com/yvettemiranda/PM-NAUTILUS)，默认分支 main。首次发布提交 `f39c3de95de6a514c3e0555e1774ccd789cb0a73` 的 [GitHub Actions run 34071046061](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/34071046061) 全部通过：
+
+- Ubuntu 24.04 x86_64：宿主68测试通过（7.22秒），Docker verify内68测试通过（6.20秒）。
+- Ubuntu 24.04 ARM64：宿主68测试通过（6.87秒），Docker verify内68测试通过（5.49秒）。
+- 两组均通过 Ruff、格式及 Node 语法检查；均有相同2项依赖弃用警告。
+
+公开范围检查覆盖首次发布前 main 历史74个唯一blob：禁止路径和常见私钥/token模式扫描无告警。只推送 main，不上传 `.reference/`、runtime、实际环境文件、凭据或本机其他Git引用。该检查不声称能识别任意形式的秘密。
+
+恢复演练发现 uv 0.8.22 的内置Python下载目录没有3.12.14；已在 REINSTALL.md 改为先用 uv 0.12.10 下载Python，再用锁定的 uv 0.8.22 安装项目依赖。新下载的 Python 3.12.14 已实测安装成功，不依赖旧 Codex 内置 Python 路径。
+
+干净恢复验证：从实际 GitHub 公开 URL 克隆到新目录，使用独立下载的 Python3.12.14 和新 `.venv`，uv0.8.22按锁文件安装75个包；Ruff check/format通过，68测试通过（首次冷启动82.46秒，2警告），JS语法检查通过。未复制旧虚拟环境或参考源码。首次服务探测20秒超时，等待首次依赖加载后健康成功；未绕过系统安全检查。离线服务实测 `status=ok, mode=TEST, strategyStatus=PAUSED, liveExecutionEnabled=false`，首页及app.js均HTTP200，随后停止临时服务。此验证恢复的是开发环境，不是运行账本或真实钱包。

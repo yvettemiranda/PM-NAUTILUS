@@ -4,11 +4,10 @@
 
 ## 1. Mac 本地开发
 
-要求 macOS 26+ arm64（所选 Nautilus wheel 的最低要求）、Python 3.12.14。其他 Mac 版本使用本地 Linux 容器。当前工作区 `.venv` 已安装，通常直接运行：
+要求 macOS 26+ arm64（所选 Nautilus wheel 的最低要求）、Python 3.12.14。其他 Mac 版本使用本地 Linux 容器。电脑重装请先按 [恢复指南](REINSTALL.md) 下载 Python 并安装锁定依赖；在克隆目录运行：
 
 ```sh
-cd /Users/d4clt/PM-NAUTILUS
-.venv/bin/pm-nautilus --data-dir runtime/local
+uv run --frozen pm-nautilus --data-dir runtime/local
 ```
 
 浏览器打开 http://127.0.0.1:8765 。程序每次启动均为 PAUSED；自动连接的是公开行情，已有本程序持仓的退出/结算继续处理。新目录最初余额 100U、每轮 1U。不要让两台进程使用同一个 SQLite 文件。

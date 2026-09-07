@@ -18,6 +18,8 @@
 - 浏览器实测320px配置/持仓页无横向溢出、桌面布局、草稿保存、START/PAUSE、LIVE余额只读与模式配置隔离、21项展开和排序、记录读取。临时视口已恢复。
 - Dockerfile、Compose、CI、环境样例、Nginx样例、未来LIVE覆盖样例、许可证、Mac/上传/部署/备份/更新/回滚手册齐备。
 
+- 2026-09-07 从实际公开仓库克隆至新目录，独立下载Python3.12.14并重建虚拟环境；68测试、Ruff和JS语法检查通过。离线服务健康为TEST/PAUSED/LIVE=false，HTML/JS可读，验证后停止。详见docs/VALIDATION.md与REINSTALL.md。
+
 ## 交付与继续入口
 - README.md：启动入口；docs/DEPLOY.md：完整操作步骤；docs/VALIDATION.md：结果、覆盖与未验收部分。
 - artifacts/FULL_SOURCE.md：所有受控文本文件完整内容（含锁文件，无省略）；SOURCE_MANIFEST.json逐文件SHA256及最终提交。
@@ -25,8 +27,8 @@
 - .reference/下保存原项目、公开短测、缺陷复现及Linux证据，不入Git。runtime/ui-preview、runtime/ui-acceptance为开发样本，不作为正式账本。
 - 临时UI服务已在确认PAUSED后SIGTERM停止；Linux验收容器已healthy验证后停止，临时Lima pm-verify已确认停止，保留镜像/卷供复验，不作为生产服务。
 
-## 实际外部缺项
-1. 2026-09-07 用户明确授权新建公开仓库 yvettemiranda/PM-NAUTILUS 并上传，覆盖原指令的拟定私有安排。账户与仓库名已核对，正在完成上传和干净克隆验证；不再询问首次上传授权。恢复指南见 docs/REINSTALL.md。
+## 发布状态与后续外部事项
+1. 2026-09-07 用户明确授权新建公开仓库 yvettemiranda/PM-NAUTILUS 并上传，覆盖原指令的拟定私有安排。公开仓库已创建并推送完整 main 历史：https://github.com/yvettemiranda/PM-NAUTILUS 。GitHub Actions run 34071046061 在 Linux x86_64 与 ARM64 均通过68测试、前端语法检查及Docker verify构建。恢复指南见 docs/REINSTALL.md，不再询问首次上传授权。
 2. 用户明确要求电脑重装后再部署；本轮不部署服务器。尚缺自有服务器地址、SSH用户、新应用目录和公网入口切换要求。未部署任何自有服务器，也未停止/更改旧项目或旧服务。
 3. 实际LIVE钱包类型、服务器本地凭据、RPC、授权及资金未提供；当前代码支持EOA和单所有者Safe，其他类型须补对应路径。真实钱包/链上验收另行明确授权，不把可控测试当真实成功。
 4. ~/.codex/templates/agent_memory/仍不存在。按用户AGENTS要求不能伪造模板结构，因此只建立agent_memory/archive/，暂由本文件承载当前上下文/进度/风险。模板提供后原样建立三个.md再填当前事实。

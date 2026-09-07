@@ -21,23 +21,27 @@ git log -5 --oneline
 
 原生 Mac 环境要求 macOS 26+ arm64；项目固定 Python 3.12.14、uv 0.8.22 和 NautilusTrader 1.231.0。不兼容的 Mac 使用仓库 Linux 容器，参见 DEPLOY.md，不要复制旧 `.venv`。
 
-依照 [uv 官方安装说明](https://docs.astral.sh/uv/getting-started/installation/) 安装固定版本，然后重新打开终端：
+依照 [uv 官方安装说明](https://docs.astral.sh/uv/getting-started/installation/) 先安装下载工具 uv 0.12.10，然后重新打开终端。旧版 uv 0.8.22 的内置目录没有 Python 3.12.14，不能直接用它下载该 Python：
 
 ```sh
-curl -LsSf https://astral.sh/uv/0.8.22/install.sh | sh
+curl -LsSf https://astral.sh/uv/0.12.10/install.sh | sh
 ```
 
 回到克隆目录执行：
 
 ```sh
-uv --version
 uv python install 3.12.14
+# Python 下载完成后，把依赖管理工具恢复为项目验证过的版本：
+curl -LsSf https://astral.sh/uv/0.8.22/install.sh | sh
+uv --version  # 应为 0.8.22
 uv sync --frozen --extra dev
 uv run --frozen ruff check src tests scripts
 uv run --frozen ruff format --check src tests scripts
 uv run --frozen pytest -q
 uv run --frozen pm-nautilus --offline --data-dir runtime/reinstall-check
 ```
+
+首次下载的原生依赖加载可能较慢，本次首次测试约82秒；保持终端开启，等待服务显示启动完成，不要仅因20秒未响应就判定失败。
 
 打开 http://127.0.0.1:8765 查看页面。首次使用新目录应为 TEST + PAUSED、100U、每轮1U，LIVE未启用。离线预览没有实时行情；检查完用 Ctrl+C 停止。准备连接公开行情时使用 `uv run --frozen pm-nautilus --data-dir runtime/local`，启动仍为 PAUSED，不自动开始正式长期测试。
 

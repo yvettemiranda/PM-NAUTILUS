@@ -35,6 +35,18 @@ def event(i=1):
     }
 
 
+def category_response(req):
+    if req.url.path == "/tags/102982/related-tags/tags":
+        assert req.url.params["status"] == "active"
+        assert req.url.params["omit_empty"] == "true"
+        return httpx.Response(200, json=[{"id": "21", "slug": "crypto", "label": "Crypto"}])
+    if req.url.path == "/tags/slug/esports":
+        return httpx.Response(200, json={"id": "64", "slug": "esports", "label": "Esports"})
+    if req.url.path == "/tags/slug/art":
+        return httpx.Response(200, json={"id": "1422", "slug": "art", "label": "Art"})
+    return None
+
+
 def test_metadata_complete_n_and_final_resolution():
     e = event()
     assert len(normalize(e)) == 2
@@ -61,27 +73,70 @@ def test_metadata_complete_n_and_final_resolution():
 
 def test_full_pagination_without_hidden_limit(tmp_path):
     r, _, _ = setup(tmp_path)
-    requests = []
+    cursors = []
 
     def handler(req):
-        if "/tags/" in str(req.url):
-            return httpx.Response(
-                200,
-                json=[]
-                if "filtered" in str(req.url)
-                else {"id": "64", "slug": "esports", "label": "Esports"},
-            )
-        offset = int(req.url.params["offset"])
-        requests.append(offset)
+        response = category_response(req)
+        if response is not None:
+            return response
+        assert req.url.path == "/events/keyset"
+        assert req.url.params["active"] == "true"
+        assert req.url.params["closed"] == "false"
+        assert req.url.params["limit"] == "100"
+        assert "offset" not in req.url.params
+        cursor = req.url.params.get("after_cursor")
+        cursors.append(cursor)
+        page = {
+            None: (0, "cursor-100"),
+            "cursor-100": (100, "cursor-200"),
+            "cursor-200": (200, "cursor-300"),
+            "cursor-300": (300, None),
+        }
+        offset, next_cursor = page[cursor]
         count = 100 if offset < 300 else 3
-        return httpx.Response(200, json=[event(i + offset) for i in range(count)])
+        return httpx.Response(
+            200,
+            json={"events": [event(i + offset) for i in range(count)], "next_cursor": next_cursor},
+        )
+
+    async def run():
+        s = MarketService(r, httpx.MockTransport(handler))
+        s.sync_subscriptions = lambda: asyncio.sleep(0)
+        s.scan_status["categoryError"] = "HTTPStatusError"
+        await s.scan()
+        assert not s.scan_status.get("lastError")
+        assert not s.scan_status.get("categoryError")
+        assert cursors == [None, "cursor-100", "cursor-200", "cursor-300"]
+        assert s.categories == [
+            {"id": "21", "label": "Crypto"},
+            {"id": "64", "label": "Esports"},
+            {"id": "1422", "label": "Art"},
+        ]
+        await s.close()
+
+    asyncio.run(run())
+    r.close()
+
+
+def test_keyset_cursor_must_advance(tmp_path):
+    r, _, _ = setup(tmp_path)
+
+    def handler(req):
+        response = category_response(req)
+        if response is not None:
+            return response
+        cursor = req.url.params.get("after_cursor")
+        offset = 0 if cursor is None else 100
+        return httpx.Response(
+            200,
+            json={"events": [event(i + offset) for i in range(100)], "next_cursor": "stuck"},
+        )
 
     async def run():
         s = MarketService(r, httpx.MockTransport(handler))
         s.sync_subscriptions = lambda: asyncio.sleep(0)
         await s.scan()
-        assert not s.scan_status.get("lastError")
-        assert requests == [0, 100, 200, 300]
+        assert s.scan_status["lastError"] == "ValueError: 公开 Event keyset 游标没有前进"
         await s.close()
 
     asyncio.run(run())

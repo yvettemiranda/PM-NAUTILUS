@@ -34,7 +34,7 @@ async def run():
         )
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.get(
-                f"{GAMMA}/events",
+                f"{GAMMA}/events/keyset",
                 params={
                     "active": "true",
                     "closed": "false",
@@ -44,7 +44,10 @@ async def run():
                 },
             )
             response.raise_for_status()
-            events = response.json()
+            payload = response.json()
+            if not isinstance(payload, dict) or not isinstance(payload.get("events"), list):
+                raise ValueError("公开 Event keyset 响应格式变化")
+            events = payload["events"]
         selected = []
         for event in events:
             tokens = normalize(event)

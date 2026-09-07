@@ -16,7 +16,7 @@ from .rules import Token, Fees
 
 GAMMA = "https://gamma-api.polymarket.com"
 WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-TAGS = "https://polymarket.com/api/tags/filtered?tag=102982&status=active"
+TAGS = f"{GAMMA}/tags/102982/related-tags/tags"
 
 
 def timestamp(value):
@@ -150,12 +150,14 @@ class MarketService:
         return response.json()
 
     async def categories_refresh(self):
-        tags = await self.get(TAGS)
-        if not isinstance(tags, list):
+        tags = await self.get(TAGS, status="active", omit_empty="true")
+        if not isinstance(tags, list) or not all(isinstance(tag, dict) for tag in tags):
             raise ValueError("首页栏目响应格式变化")
         tags = [t for t in tags if t.get("slug") not in {"all", "perps", "art"}]
         for slug in ("esports", "art"):
             tag = await self.get(f"{GAMMA}/tags/slug/{slug}", include_template="false")
+            if not isinstance(tag, dict):
+                raise ValueError("首页栏目标签响应格式变化")
             if not any(str(t.get("id")) == str(tag.get("id")) for t in tags):
                 if slug == "esports":
                     idx = next(
@@ -172,21 +174,28 @@ class MarketService:
         self.scan_status.update(scanning=True, lastError=None)
         tokens = {}
         seen = set()
-        offset = 0
+        after_cursor = None
+        cursors = set()
         try:
             try:
                 await self.categories_refresh()
-            except (httpx.HTTPError, ValueError, KeyError) as exc:
+                self.scan_status.pop("categoryError", None)
+            except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
                 self.scan_status["categoryError"] = type(exc).__name__
             while not self.closed:
-                page = await self.get(
-                    f"{GAMMA}/events",
-                    closed="false",
-                    limit=100,
-                    offset=offset,
-                    order="id",
-                    ascending="true",
-                )
+                params = {
+                    "active": "true",
+                    "closed": "false",
+                    "limit": 100,
+                    "order": "id",
+                    "ascending": "true",
+                }
+                if after_cursor:
+                    params["after_cursor"] = after_cursor
+                payload = await self.get(f"{GAMMA}/events/keyset", **params)
+                if not isinstance(payload, dict):
+                    raise ValueError("公开 Event keyset 分页格式变化")
+                page = payload.get("events")
                 if not isinstance(page, list):
                     raise ValueError("公开 Event 分页格式变化")
                 if not page:
@@ -198,10 +207,14 @@ class MarketService:
                 for event in page:
                     for t in normalize(event):
                         tokens[t.token_id] = t
-                offset += len(page)
                 self.scan_status["eventCountScanned"] = len(seen)
-                if len(page) < 100:
+                cursor = payload.get("next_cursor")
+                if cursor is None:
                     break
+                if not isinstance(cursor, str) or not cursor or cursor in cursors:
+                    raise ValueError("公开 Event keyset 游标没有前进")
+                cursors.add(cursor)
+                after_cursor = cursor
             if self.closed:
                 return
             # Commit discovery only after all pages succeed. Missing old tokens remain

@@ -20,6 +20,19 @@
 
 - 2026-09-07 从实际公开仓库克隆至新目录，独立下载Python3.12.14并重建虚拟环境；68测试、Ruff和JS语法检查通过。离线服务健康为TEST/PAUSED/LIVE=false，HTML/JS可读，验证后停止。详见docs/VALIDATION.md与REINSTALL.md。
 
+## 本次恢复核验（2026-09-07）
+- 在 `/Users/d4clt/Documents/Codex/2026-09-07/zhe/PM-NAUTILUS` 完成真实 Git 克隆；`origin` 为 `https://github.com/yvettemiranda/PM-NAUTILUS.git`，本地 `main`、`HEAD` 与远端 `main` 均为 `cf910d25aedb380ab88e45a104ed057a525d715d`。克隆后工作树干净，`git fsck --no-dangling` 通过；随后仅维护本文件，未提交或推送。
+- 本机为 macOS 26.6.2 arm64，已安装 Apple Command Line Tools 26.6（Git 2.50.1）；按 REINSTALL 使用 Python 3.12.14、uv 0.8.22 和 `uv sync --frozen --extra dev` 重建 `.venv`（75 个锁定包）。Ruff check/format 通过；当前真实工作树 `pytest -q` 为 68 项通过、2 项既有依赖弃用警告（1.77 秒）。已使用校验过的 Node 24.20.0 执行 `node --check src/pm_nautilus/web/app.js`，通过。
+- 显式 `PM_LIVE_ENABLED=false` 的离线服务验收返回 `mode=TEST`、`strategyStatus=PAUSED`、`liveExecutionEnabled=false`、100U/每轮1U，首页和 API 可读后已 SIGINT 停止。本机没有 `.env`、真实凭据或 LIVE 启用；未进行真实签名/下单/approve/redeem/链上写入。
+- 随后在用户确认的独立 Ubuntu 24.04 amd64 服务器上，以固定 SHA `cf910d25aedb380ab88e45a104ed057a525d715d` 部署主 Compose。服务器 `.env` 为本机生成、`0600` 保护且不记录密码；容器只监听 `127.0.0.1:8765`，Nginx 仅通过 HTTPS 反代，HTTP 不承载应用而是跳转 HTTPS（ACME 验证路径除外）。保留服务器本地 `compose.override.yaml`：它仅信任回环和 Docker 网桥的转发来源，使 HTTPS 控制请求保留正确协议；已用不启用 LIVE 的 POST 验收 CSRF/Origin 路径返回预期 400。无邮箱签发的短期 IP 证书及 Certbot 定时续期/成功后重载 Nginx 均已配置并演练通过。三地独立公网 HTTPS 探测均为 200；服务器健康检查、Basic 认证页面和容器重启后均确认 `TEST`、`PAUSED`、`liveExecutionEnabled=false`。未启用 LIVE，未接触钱包或链上写入。地址、密码、证书序列号等敏感运行细节不写入交接文件。
+
+## 扫描与分类线上修复（2026-09-07）
+- 用户页面的“扫描失败”不是网络或筛选规则问题：旧 Gamma `GET /events` 的 offset 分页在 `offset=2100` 必定返回 HTTP 422。扫描循环因此在第 22 页中断，保留旧结果；首页分类也仍依赖主站的 filtered tags 路径。
+- 本地提交 `ce96a05bc6ddbaabd6f902f232bcc118bf8326fe` 将正式扫描改为官方 Gamma `/events/keyset` 的不透明 cursor 分页，校验 wrapper、事件前进和 cursor 前进；分类改为 Gamma related-tags 接口（`status=active`、`omit_empty=true`），并在成功同步后清除过期 `categoryError`。公开行情短测也同步迁移至 keyset。
+- 回归结果：Ruff check/format、前端 JS 语法检查均通过，`pytest -q` 为 69 通过（2 个既有第三方弃用警告）。真实公开行情短测抽取 100 个事件、选中 10 个、监控 20 个 Token，模拟成交及重启核对均通过，结束后仍为 TEST + PAUSED，私有连接数为 0。
+- 本机没有 GitHub HTTPS 推送凭据，因此该提交尚未推送至 `origin`（公开远端仍在 `cf910d25aedb380ab88e45a104ed057a525d715d`）。已将经过本地校验的精确 Git bundle 导入服务器，并将服务器检出、镜像标签和 `PM_GIT_REVISION` 都固定为 `ce96a05bc6ddbaabd6f902f232bcc118bf8326fe`；服务器的 `compose.override.yaml` 保持未改。以后取得该仓库的授权推送凭据后，先核对远端是否快进，再推送这两个本地提交，绝不强推。
+- 部署后容器 healthy；实际首次扫描完成且 `lastError=null`、`categoryError=null`、14 个分类、10,922 个监控 Token、46 个可交易事件。Chrome 页面已实测显示“扫描完成”、候选市场列表、14 个市场类别及其下方筛选项。带有效认证、CSRF 和同源头的 `POST /api/live/start` 明确返回 400 “LIVE尚未在服务器配置并明确启用”，因此没有启动 TEST 或 LIVE，亦未触碰钱包、签名、下单、approve、redeem 或链上写入。
+
 ## 交付与继续入口
 - README.md：启动入口；docs/DEPLOY.md：完整操作步骤；docs/VALIDATION.md：结果、覆盖与未验收部分。
 - artifacts/FULL_SOURCE.md：所有受控文本文件完整内容（含锁文件，无省略）；SOURCE_MANIFEST.json逐文件SHA256及最终提交。
@@ -29,7 +42,7 @@
 
 ## 发布状态与后续外部事项
 1. 2026-09-07 用户明确授权新建公开仓库 yvettemiranda/PM-NAUTILUS 并上传，覆盖原指令的拟定私有安排。公开仓库已创建并推送完整 main 历史：https://github.com/yvettemiranda/PM-NAUTILUS 。GitHub Actions run 34071046061 在 Linux x86_64 与 ARM64 均通过68测试、前端语法检查及Docker verify构建。恢复指南见 docs/REINSTALL.md，不再询问首次上传授权。
-2. 用户明确要求电脑重装后再部署；本轮不部署服务器。尚缺自有服务器地址、SSH用户、新应用目录和公网入口切换要求。未部署任何自有服务器，也未停止/更改旧项目或旧服务。
+2. 2026-09-07 用户提供并确认独立服务器后，已完成固定 SHA 的 TEST 部署；公网入口为 HTTPS IP 反代，应用内部端口未公开，HTTP 不承载 Basic 认证。服务器本地 `compose.override.yaml` 是 HTTPS POST 的必要信任边界，更新时保留并用禁用 LIVE 的 POST 复验 CSRF/Origin。IP 证书为约六天的短期证书，Certbot 定时续期和 Nginx 重载钩子已通过 dry-run 演练。继续维护时先核对 `certbot renew` 定时服务、Nginx 和 Compose 健康；不得改为明文 HTTP 或启用 LIVE。未停止/更改任何旧项目或旧服务。
 3. 实际LIVE钱包类型、服务器本地凭据、RPC、授权及资金未提供；当前代码支持EOA和单所有者Safe，其他类型须补对应路径。真实钱包/链上验收另行明确授权，不把可控测试当真实成功。
 4. ~/.codex/templates/agent_memory/仍不存在。按用户AGENTS要求不能伪造模板结构，因此只建立agent_memory/archive/，暂由本文件承载当前上下文/进度/风险。模板提供后原样建立三个.md再填当前事实。
 

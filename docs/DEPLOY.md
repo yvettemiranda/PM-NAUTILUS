@@ -28,24 +28,17 @@ python3.12 -m venv .venv
 
 ## 2. GitHub 首次上传
 
-2026-09-06 已只读核对登录账户 `yvettemiranda`。拟定私有仓库 `yvettemiranda/PM-NAUTILUS` 查询不到。根指令将其定义为拟定目标，尚缺首次上传目标确认；本次没有创建仓库、添加远端或推送。
-
-目标确认后执行以下步骤。若同名仓库已经存在，先检查内容，不强推：
+2026-09-07 用户明确授权公开仓库 `yvettemiranda/PM-NAUTILUS`，覆盖原始指令的拟定私有安排。重装恢复见 [REINSTALL.md](REINSTALL.md)。首次创建由本轮执行；后续克隆已有仓库，不重复创建、不强推。
 
 ```sh
-cd /Users/d4clt/PM-NAUTILUS
+git remote -v
 git status --short
-gh auth status
-gh repo view yvettemiranda/PM-NAUTILUS
-# 仅在确认目标且仓库确实不存在后：
-gh repo create yvettemiranda/PM-NAUTILUS --private --source=. --remote=origin --push
-# 已有正确、兼容的远端则普通推送：
 git push -u origin main
 git rev-parse HEAD
 git ls-remote origin refs/heads/main
 ```
 
-上传前检查 `git ls-files`，不得包含 `.env`、凭据 JSON、runtime、私钥、RPC 密钥或 `.reference`。CI 只进行无凭据测试；不部署、不启动 LIVE。
+推送前检查 `git ls-files`，不得包含 `.env`、凭据 JSON、runtime、私钥、RPC 密钥或 `.reference`。CI只进行无凭据测试，不部署、不启动LIVE。用户明确推迟服务器部署到重装后，以下章节是后续操作手册，不是本轮已部署的声明。
 
 ## 3. 新 Linux 服务器目录
 
@@ -54,7 +47,7 @@ git ls-remote origin refs/heads/main
 支持 Linux x86_64 或 aarch64，使用本仓库 Debian bookworm 容器（glibc 2.36）。推荐独立目录 `/opt/pm-nautilus`，该目录仅为示例，须按实际目标选择。不要覆盖现有目录或停止无关服务。
 
 ```sh
-# 在已授权服务器，使用确认的新目录和有权拉取私有仓库的账户：
+# 在已授权服务器，使用确认的新目录：
 git clone https://github.com/yvettemiranda/PM-NAUTILUS.git /opt/pm-nautilus
 cd /opt/pm-nautilus
 git checkout --detach <已验证的完整提交SHA>

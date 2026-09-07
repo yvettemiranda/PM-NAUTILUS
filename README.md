@@ -6,13 +6,14 @@ PM-SMALL 完整业务规则迁移到 NautilusTrader 1.231.0，保留原手机/�
 **默认 TEST + PAUSED，LIVE 未启用。** 启动服务只连接公开行情；START 才允许新买。
 PAUSE 后已有仓位的目标卖出、止损与结算继续。正式长期 TEST 不自动启动。
 
+**电脑重装后请从 [恢复开发与接手指南](docs/REINSTALL.md) 开始。**
+
 ## 本地启动
 
-当前 Mac 工作区已安装 `.venv`：
+先按恢复指南安装锁定依赖，在克隆目录执行：
 
 ```sh
-cd /Users/d4clt/PM-NAUTILUS
-.venv/bin/pm-nautilus --data-dir runtime/local
+uv run --frozen pm-nautilus --data-dir runtime/local
 ```
 
 打开 [本地页面](http://127.0.0.1:8765)。新账本为100U、每 Event 每轮1U。

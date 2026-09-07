@@ -30,7 +30,7 @@
 - 用户页面的“扫描失败”不是网络或筛选规则问题：旧 Gamma `GET /events` 的 offset 分页在 `offset=2100` 必定返回 HTTP 422。扫描循环因此在第 22 页中断，保留旧结果；首页分类也仍依赖主站的 filtered tags 路径。
 - 本地提交 `ce96a05bc6ddbaabd6f902f232bcc118bf8326fe` 将正式扫描改为官方 Gamma `/events/keyset` 的不透明 cursor 分页，校验 wrapper、事件前进和 cursor 前进；分类改为 Gamma related-tags 接口（`status=active`、`omit_empty=true`），并在成功同步后清除过期 `categoryError`。公开行情短测也同步迁移至 keyset。
 - 回归结果：Ruff check/format、前端 JS 语法检查均通过，`pytest -q` 为 69 通过（2 个既有第三方弃用警告）。真实公开行情短测抽取 100 个事件、选中 10 个、监控 20 个 Token，模拟成交及重启核对均通过，结束后仍为 TEST + PAUSED，私有连接数为 0。
-- 本机没有 GitHub HTTPS 推送凭据，因此该提交尚未推送至 `origin`（公开远端仍在 `cf910d25aedb380ab88e45a104ed057a525d715d`）。已将经过本地校验的精确 Git bundle 导入服务器，并将服务器检出、镜像标签和 `PM_GIT_REVISION` 都固定为 `ce96a05bc6ddbaabd6f902f232bcc118bf8326fe`；服务器的 `compose.override.yaml` 保持未改。以后取得该仓库的授权推送凭据后，先核对远端是否快进，再推送这两个本地提交，绝不强推。
+- 本机没有 GitHub HTTPS 推送凭据，因此该提交尚未推送至 `origin`（公开远端仍在 `cf910d25aedb380ab88e45a104ed057a525d715d`）。已将经过本地校验的精确 Git bundle 导入服务器，并将服务器检出、镜像标签和 `PM_GIT_REVISION` 都固定为 `ce96a05bc6ddbaabd6f902f232bcc118bf8326fe`；服务器的 `compose.override.yaml` 保持未改。以后取得该仓库的授权推送凭据后，先核对远端是否快进，再推送这些本地提交，绝不强推。
 - 部署后容器 healthy；实际首次扫描完成且 `lastError=null`、`categoryError=null`、14 个分类、10,922 个监控 Token、46 个可交易事件；随后一轮定时全量扫描同样完成且所有扫描/服务/行情流错误字段均为空（公开市场数据会动态变化）。Chrome 页面已实测显示“扫描完成”、候选市场列表、14 个市场类别及其下方筛选项。带有效认证、CSRF 和同源头的 `POST /api/live/start` 明确返回 400 “LIVE尚未在服务器配置并明确启用”，因此没有启动 TEST 或 LIVE，亦未触碰钱包、签名、下单、approve、redeem 或链上写入。
 
 ## 交付与继续入口

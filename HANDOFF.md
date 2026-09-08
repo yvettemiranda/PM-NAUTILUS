@@ -45,6 +45,8 @@
 - 增强后的只读巡检从内存面板与 SQLite `scan` 元数据同时确认 `streamError=ConnectionClosedError`。根因是公共行情 WebSocket 的常规断线异常不属于原可重试异常元组，落入未知异常分支后执行安全暂停；后台下一轮又会清除 `serviceError`，使健康接口看似正常且丢失原因。
 - 修复将 `websockets.exceptions.ConnectionClosed` 明确归为可重试断线：先使相应盘口失效，再按既有上限30秒的退避重连，不暂停策略。真正未知的行情或后台异常仍保持 fail-closed：暂停、取消未完成买单，并将类型、截断详情和 UTC 时间持久化；正常后台轮次不再自动抹除致命错误，只有用户显式 START 才确认并清除当前错误，历史详情继续保留。只读巡检升级为 version 2，同时显示内存/面板和持久层的扫描与错误字段。
 - 本地 Ruff、70项完整测试、前端 JS 语法和巡检 shell 语法通过；新增回归直接构造 `ConnectionClosedError` 并断言不会调用 pause。容器构建由双架构 GitHub Actions 与服务器部署继续验收。修复部署、重新显式 START 及其新连续区间应在完成后追加，不把本段诊断期间计入连续 TEST。
+- 修复提交 `41d148a0d9faf693eeeaf81af32a2860d5928ec6` 已普通快进推送 GitHub；Actions run `34177018593` 在 Ubuntu x86_64 与 ARM64 均通过70项测试、Ruff、前端语法及实际 Docker verify 构建。部署前确认 TEST 已为 PAUSED，停止容器后将完整 `runtime/server` 与 `.env` 创建为服务器本地 `0600` 一致性备份；随后固定 checkout 该 SHA、更新镜像 revision、保留本地 `compose.override.yaml` 并重建。部署后源码、镜像和健康 revision 一致，容器 healthy/零重启，扫描与分类成功、4个原 TEST 仓位和资金连续保留、账本 validation 与 SQLite quick-check 均为 `ok`，LIVE 仍为 false。
+- 用户已授权本次恢复操作；因 macOS 未授予鼠标辅助访问，2026-09-08 09:42:09 CST 改用应用自身 Basic 认证与 CSRF 保护的 `POST /api/TEST/start` 恢复正式 TEST，没有绕过控制边界。API、独立健康巡检和刷新后的 Chrome 页面均确认 `RUNNING`，页面按钮为 PAUSE；新连续 TEST 区间从该时刻重新计算。首次启动后行情诊断记录了一次预期的 tick 变化并重新取得完整盘口；09:45 复查全量扫描已完成、状态仍为 RUNNING、`backgroundErrors={}`、未出现 `serviceError`，账本两项校验继续通过。
 
 ## 交付与继续入口
 - README.md：启动入口；docs/DEPLOY.md：完整操作步骤；docs/VALIDATION.md：结果、覆盖与未验收部分。

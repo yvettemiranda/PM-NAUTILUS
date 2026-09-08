@@ -1,7 +1,7 @@
 # PM-NAUTILUS 接手记录
 
 ## 当前有效范围与状态
-完整执行根目录 PM-SMALL_Nautilus_Codex_Instructions.md。独立新应用、新账本，只管理本程序交易；保留原UI及交易规则；实现TEST、LIVE接入、自动赎回。交付默认TEST + PAUSED，LIVE未启用。未导入旧账本或钱包，未做真实签名/下单/approve/redeem/链上写入，未启动正式长期TEST。
+完整执行根目录 PM-SMALL_Nautilus_Codex_Instructions.md。独立新应用、新账本，只管理本程序交易；保留原UI及交易规则；实现TEST、LIVE接入、自动赎回。安全默认仍为TEST + PAUSED，LIVE未启用。未导入旧账本或钱包，未做真实签名/下单/approve/redeem/链上写入。正式长期TEST已于2026-09-08启动；其连续区间与中断须以下文实测记录为准。
 
 ## 已完成
 - 原项目HEAD/main核对为 eb8c6d8a09f9b0427890b7a2d744fc3485d1d3dc。只读参考 .reference/PM-SMALL 排除Git；有效文档及关键代码已完整核对，原324测试在当前环境全部通过。
@@ -39,6 +39,12 @@
 - 点击后独立健康检查确认 `status=ok`、`strategyStatus=RUNNING`、`liveExecutionEnabled=false`、`revision=ce96a05bc6ddbaabd6f902f232bcc118bf8326fe` 且 `backgroundErrors={}`。这是正式长期 TEST 的开始时间，不代表72小时已经验收，也不构成任何 LIVE 授权。
 - 用户不要求定时提醒，将按需回来询问进度；后续每次检查应实时核对健康、扫描错误、资金、持仓、交易记录和账本验证，区分实际采样区间与无人检查区间，不把缺少证据的时间自动记为已验收。保持 LIVE 禁用，不接触钱包或链上写入。
 - 同日为按需复核建立专用 ED25519 SSH 入口：Mac 别名为 `pm-nautilus-monitor`，服务器公钥使用 `restrict` 与强制命令 `/usr/local/sbin/pm-nautilus-monitor`，不能取得 PTY、转发端口或执行调用方传入的任意命令。脚本只输出资源、Docker/Nginx/证书续期、固定源码、健康、脱敏面板、账本验证、SQLite quick-check 和近期错误；版本化副本为 `deploy/pm-nautilus-monitor`。任意命令阻断、应用 healthy/零重启、账本验证及 quick-check 均已实测；首次资源快照显示内存余量较小且已使用 swap，尚无运行错误，后续复核需持续观察。写操作、升级和故障修复仍须用户另行授权并使用腾讯云控制台，不能借监控密钥执行。
+
+## TEST 自动暂停修复（2026-09-08）
+- 09:20 CST 按需巡检首次发现正式 TEST 已为 `PAUSED`；Nginx 控制审计只有 08:54:59 的 `POST /api/test/start`，没有后续 pause 请求。应用、容器和 Nginx 仍健康、容器零重启，`/api/TEST/validation` 与 SQLite `quick_check` 均为 `ok`，4 个 TEST 仓位及账本保留；该次正式 TEST 的连续运行区间因此在自动暂停时中断，准确暂停时刻因旧代码未留时间戳而未知。
+- 增强后的只读巡检从内存面板与 SQLite `scan` 元数据同时确认 `streamError=ConnectionClosedError`。根因是公共行情 WebSocket 的常规断线异常不属于原可重试异常元组，落入未知异常分支后执行安全暂停；后台下一轮又会清除 `serviceError`，使健康接口看似正常且丢失原因。
+- 修复将 `websockets.exceptions.ConnectionClosed` 明确归为可重试断线：先使相应盘口失效，再按既有上限30秒的退避重连，不暂停策略。真正未知的行情或后台异常仍保持 fail-closed：暂停、取消未完成买单，并将类型、截断详情和 UTC 时间持久化；正常后台轮次不再自动抹除致命错误，只有用户显式 START 才确认并清除当前错误，历史详情继续保留。只读巡检升级为 version 2，同时显示内存/面板和持久层的扫描与错误字段。
+- 本地 Ruff、70项完整测试、前端 JS 语法和巡检 shell 语法通过；新增回归直接构造 `ConnectionClosedError` 并断言不会调用 pause。容器构建由双架构 GitHub Actions 与服务器部署继续验收。修复部署、重新显式 START 及其新连续区间应在完成后追加，不把本段诊断期间计入连续 TEST。
 
 ## 交付与继续入口
 - README.md：启动入口；docs/DEPLOY.md：完整操作步骤；docs/VALIDATION.md：结果、覆盖与未验收部分。

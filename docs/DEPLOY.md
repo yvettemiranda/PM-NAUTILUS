@@ -152,6 +152,7 @@ CLOB V2 客户端、当前 pUSD、标准/neg-risk 抵押适配器地址固定在
 | 401 | 使用账号pm和服务器UI密码；不要关闭认证绕过 |
 | 403 控制来源失败 | 刷新当前同源页面，检查反代Host/Origin；不要去掉CSRF |
 | 无可执行盘口 | 检查公网出站、WS连接、扫描错误；重连需完整快照 |
+| `streamError=ConnectionClosedError` | 公共行情常规断线会使盘口失效并自动退避重连；不应单独导致 TEST 暂停。若同时存在 `serviceError`，保持 PAUSED 并按持久化的错误类型、详情和时间排查后再显式 START |
 | 有行情无成交 | 检查总时长、进度、费用元数据、最小量、Bid/Ask比例、兄弟完整性与预算 |
 | 业务投影失败 | 保持PAUSED，检查磁盘/SQLite错误，备份后重启重放；不要手改cursor |
 | LIVE核对失败 | 保持PAUSED，检查真实订单/余额/自有份额；临时网络恢复后重新核对，就绪恢复不自动START |

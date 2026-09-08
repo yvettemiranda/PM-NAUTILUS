@@ -168,8 +168,10 @@ def test_market_task_failure_pauses_and_recovers_without_start(monkeypatch):
         try:
             with pytest.raises(asyncio.CancelledError):
                 await service.run()
-            assert rounds == [("PAUSED", "ValueError"), ("PAUSED", None)]
+            assert rounds == [("PAUSED", "ValueError"), ("PAUSED", "ValueError")]
             assert saved["scan"]["serviceError"] == "ValueError"
+            assert saved["scan"]["lastServiceError"] == "ValueError: controlled failure"
+            assert saved["scan"]["lastServiceErrorAt"]
             service.on_resolution.assert_awaited_once()
         finally:
             await service.close()

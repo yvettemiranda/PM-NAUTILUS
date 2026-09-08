@@ -7,7 +7,7 @@ export PATH
 app_dir=/opt/pm-nautilus
 
 printf '%s\n' '=== PM-NAUTILUS READ-ONLY SNAPSHOT ==='
-printf '%s\n' 'monitor_version=1'
+printf '%s\n' 'monitor_version=2'
 printf 'checked_at='; date -Is
 printf 'host='; hostname
 printf 'uptime='; uptime -p
@@ -97,6 +97,16 @@ try:
             "eventCount": scan.get("eventCount"),
             "displayEventCount": scan.get("displayEventCount"),
             "pendingEventCount": scan.get("pendingEventCount"),
+            "scanning": scan.get("scanning"),
+            "lastScanAt": scan.get("lastScanAt"),
+            "lastError": scan.get("lastError"),
+            "categoryError": scan.get("categoryError"),
+            "streamError": scan.get("streamError"),
+            "serviceError": scan.get("serviceError"),
+            "lastStreamError": scan.get("lastStreamError"),
+            "lastStreamErrorAt": scan.get("lastStreamErrorAt"),
+            "lastServiceError": scan.get("lastServiceError"),
+            "lastServiceErrorAt": scan.get("lastServiceErrorAt"),
             "diagnostics": diagnostics,
         },
         "preferences": dashboard.get("preferences"),
@@ -116,9 +126,32 @@ if database.exists():
     try:
         connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=10)
         result = connection.execute("PRAGMA quick_check(1)").fetchone()[0]
+        scan_row = connection.execute("SELECT value FROM meta WHERE key='scan'").fetchone()
         connection.close()
         print(f"sqlite_quick_check={result}")
         print(f"sqlite_bytes={database.stat().st_size}")
+        if scan_row:
+            persisted_scan = json.loads(scan_row[0])
+            error_keys = (
+                "scanning",
+                "lastScanAt",
+                "lastError",
+                "categoryError",
+                "streamError",
+                "serviceError",
+                "lastStreamError",
+                "lastStreamErrorAt",
+                "lastServiceError",
+                "lastServiceErrorAt",
+            )
+            print(
+                "persisted_scan="
+                + json.dumps(
+                    {key: persisted_scan.get(key) for key in error_keys},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
     except Exception as exc:
         print(f"sqlite_error={type(exc).__name__}: {exc}")
 else:

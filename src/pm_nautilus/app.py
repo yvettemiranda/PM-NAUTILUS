@@ -245,7 +245,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         mode = mode_name(mode)
         if mode not in runtimes:
             raise ValueError("LIVE尚未在服务器配置并明确启用")
-        runtimes[mode].start()
+        services[mode].start()
         return view(mode)
 
     @app.post("/api/{mode}/pause")

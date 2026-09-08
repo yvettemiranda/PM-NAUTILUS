@@ -1,9 +1,14 @@
 import asyncio
 from copy import deepcopy
 from dataclasses import replace
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import httpx
+import pytest
 from pm_nautilus.market import normalize, resolution, MarketService
 from test_runtime import setup
+from websockets.exceptions import ConnectionClosedError
 
 
 def event(i=1):
@@ -141,6 +146,45 @@ def test_keyset_cursor_must_advance(tmp_path):
 
     asyncio.run(run())
     r.close()
+
+
+def test_normal_websocket_disconnect_retries_without_pausing(monkeypatch):
+    saved = {}
+    runtime = SimpleNamespace(
+        store=SimpleNamespace(
+            get=lambda key, default=None: default,
+            put=lambda key, value: saved.update({key: dict(value)}),
+        ),
+        disconnect=Mock(),
+        pause=Mock(),
+    )
+    service = MarketService(runtime)
+
+    class ClosedSocket:
+        async def __aenter__(self):
+            raise ConnectionClosedError(None, None)
+
+        async def __aexit__(self, *args):
+            return False
+
+    async def stop_after_retry(_):
+        raise asyncio.CancelledError
+
+    async def run():
+        monkeypatch.setattr("pm_nautilus.market.connect", lambda *args, **kwargs: ClosedSocket())
+        monkeypatch.setattr("pm_nautilus.market.asyncio.sleep", stop_after_retry)
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await service.socket(("1",))
+            runtime.pause.assert_not_called()
+            assert service.scan_status["streamError"] == "ConnectionClosedError"
+            assert service.scan_status["lastStreamError"].startswith("ConnectionClosedError:")
+            assert service.scan_status["lastStreamErrorAt"]
+            assert saved["scan"]["streamError"] == "ConnectionClosedError"
+        finally:
+            await service.close()
+
+    asyncio.run(run())
 
 
 def test_sibling_unknown_blocks_empty_does_not(tmp_path):

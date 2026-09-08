@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 import httpx
 from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosed
 
 from .config import micros
 from .rules import Token, Fees
@@ -143,6 +144,23 @@ class MarketService:
         self.loop_task = None
         self.on_resolution = None
         self.subscription_lock = asyncio.Lock()
+
+    def remember_error(self, key, exc):
+        name = type(exc).__name__
+        detail = f"{name}: {str(exc)[:180]}".rstrip(": ")
+        suffix = key[0].upper() + key[1:]
+        self.scan_status[key] = name
+        self.scan_status[f"last{suffix}"] = detail
+        self.scan_status[f"last{suffix}At"] = datetime.now(timezone.utc).isoformat()
+        self.runtime.store.put("scan", self.scan_status)
+
+    def start(self):
+        # An explicit START acknowledges a latched fatal background error. Historical
+        # details stay available so an automatic safety pause is never unexplained.
+        self.runtime.start()
+        if self.scan_status.pop("serviceError", None) is not None:
+            self.scan_status["serviceErrorClearedAt"] = datetime.now(timezone.utc).isoformat()
+            self.runtime.store.put("scan", self.scan_status)
 
     async def get(self, url, **params):
         response = await self.http.get(url, params=params)
@@ -325,11 +343,20 @@ class MarketService:
                             messages = json.loads(raw)
                             for msg in messages if isinstance(messages, list) else [messages]:
                                 self.message(msg, group)
-                except (OSError, ConnectionError, ValueError, TimeoutError) as exc:
-                    self.scan_status["streamError"] = type(exc).__name__
+                except (
+                    ConnectionClosed,
+                    OSError,
+                    ConnectionError,
+                    ValueError,
+                    TimeoutError,
+                ) as exc:
+                    # Normal public-feed disconnects are recoverable. The socket is
+                    # invalidated in finally and reconnected with bounded backoff.
+                    self.remember_error("streamError", exc)
                 except Exception as exc:
                     # A broken feed cannot retain an executable last-known book.
-                    self.scan_status["streamError"] = type(exc).__name__
+                    self.remember_error("streamError", exc)
+                    self.remember_error("serviceError", exc)
                     r.pause()
                 finally:
                     r.disconnect(group)
@@ -350,13 +377,11 @@ class MarketService:
                 await self.sync_subscriptions()
                 if self.on_resolution:
                     await self.on_resolution()
-                self.scan_status.pop("serviceError", None)
             except Exception as exc:
                 # Keep the service observable and retryable, without silently
                 # leaving a dead task behind a RUNNING UI.
                 self.runtime.pause()
-                self.scan_status["serviceError"] = type(exc).__name__
-                self.runtime.store.put("scan", self.scan_status)
+                self.remember_error("serviceError", exc)
             await asyncio.sleep(5)
 
     async def close(self):

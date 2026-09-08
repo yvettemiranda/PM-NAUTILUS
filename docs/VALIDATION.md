@@ -16,7 +16,7 @@
 | 前端 | Node `--check src/pm_nautilus/web/app.js` 通过；无单独前端编译步骤，原生静态HTML/CSS/JS由FastAPI提供 |
 | 公开行情到模拟成交 | 实际 Gamma/WS：采样100个公开Event，选10个完整Event、108个合格Token；10个READY，14笔原生模拟Fill，10个持仓，现金4.37U；同库重启现金4.37U，数量/预算/目标/现金核对通过，结束PAUSED。日志 `.reference/public-smoke.log`，重跑 `scripts/public_smoke.py` |
 | Linux | Linux aarch64 / Debian bookworm / Python3.12.14：最终代码 e91563f5723609f126ed540d9bd3d3d36f795de6 镜像68项通过（2.84秒），生产base镜像启动成功；`.reference/linux-verified-68.log` |
-| GitHub/自有服务器 | 2026-09-07 已创建公开仓库并推送 main；双架构CI通过，详情见下节。服务器由用户明确推迟至重装电脑后，尚未部署 |
+| GitHub/自有服务器 | 公开仓库已创建并持续同步 main；双架构 CI 通过，详情见下节。服务器后续已完成独立 TEST 部署、HTTPS 入口、认证、备份、只读巡检与正式 TEST 启动；动态运行状态和最新 SHA 见 HANDOFF.md |
 
 公开行情短测使用独立临时目录、100U初始资金，每轮10U、进度100%、最长365天、比例1%、全部市场类型的明确开发设置，便于在有限时间内产生可验证成交。这不是产品默认配置，也不是正式长期TEST；生产发现仍为全部分页，无10个Event/108Token上限。此前默认设置的短测只有真实盘口、没有成交，不计为成交端到端成功。
 

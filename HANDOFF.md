@@ -48,6 +48,10 @@
 - 修复提交 `41d148a0d9faf693eeeaf81af32a2860d5928ec6` 已普通快进推送 GitHub；Actions run `34177018593` 在 Ubuntu x86_64 与 ARM64 均通过70项测试、Ruff、前端语法及实际 Docker verify 构建。部署前确认 TEST 已为 PAUSED，停止容器后将完整 `runtime/server` 与 `.env` 创建为服务器本地 `0600` 一致性备份；随后固定 checkout 该 SHA、更新镜像 revision、保留本地 `compose.override.yaml` 并重建。部署后源码、镜像和健康 revision 一致，容器 healthy/零重启，扫描与分类成功、4个原 TEST 仓位和资金连续保留、账本 validation 与 SQLite quick-check 均为 `ok`，LIVE 仍为 false。
 - 用户已授权本次恢复操作；因 macOS 未授予鼠标辅助访问，2026-09-08 09:42:09 CST 改用应用自身 Basic 认证与 CSRF 保护的 `POST /api/TEST/start` 恢复正式 TEST，没有绕过控制边界。API、独立健康巡检和刷新后的 Chrome 页面均确认 `RUNNING`，页面按钮为 PAUSE；新连续 TEST 区间从该时刻重新计算。首次启动后行情诊断记录了一次预期的 tick 变化并重新取得完整盘口；09:45 复查全量扫描已完成、状态仍为 RUNNING、`backgroundErrors={}`、未出现 `serviceError`，账本两项校验继续通过。
 
+## 开发入口文档常态化（2026-09-08）
+- 电脑重装后的开发恢复已完成，根 README 不再以单次“重装接手任务”为入口，现改为面向任意电脑和长期维护的常规程序说明：功能、安全边界、固定依赖、快速启动、验证、部署、目录与文档导航。
+- `docs/REINSTALL.md` 保留原文件路径以免旧链接失效，但内容改为长期适用的“新开发环境配置”；删除“服务器尚未部署”等已失效阶段描述。变化中的服务器、正式 TEST 与版本事实继续只维护在本文件，避免 README 随运行状态频繁过时。
+
 ## 交付与继续入口
 - README.md：启动入口；docs/DEPLOY.md：完整操作步骤；docs/VALIDATION.md：结果、覆盖与未验收部分。
 - artifacts/FULL_SOURCE.md：所有受控文本文件完整内容（含锁文件，无省略）；SOURCE_MANIFEST.json逐文件SHA256及最终提交。

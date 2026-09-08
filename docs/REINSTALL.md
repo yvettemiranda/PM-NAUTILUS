@@ -1,8 +1,8 @@
-# 重装电脑后恢复开发
+# 新开发环境配置
 
-本项目公开仓库：https://github.com/yvettemiranda/PM-NAUTILUS 。2026-09-07 用户明确授权新建公开仓库并上传；服务器部署推迟到电脑重装之后。此决定优先于原始指令中拟定私有仓库的旧安排。
+本指南适用于新电脑、全新系统或独立开发目录。项目公开仓库为：https://github.com/yvettemiranda/PM-NAUTILUS 。它是长期有效的开发环境恢复说明，不记录某一次电脑重装或服务器部署阶段；当前运行状态以根目录 `HANDOFF.md` 为准。
 
-## 1. 找回项目
+## 1. 克隆项目
 
 在新电脑终端执行（公开克隆无需登录）：
 
@@ -15,7 +15,7 @@ git status --short
 git log -5 --oneline
 ```
 
-源码、提交历史、原始需求、设计、UI、测试、锁文件、Docker/CI、交接与运维文档都在仓库中。继续开发不依赖旧聊天、旧电脑绝对路径或 `.reference/`。以后推送修改时再登录自己的 GitHub 账户。
+源码、提交历史、原始需求、设计、UI、测试、锁文件、Docker/CI、交接与运维文档都在仓库中。继续开发不依赖旧聊天、旧电脑绝对路径或 `.reference/`。需要推送修改时使用有仓库权限的 GitHub 账户。
 
 ## 2. 重建开发环境
 
@@ -38,10 +38,10 @@ uv sync --frozen --extra dev
 uv run --frozen ruff check src tests scripts
 uv run --frozen ruff format --check src tests scripts
 uv run --frozen pytest -q
-uv run --frozen pm-nautilus --offline --data-dir runtime/reinstall-check
+uv run --frozen pm-nautilus --offline --data-dir runtime/environment-check
 ```
 
-首次下载的原生依赖加载可能较慢，本次首次测试约82秒；保持终端开启，等待服务显示启动完成，不要仅因20秒未响应就判定失败。
+首次下载和加载原生依赖可能较慢；保持终端开启并等待服务显示启动完成，不要仅因短时间没有输出就判定失败。
 
 打开 http://127.0.0.1:8765 查看页面。首次使用新目录应为 TEST + PAUSED、100U、每轮1U，LIVE未启用。离线预览没有实时行情；检查完用 Ctrl+C 停止。准备连接公开行情时使用 `uv run --frozen pm-nautilus --data-dir runtime/local`，启动仍为 PAUSED，不自动开始正式长期测试。
 
@@ -49,7 +49,7 @@ uv run --frozen pm-nautilus --offline --data-dir runtime/reinstall-check
 
 ## 3. 仓库不保存的内容
 
-`.env`、密码、私钥、钱包/API/RPC凭据、SQLite账本、runtime、日志、参考项目、虚拟机、虚拟环境以及本地 artifacts/backups 均不上传。现有运行目录是开发样本，没有已交付生产账本；从仓库恢复会创建新开发账本，不会恢复样本成交历史。
+`.env`、密码、私钥、钱包/API/RPC凭据、SQLite账本、runtime、日志、参考项目、虚拟机、虚拟环境以及本地 artifacts/backups 均不上传。GitHub 仓库不保存服务器正式 TEST 账本；从仓库恢复会创建新的本地开发账本，不会复制服务器或其他电脑的成交历史。
 
 如果另有自己需要保留的电脑文件或凭据，需自行单独备份；本仓库只保证项目开发材料可恢复。未来正式运行产生的账本与服务器凭据按 DEPLOY.md 加密备份，不能提交公开仓库。
 
@@ -62,16 +62,16 @@ git archive --format=zip --prefix=PM-NAUTILUS/ --output=artifacts/PM-NAUTILUS-so
 git bundle create artifacts/PM-NAUTILUS.bundle main
 ```
 
-## 4. 交给重装后的 Codex
+## 4. 在新环境接手开发
 
 在 Codex 中打开克隆目录，将以下文字作为接手请求：
 
-> 请完整阅读根目录 PM-SMALL_Nautilus_Codex_Instructions.md、HANDOFF.md，以及 docs/REINSTALL.md、MIGRATION.md、VALIDATION.md、DEPLOY.md。先核对 git status、版本和当前验证记录，恢复锁定的开发环境并执行必要测试。整体迁移、UI与可控验证已有实现，不要从骨架重做或重复询问已确定规则。GitHub公开上传已获授权；服务器部署留待我提供重装后的目标信息，不推断旧服务器就是目标。默认 TEST + PAUSED，LIVE未启用，不读取真实钱包、不真实下单或链上写入。维护 HANDOFF.md，区分已实测和未验收部分。
+> 请完整阅读根目录 README.md、HANDOFF.md、PM-SMALL_Nautilus_Codex_Instructions.md，以及 docs/REINSTALL.md、MIGRATION.md、VALIDATION.md、DEPLOY.md。先核对 git status、版本、当前运行状态和验证记录，恢复锁定的开发环境并执行必要测试。迁移、UI、服务器部署和正式 TEST 已有实现与历史记录，不要从骨架重做或假定需要重新部署。默认启动仍为 TEST + PAUSED；除非我另行明确要求，不启用 LIVE、不读取真实钱包、不真实下单或进行链上写入。维护 HANDOFF.md，区分当前事实、历史记录和未验收部分。
 
-当前权威入口是 HANDOFF.md；历史 `.reference/` 日志不随克隆恢复，已验证结论与复验方法在 VALIDATION.md。`agent_memory` 模板原机缺失，记录在 HANDOFF；新环境若提供原始模板再按原样建立文件，不能让这一可选环境依赖阻塞源码恢复。
+当前状态的权威入口是 HANDOFF.md；历史 `.reference/` 日志不随克隆恢复，已验证结论与复验方法在 VALIDATION.md。可选的本地辅助模板或技能不是应用依赖，缺失时不能阻塞源码恢复。
 
-可选技能：交接整理用 handoff，后续代码审查用 code-review，实际出现故障再用 diagnosing-bugs；这些技能不随仓库分发，也不是应用运行依赖。
+## 5. 恢复后的工作方式
 
-## 5. 下一阶段
+本地环境通过测试后即可按正常 Git 工作流继续开发。不要把新电脑的 `runtime/local` 当作服务器账本，也不要因为本地环境恢复而自动修改、重启或重新部署服务器；涉及服务器时先读取 HANDOFF.md 的实际目标、版本和运行状态，再按 DEPLOY.md 备份、升级和验收。
 
-本轮只上传 GitHub和验证恢复能力，不部署服务器。重装完成后再提供服务器地址、SSH用户、新应用目录和入口要求，按 DEPLOY.md 做独立部署与验收。真实 LIVE 钱包、授权、资金与链上验收仍未完成；不要将可控测试通过等同于实盘可直接启用。
+真实 LIVE 钱包、授权、资金与链上验收仍是独立阶段。除非用户明确提供对应信息并授权启用，不要将可控测试或正式 TEST 结果解释为实盘已可直接运行。

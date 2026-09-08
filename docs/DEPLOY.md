@@ -4,7 +4,7 @@
 
 ## 1. Mac 本地开发
 
-要求 macOS 26+ arm64（所选 Nautilus wheel 的最低要求）、Python 3.12.14。其他 Mac 版本使用本地 Linux 容器。电脑重装请先按 [恢复指南](REINSTALL.md) 下载 Python 并安装锁定依赖；在克隆目录运行：
+要求 macOS 26+ arm64（所选 Nautilus wheel 的最低要求）、Python 3.12.14。其他 Mac 版本使用本地 Linux 容器。新开发环境先按 [环境配置指南](REINSTALL.md) 下载 Python 并安装锁定依赖；在克隆目录运行：
 
 ```sh
 uv run --frozen pm-nautilus --data-dir runtime/local
@@ -25,9 +25,9 @@ python3.12 -m venv .venv
 
 `--offline --data-dir runtime/ui-preview` 只查看本地 UI；该选项不提供行情，已有仓位也无法依靠实时盘口退出，仅用于开发验证。`runtime/` 全部不入 Git。`.python-version` 和 `uv.lock` 为固定依赖依据。
 
-## 2. GitHub 首次上传
+## 2. GitHub 开发流程
 
-2026-09-07 用户明确授权公开仓库 `yvettemiranda/PM-NAUTILUS`，覆盖原始指令的拟定私有安排。重装恢复见 [REINSTALL.md](REINSTALL.md)。首次创建由本轮执行；后续克隆已有仓库，不重复创建、不强推。
+公开仓库为 `yvettemiranda/PM-NAUTILUS`。新电脑直接克隆已有仓库，不重复创建仓库、不覆盖远端历史、不强推；环境配置见 [REINSTALL.md](REINSTALL.md)。每次修改在推送前先 fetch，检查本地分支与 `origin/main` 的关系并保护其他开发者的提交。
 
 ```sh
 git remote -v
@@ -37,11 +37,11 @@ git rev-parse HEAD
 git ls-remote origin refs/heads/main
 ```
 
-推送前检查 `git ls-files`，不得包含 `.env`、凭据 JSON、runtime、私钥、RPC 密钥或 `.reference`。CI只进行无凭据测试，不部署、不启动LIVE。用户明确推迟服务器部署到重装后，以下章节是后续操作手册，不是本轮已部署的声明。
+推送前检查 `git ls-files`，不得包含 `.env`、凭据 JSON、runtime、私钥、RPC 密钥或 `.reference`。CI只进行无凭据测试，不部署、不启动LIVE。GitHub main 与服务器运行 SHA 可能因纯文档提交暂时不同；实际部署版本和运行状态以 HANDOFF.md 及服务器健康接口共同核对。
 
 ## 3. 新 Linux 服务器目录
 
-服务器目标、SSH 用户和运行目录尚未提供。不要推断旧 VPS 或原 PM-SMALL 机器就是本次目标。收到目标后，先只读执行 `uname -m`、`cat /etc/os-release`、`docker version`、`docker compose version`、`ss -lntup`、`df -h`、现有服务/目录检查。
+本节适用于首次部署到新服务器或建立独立的新运行目录。当前已部署服务器的实际目标、版本和入口只记录在 HANDOFF.md；不要仅凭示例地址或历史服务器推断操作目标。新目标开始时先只读执行 `uname -m`、`cat /etc/os-release`、`docker version`、`docker compose version`、`ss -lntup`、`df -h`、现有服务/目录检查。
 
 支持 Linux x86_64 或 aarch64，使用本仓库 Debian bookworm 容器（glibc 2.36）。推荐独立目录 `/opt/pm-nautilus`，该目录仅为示例，须按实际目标选择。不要覆盖现有目录或停止无关服务。
 
@@ -68,7 +68,7 @@ curl -fsS http://127.0.0.1:8765/api/health
 
 健康结果需包含 TEST、PAUSED、`liveExecutionEnabled=false` 和对应代码 SHA。默认仅绑定服务器回环地址。最小访问方式：在自己的 Mac 上运行 `ssh -L 8765:127.0.0.1:8765 <用户>@<服务器>`，然后访问本机端口并以 `pm` 登录。
 
-`deploy/nginx.conf.example` 提供可审查的独立虚拟主机样例；替换实际域名和证书路径后先运行 `nginx -t`。如使用公网域名，沿用服务器现有 HTTPS 反代，在新独立配置中转发到 `127.0.0.1:8765`，把域名加入 `PM_ALLOWED_HOSTS`。保留原 Host/Origin，使用 HTTPS。不要直接公开容器端口，不要把 Basic 密码通过明文公网 HTTP 发送。已有公网入口的切换必须先保存旧配置、明确旧服务/新服务端口及回滚动作；本次未指定或切换任何入口。
+`deploy/nginx.conf.example` 提供可审查的独立虚拟主机样例；替换实际域名和证书路径后先运行 `nginx -t`。如使用公网域名，沿用服务器现有 HTTPS 反代，在新独立配置中转发到 `127.0.0.1:8765`，把域名加入 `PM_ALLOWED_HOSTS`。保留原 Host/Origin，使用 HTTPS。不要直接公开容器端口，不要把 Basic 密码通过明文公网 HTTP 发送。切换任何已有公网入口前必须保存旧配置，明确旧服务、新服务端口和回滚动作。
 
 ## 4. 部署验收与同库重启
 
@@ -118,9 +118,9 @@ docker compose start
 
 ## 7. 后续 LIVE 配置与启用
 
-本次未读取真实钱包、未签署真实订单、未进行 approve/redeem 或其他链上写。未来由用户完成测试验收，确认实际钱包类型及独立资金账户，再明确启用。
+仓库默认不读取真实钱包、不签署真实订单，也不进行 approve、redeem 或其他链上写。只有完成 TEST 验收、确认实际钱包类型与独立资金账户，并获得明确 LIVE 启用授权后，才进入本节流程。
 
-实现支持 Polygon 主网 EOA（signature_type=0，signer=funder）和单签 Safe（signature_type=2，signer 是 owner、threshold=1）。Magic/PolyProxy、Deposit Wallet、多签 Safe 不能冒充这两种路径；若实际账户属于其他类型，须按其官方路径补齐并验证后再启用。当前钱包类型尚未提供。
+实现支持 Polygon 主网 EOA（signature_type=0，signer=funder）和单签 Safe（signature_type=2，signer 是 owner、threshold=1）。Magic/PolyProxy、Deposit Wallet、多签 Safe 不能冒充这两种路径；若实际账户属于其他类型，须按其官方路径补齐并验证后再启用。仓库不记录实际钱包类型或凭据，当前外部准备状态以 HANDOFF.md 为准。
 
 凭据文件示例结构如下，所有值仅在服务器本地填写；文件权限600、属主为服务运行用户：
 

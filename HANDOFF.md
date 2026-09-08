@@ -67,6 +67,7 @@
 - 新增 `python -m pm_nautilus.preflight`，只接收公开地址，固定区块查询 Polygon 钱包归属、合约代码、余额、交易及赎回授权；不读取 LIVE 凭据、不构造 signer、不启动 runtime。RPC 方法白名单拒绝发送交易。详见 `docs/LIVE_READINESS.md`，成功报告不是实盘验收。
 - 73项测试通过；新增回归验证完整盘口恢复、不同分组错误互不遮盖、历史错误保留、待定 Event 缺失 Token、取消后盘口失效、只读 RPC 白名单、固定区块及错误链/不支持钱包类型拒绝。Ruff通过；实际公开 RPC 预检完成，未进行任何签名或链上写入。
 - 本次修复先交付本地/GitHub；服务器仍固定旧代码 `41d148a0`，正式 TEST 不因诊断改动重启。待约定 TEST 检查节点再备份部署；如果实际出现行情故障或影响交易则提前处理。新增诊断尚未在正式服务器生效，不能声称已据此排查完那7个待定 Event。
+- 代码提交 `d78eea20eeef29a729f0c1c21348e4c47841f759` 已普通快进推送并核对远端。GitHub Actions run `34194224894` 的 Linux x86_64/ARM64 均通过测试、Ruff、JS语法及 Docker verify 构建。14:20:54 CST 再次只读复查服务器仍 RUNNING/healthy/零重启，扫描推进到14:19:06、持仓估值变为2.039816U，账本及数据库校验通过；这证明存在更新，但不证明所有待定市场盘口完整。完整受控源码输出为本地 `artifacts/FULL_SOURCE.md`。
 
 ## 交付与继续入口
 - README.md：启动入口；docs/DEPLOY.md：完整操作步骤；docs/VALIDATION.md：结果、覆盖与未验收部分。

@@ -1,0 +1,131 @@
+#!/bin/sh
+set -eu
+
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+app_dir=/opt/pm-nautilus
+
+printf '%s\n' '=== PM-NAUTILUS READ-ONLY SNAPSHOT ==='
+printf '%s\n' 'monitor_version=1'
+printf 'checked_at='; date -Is
+printf 'host='; hostname
+printf 'uptime='; uptime -p
+
+printf '%s\n' '--- resources ---'
+free -h
+df -h / "$app_dir"
+
+printf '%s\n' '--- services ---'
+for unit in docker nginx snap.certbot.renew.timer; do
+    printf '%s=' "$unit"
+    sudo -n systemctl is-active "$unit" 2>/dev/null || true
+done
+printf 'next_certificate_renewal=' 
+sudo -n systemctl show snap.certbot.renew.timer -p NextElapseUSecRealtime --value 2>/dev/null || true
+
+printf '%s\n' '--- certificate ---'
+sudo -n openssl x509 \
+    -in /etc/letsencrypt/live/pm-nautilus-ip/fullchain.pem \
+    -noout -subject -dates 2>/dev/null || true
+
+printf '%s\n' '--- source ---'
+sudo -n git -c safe.directory="$app_dir" -C "$app_dir" rev-parse HEAD
+sudo -n git -c safe.directory="$app_dir" -C "$app_dir" status --short --branch
+
+printf '%s\n' '--- compose ---'
+cd "$app_dir"
+sudo -n docker compose --env-file .env ps
+container_ids=$(sudo -n docker compose --env-file .env ps -q)
+if [ -n "$container_ids" ]; then
+    sudo -n docker inspect \
+        --format '{{.Name}}|status={{.State.Status}}|health={{if .State.Health}}{{.State.Health.Status}}{{end}}|restarts={{.RestartCount}}' \
+        $container_ids
+    sudo -n docker stats --no-stream \
+        --format '{{.Name}}|cpu={{.CPUPerc}}|mem={{.MemUsage}}|mem_pct={{.MemPerc}}|net={{.NetIO}}|block={{.BlockIO}}' \
+        $container_ids
+fi
+
+printf '%s\n' '--- application ---'
+sudo -n python3 - "$app_dir" <<'PY'
+import base64
+import json
+import sqlite3
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+app_dir = Path(sys.argv[1])
+values = {}
+for raw_line in (app_dir / ".env").read_text(encoding="utf-8").splitlines():
+    line = raw_line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    values[key.strip()] = value.strip().strip('"').strip("'")
+
+password = values.get("PM_UI_PASSWORD", "")
+authorization = "Basic " + base64.b64encode(f"pm:{password}".encode()).decode()
+
+def get_json(path, authenticated=False):
+    headers = {"Host": "127.0.0.1"}
+    if authenticated:
+        headers["Authorization"] = authorization
+    request = urllib.request.Request(f"http://127.0.0.1:8765{path}", headers=headers)
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return json.load(response)
+
+try:
+    health = get_json("/api/health")
+    print("health=" + json.dumps(health, ensure_ascii=False, sort_keys=True))
+except Exception as exc:
+    print(f"health_error={type(exc).__name__}: {exc}")
+
+try:
+    dashboard = get_json("/api/dashboard?mode=TEST&limit=10000", authenticated=True)
+    scan = dashboard.get("marketScan") or {}
+    diagnostics = scan.get("diagnostics") or {}
+    summary = {
+        "executionMode": dashboard.get("executionMode"),
+        "liveExecutionEnabled": dashboard.get("liveExecutionEnabled"),
+        "strategy": dashboard.get("strategy"),
+        "portfolio": dashboard.get("portfolio"),
+        "positionCount": len(dashboard.get("positions") or []),
+        "redemptions": dashboard.get("redemptions") or [],
+        "marketScan": {
+            "eventCount": scan.get("eventCount"),
+            "displayEventCount": scan.get("displayEventCount"),
+            "pendingEventCount": scan.get("pendingEventCount"),
+            "diagnostics": diagnostics,
+        },
+        "preferences": dashboard.get("preferences"),
+    }
+    print("dashboard=" + json.dumps(summary, ensure_ascii=False, sort_keys=True))
+except Exception as exc:
+    print(f"dashboard_error={type(exc).__name__}: {exc}")
+
+try:
+    validation = get_json("/api/TEST/validation", authenticated=True)
+    print("validation=" + json.dumps(validation, ensure_ascii=False, sort_keys=True))
+except Exception as exc:
+    print(f"validation_error={type(exc).__name__}: {exc}")
+
+database = app_dir / "runtime" / "server" / "TEST" / "state.sqlite"
+if database.exists():
+    try:
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=10)
+        result = connection.execute("PRAGMA quick_check(1)").fetchone()[0]
+        connection.close()
+        print(f"sqlite_quick_check={result}")
+        print(f"sqlite_bytes={database.stat().st_size}")
+    except Exception as exc:
+        print(f"sqlite_error={type(exc).__name__}: {exc}")
+else:
+    print("sqlite_error=database not found")
+PY
+
+printf '%s\n' '--- recent application errors (last 4h, max 80 lines) ---'
+sudo -n docker compose --env-file .env logs --since 4h --tail 300 app 2>&1 \
+    | grep -Ei 'error|exception|traceback|critical|failed' \
+    | tail -80 || true

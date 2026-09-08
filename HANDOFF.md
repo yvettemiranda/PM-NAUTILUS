@@ -38,6 +38,7 @@
 - 用户在页面完成配置并于 2026-09-08 08:55:25 CST（2026-09-08T00:55:25Z）明确点击 `START`。启动前页面为100U、0持仓，扫描已完成并显示监控742个Token、3个可交易Event；公开市场数据会继续动态变化，这些数量只作为启动基线。
 - 点击后独立健康检查确认 `status=ok`、`strategyStatus=RUNNING`、`liveExecutionEnabled=false`、`revision=ce96a05bc6ddbaabd6f902f232bcc118bf8326fe` 且 `backgroundErrors={}`。这是正式长期 TEST 的开始时间，不代表72小时已经验收，也不构成任何 LIVE 授权。
 - 用户不要求定时提醒，将按需回来询问进度；后续每次检查应实时核对健康、扫描错误、资金、持仓、交易记录和账本验证，区分实际采样区间与无人检查区间，不把缺少证据的时间自动记为已验收。保持 LIVE 禁用，不接触钱包或链上写入。
+- 同日为按需复核建立专用 ED25519 SSH 入口：Mac 别名为 `pm-nautilus-monitor`，服务器公钥使用 `restrict` 与强制命令 `/usr/local/sbin/pm-nautilus-monitor`，不能取得 PTY、转发端口或执行调用方传入的任意命令。脚本只输出资源、Docker/Nginx/证书续期、固定源码、健康、脱敏面板、账本验证、SQLite quick-check 和近期错误；版本化副本为 `deploy/pm-nautilus-monitor`。任意命令阻断、应用 healthy/零重启、账本验证及 quick-check 均已实测；首次资源快照显示内存余量较小且已使用 swap，尚无运行错误，后续复核需持续观察。写操作、升级和故障修复仍须用户另行授权并使用腾讯云控制台，不能借监控密钥执行。
 
 ## 交付与继续入口
 - README.md：启动入口；docs/DEPLOY.md：完整操作步骤；docs/VALIDATION.md：结果、覆盖与未验收部分。

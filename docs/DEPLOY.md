@@ -81,6 +81,16 @@ curl -fsS http://127.0.0.1:8765/api/health
 
 控制 API 需要登录和 `x-pm-csrf`，令牌来自已认证 GET 响应头，浏览器自动处理。不要把未认证 POST 能否成功当作健康检查。正式长期 TEST 应在整体验收后由用户点击 START；PAUSE 只停止新买，保留已有仓位退出和回款。
 
+### 4.1 可选的强制只读 SSH 巡检
+
+`deploy/pm-nautilus-monitor` 是服务器侧固定巡检脚本。将它以 root 所有、`0755` 安装到 `/usr/local/sbin/pm-nautilus-monitor` 后，可为一把独立公钥配置如下 `authorized_keys` 前缀：
+
+```text
+restrict,command="/usr/local/sbin/pm-nautilus-monitor"
+```
+
+该公钥必须与普通运维密钥分开，私钥不得提交 Git。`restrict` 禁止 PTY、端口/Agent/X11 转发，强制命令忽略调用方传入的 SSH 命令，只返回资源、服务、证书、容器、健康、脱敏面板、账本验证、SQLite quick-check 和近期错误快照。脚本需要目标用户具备其中固定只读命令的免密 sudo；安装后必须实测传入任意命令仍只返回巡检快照。它不能用于部署、重启、修改配置或紧急修复；这些操作仍走单独授权的管理入口。
+
 ## 5. 备份、升级、回滚
 
 停机备份可确保两个模式与 SQLite WAL 一致；LIVE 已启用时先 PAUSE 并确认所有在途买单终态，持仓退出中应选择维护时机：

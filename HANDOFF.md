@@ -34,6 +34,11 @@
 - 同日整体复核发现 GitHub Actions 对旧版官方动作发出 Node 20 弃用警告；已按官方当日稳定主版本将 `actions/checkout`、`actions/setup-python` 和 `actions/setup-node` 统一升级到 v7，保留原 Python、uv、Node、双架构测试和 Docker verify 流程。
 - 部署后容器 healthy；实际首次扫描完成且 `lastError=null`、`categoryError=null`、14 个分类、10,922 个监控 Token、46 个可交易事件；随后一轮定时全量扫描同样完成且所有扫描/服务/行情流错误字段均为空（公开市场数据会动态变化）。Chrome 页面已实测显示“扫描完成”、候选市场列表、14 个市场类别及其下方筛选项。带有效认证、CSRF 和同源头的 `POST /api/live/start` 明确返回 400 “LIVE尚未在服务器配置并明确启用”，因此没有启动 TEST 或 LIVE，亦未触碰钱包、签名、下单、approve、redeem 或链上写入。
 
+## 正式 TEST 启动（2026-09-08）
+- 用户在页面完成配置并于 2026-09-08 08:55:25 CST（2026-09-08T00:55:25Z）明确点击 `START`。启动前页面为100U、0持仓，扫描已完成并显示监控742个Token、3个可交易Event；公开市场数据会继续动态变化，这些数量只作为启动基线。
+- 点击后独立健康检查确认 `status=ok`、`strategyStatus=RUNNING`、`liveExecutionEnabled=false`、`revision=ce96a05bc6ddbaabd6f902f232bcc118bf8326fe` 且 `backgroundErrors={}`。这是正式长期 TEST 的开始时间，不代表72小时已经验收，也不构成任何 LIVE 授权。
+- 用户不要求定时提醒，将按需回来询问进度；后续每次检查应实时核对健康、扫描错误、资金、持仓、交易记录和账本验证，区分实际采样区间与无人检查区间，不把缺少证据的时间自动记为已验收。保持 LIVE 禁用，不接触钱包或链上写入。
+
 ## 交付与继续入口
 - README.md：启动入口；docs/DEPLOY.md：完整操作步骤；docs/VALIDATION.md：结果、覆盖与未验收部分。
 - artifacts/FULL_SOURCE.md：所有受控文本文件完整内容（含锁文件，无省略）；SOURCE_MANIFEST.json逐文件SHA256及最终提交。

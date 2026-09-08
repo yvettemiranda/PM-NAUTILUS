@@ -61,6 +61,13 @@
 - 本地70测试、Ruff检查及格式检查通过。官方中英文合约地址本次均与源码一致，公共 Polygon RPC 对六个关键合约返回非空代码；撤回聊天中需要更换 adapter 地址的未证实推断。详见 `docs/LIVE_READINESS.md`。
 - 重要纠正：PAUSED 仍允许已有仓位卖出/赎回；`auto_approve_redemption=false` 仅禁止自动授权，没有独立关闭自动赎回开关。因此不能把 LIVE+PAUSED 当成只读预检。真正只读工具应独立于应用 LIVE runtime，当前尚未实现；不得为预检启用实盘服务。
 
+## 行情诊断修复与独立预检实现（2026-09-08）
+- 用户明确要求处理后，在本地实现每组 socket 的 CONNECTING/AWAITING_BOOKS/READY/RECONNECTING/STOPPED 状态。仅在该组完整盘口全部到齐后清除该组当前错误，其他组错误继续呈现；历史 lastStreamError/At 保留。移除的订阅不再贡献当前错误。行情、交易和暂停规则未变。
+- dashboard 诊断增加每组任务是否存活、最近接收时间、完整盘口数量与缺失 Token；每个 INCOMPLETE Event 明确列出缺失盘口或等待评估原因。此信息只扩展诊断/API，不重新设计 UI。现有只读巡检已输出 diagnostics，部署新版后即可看到这些字段。
+- 新增 `python -m pm_nautilus.preflight`，只接收公开地址，固定区块查询 Polygon 钱包归属、合约代码、余额、交易及赎回授权；不读取 LIVE 凭据、不构造 signer、不启动 runtime。RPC 方法白名单拒绝发送交易。详见 `docs/LIVE_READINESS.md`，成功报告不是实盘验收。
+- 73项测试通过；新增回归验证完整盘口恢复、不同分组错误互不遮盖、历史错误保留、待定 Event 缺失 Token、取消后盘口失效、只读 RPC 白名单、固定区块及错误链/不支持钱包类型拒绝。Ruff通过；实际公开 RPC 预检完成，未进行任何签名或链上写入。
+- 本次修复先交付本地/GitHub；服务器仍固定旧代码 `41d148a0`，正式 TEST 不因诊断改动重启。待约定 TEST 检查节点再备份部署；如果实际出现行情故障或影响交易则提前处理。新增诊断尚未在正式服务器生效，不能声称已据此排查完那7个待定 Event。
+
 ## 交付与继续入口
 - README.md：启动入口；docs/DEPLOY.md：完整操作步骤；docs/VALIDATION.md：结果、覆盖与未验收部分。
 - artifacts/FULL_SOURCE.md：所有受控文本文件完整内容（含锁文件，无省略）；SOURCE_MANIFEST.json逐文件SHA256及最终提交。

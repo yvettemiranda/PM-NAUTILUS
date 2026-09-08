@@ -15,7 +15,16 @@
 
 `LIVE + PAUSED` **不等于只读模式**。按既定规则，PAUSE 停止新买，但已有仓位仍可卖出、止损和赎回；`app.py` 在 LIVE attach 时挂接 RedemptionService，且没有独立的“关闭自动赎回”配置。`auto_approve_redemption=false` 只关闭自动授权，不能阻止已授权仓位赎回。
 
-真正只读预检应独立运行，不启动应用 LIVE runtime、不构造签名钱包、不导入私钥，仅使用公开地址和只读 RPC/HTTP 方法核对。需要认证的账户检查应在独立、限定只读调用的工具中进行。当前尚未交付这样的独立预检工具；不能用应用 START/PAUSE 代替它。
+真正只读预检独立运行，不启动应用 LIVE runtime、不构造签名钱包、不导入私钥。已提供 `pm_nautilus.preflight`：
+
+```sh
+.venv/bin/python -m pm_nautilus.preflight \
+  --signer 0x你的公开签名地址 \
+  --funder 0x你的公开资金地址 \
+  --signature-type 2
+```
+
+默认使用 Polygon PublicNode；如需自己的 RPC，可通过 `PM_PREFLIGHT_RPC_URL` 环境变量指定（不要将带密钥 URL 放入截图或提交）。程序不输出 RPC URL 或异常详细内容。所有链状态查询固定在同一个区块；允许的方法仅有 chainId、blockNumber、getCode、getBalance、eth_call。检查 EOA/Safe 归属、关键合约有代码、pUSD/POL 余额、两种 Exchange allowance 及 CTF 交易/赎回授权。命令成功只表示公开检查完成；余额为零或未授权会原样报告，不表示可以启用 LIVE。需要认证的 CLOB 账户、开放订单及仓位归属仍需后续独立检查；不能用应用 START/PAUSE 代替它。
 
 ## 尚未验收
 
@@ -26,4 +35,4 @@
 
 ## 本次本地验证
 
-`pytest -q`：70 passed，2 个既有第三方弃用警告；Ruff check 与 format --check 通过。本次没有修改运行代码或依赖，没有重启服务器。
+初次审计 `pytest -q`：70 passed。随后实现诊断修复和独立只读工具，73 passed，2 个既有第三方弃用警告；Ruff check 与 format --check 通过。只读工具已对用户授权的公开地址完成 Polygon 实际查询；没有签名、私有连接或链上写入。服务器部署状态以 HANDOFF 为准。

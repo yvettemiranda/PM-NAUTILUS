@@ -187,6 +187,71 @@ def test_normal_websocket_disconnect_retries_without_pausing(monkeypatch):
     asyncio.run(run())
 
 
+def test_stream_recovery_waits_for_all_books_and_preserves_other_errors(tmp_path, monkeypatch):
+    import json
+    from pm_nautilus.views import dashboard
+
+    r, _, t = setup(tmp_path)
+    r.add_tokens([replace(t, token_id="2", direction="NO")])
+    service = MarketService(r)
+    service.remember_error("streamError", ConnectionError("old disconnect"))
+    service.stream_state(("1", "2"), "RECONNECTING", "ConnectionError")
+    service.stream_state(("3",), "RECONNECTING", "TimeoutError")
+
+    class Socket:
+        count = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def send(self, _):
+            pass
+
+        async def recv(self):
+            self.count += 1
+            if self.count == 2:
+                assert service.streams[("1", "2")]["error"] == "ConnectionError"
+                service.streams.pop(("3",))
+                d = dashboard(r, service)
+                assert d["marketScan"]["diagnostics"]["pendingEvents"][0][
+                    "missingBookTokenIds"
+                ] == ["2"]
+            if self.count == 3:
+                assert service.streams[("1", "2")]["state"] == "READY"
+                assert service.scan_status["streamError"] is None
+                assert "old disconnect" in service.scan_status["lastStreamError"]
+                raise asyncio.CancelledError
+            return json.dumps(
+                {
+                    "event_type": "book",
+                    "market": "condition",
+                    "asset_id": str(self.count),
+                    "bids": [],
+                    "asks": [],
+                    "timestamp": 0,
+                }
+            )
+
+    async def run():
+        monkeypatch.setattr("pm_nautilus.market.connect", lambda *a, **kw: Socket())
+        try:
+            # One recovered group must never hide another failed group.
+            service.stream_state(("1", "2"), "READY")
+            assert service.scan_status["streamError"] == "TimeoutError"
+            service.stream_state(("1", "2"), "RECONNECTING", "ConnectionError")
+            with pytest.raises(asyncio.CancelledError):
+                await service.socket(("1", "2"))
+            assert not r.books["1"].ready
+        finally:
+            await service.close()
+
+    asyncio.run(run())
+    r.close()
+
+
 def test_sibling_unknown_blocks_empty_does_not(tmp_path):
     r, _, t = setup(tmp_path)
     r.add_tokens([replace(t, token_id="2", direction="NO")])

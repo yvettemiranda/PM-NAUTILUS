@@ -110,6 +110,14 @@ def dashboard(r, service=None, limit=20, live_enabled=False):
                 "eligibleTokenCount": len(ids),
                 "marketCount": len({r.tokens[x].market_id for x in ids}),
                 "status": status,
+                "pendingReason": (
+                    "AWAITING_FULL_BOOKS"
+                    if any(not r.books[x].ready for x in ids)
+                    else "AWAITING_EVALUATION"
+                )
+                if status == "INCOMPLETE"
+                else None,
+                "missingBookTokenIds": sorted(x for x in ids if not r.books[x].ready),
                 "locked": eid in r.business["cycles"] or bool(r.active_intents(eid)),
                 "winner": v if winner else None,
                 "representative": v,
@@ -130,6 +138,12 @@ def dashboard(r, service=None, limit=20, live_enabled=False):
         diagnostics={
             "availableCategories": service.categories if service else r.store.get("categories", []),
             "eventCount": scan.get("eventCountScanned", 0),
+            "streams": service.stream_diagnostics() if service else None,
+            "pendingEvents": [
+                {k: e[k] for k in ("eventId", "pendingReason", "missingBookTokenIds")}
+                for e in events
+                if e["status"] == "INCOMPLETE"
+            ],
         },
     )
     return {

@@ -138,12 +138,39 @@ class MarketService:
         self.runtime = runtime
         self.http = httpx.AsyncClient(timeout=30, transport=transport)
         self.tasks = {}
+        self.streams = {}
         self.scan_status = runtime.store.get("scan", {})
         self.categories = runtime.store.get("categories", [])
         self.closed = False
         self.loop_task = None
         self.on_resolution = None
         self.subscription_lock = asyncio.Lock()
+
+    def stream_state(self, group, state, error=None):
+        entry = self.streams.setdefault(group, {})
+        entry.update(state=state, error=error)
+        errors = [v["error"] for v in self.streams.values() if v.get("error")]
+        current = errors[-1] if errors else None
+        if self.scan_status.get("streamError") != current:
+            self.scan_status["streamError"] = current
+            self.runtime.store.put("scan", self.scan_status)
+
+    def stream_diagnostics(self):
+        groups = []
+        for group in sorted(self.streams):
+            entry = self.streams[group]
+            task = self.tasks.get(group)
+            missing = [tid for tid in group if not self.runtime.books[tid].ready]
+            groups.append(
+                dict(
+                    entry,
+                    tokenCount=len(group),
+                    readyBookCount=len(group) - len(missing),
+                    missingTokenIds=missing,
+                    taskRunning=task is not None and not task.done(),
+                )
+            )
+        return {"groups": groups, "groupCount": len(groups)}
 
     def remember_error(self, key, exc):
         name = type(exc).__name__
@@ -263,6 +290,12 @@ class MarketService:
             task = self.tasks.pop(group)
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+            self.streams.pop(group, None)
+        # Recompute after obsolete subscriptions have been removed.
+        errors = [v["error"] for v in self.streams.values() if v.get("error")]
+        if self.scan_status.get("streamError") != (errors[-1] if errors else None):
+            self.scan_status["streamError"] = errors[-1] if errors else None
+            self.runtime.store.put("scan", self.scan_status)
         for group in groups - self.tasks.keys():
             if self.closed:
                 return
@@ -316,6 +349,8 @@ class MarketService:
         try:
             while not self.closed:
                 r.disconnect(group)
+                previous_error = self.streams.get(group, {}).get("error")
+                self.stream_state(group, "CONNECTING", previous_error)
                 try:
                     async with connect(
                         WS, ping_interval=10, ping_timeout=10, max_size=16 * 1024 * 1024
@@ -330,12 +365,16 @@ class MarketService:
                             )
                         )
                         backoff = 1
+                        self.stream_state(group, "AWAITING_BOOKS", previous_error)
                         while not self.closed:
                             try:
                                 raw = await asyncio.wait_for(ws.recv(), timeout=15)
                             except TimeoutError:
                                 await ws.send("PING")
                                 raw = await asyncio.wait_for(ws.recv(), timeout=15)
+                            self.streams[group]["lastReceivedAt"] = datetime.now(
+                                timezone.utc
+                            ).isoformat()
                             if raw in ("PONG", "PING"):
                                 if raw == "PING":
                                     await ws.send("PONG")
@@ -343,6 +382,10 @@ class MarketService:
                             messages = json.loads(raw)
                             for msg in messages if isinstance(messages, list) else [messages]:
                                 self.message(msg, group)
+                            if self.streams[group]["state"] != "READY" and all(
+                                r.books[tid].ready for tid in group
+                            ):
+                                self.stream_state(group, "READY")
                 except (
                     ConnectionClosed,
                     OSError,
@@ -353,10 +396,12 @@ class MarketService:
                     # Normal public-feed disconnects are recoverable. The socket is
                     # invalidated in finally and reconnected with bounded backoff.
                     self.remember_error("streamError", exc)
+                    self.stream_state(group, "RECONNECTING", type(exc).__name__)
                 except Exception as exc:
                     # A broken feed cannot retain an executable last-known book.
                     self.remember_error("streamError", exc)
                     self.remember_error("serviceError", exc)
+                    self.stream_state(group, "RECONNECTING", type(exc).__name__)
                     r.pause()
                 finally:
                     r.disconnect(group)
@@ -364,6 +409,8 @@ class MarketService:
                 backoff = min(backoff * 2, 30)
         finally:
             r.disconnect(group)
+            if group in self.streams:
+                self.stream_state(group, "STOPPED", self.streams[group].get("error"))
 
     async def run(self):
         last_scan = 0

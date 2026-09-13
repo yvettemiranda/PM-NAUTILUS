@@ -128,12 +128,17 @@ class Runtime:
         return reserved
 
     def add_tokens(self, tokens, official_tags=None):
-        for t in tokens:
-            self.tokens[t.token_id] = t
-            self.instrument_tokens[str(instrument_id(t))] = t.token_id
-            self.store.save_token(t)
-            self.books.setdefault(t.token_id, Book())
-            self.native.data.process(make_instrument(t))
+        # One metadata commit per scan, not one FULL fsync per discovered token.
+        # Unchanged metadata must not repeatedly rebuild native instruments.
+        with self.store.transaction():
+            for t in tokens:
+                if self.tokens.get(t.token_id) == t:
+                    continue
+                self.tokens[t.token_id] = t
+                self.instrument_tokens[str(instrument_id(t))] = t.token_id
+                self.store.save_token(t)
+                self.books.setdefault(t.token_id, Book())
+                self.native.data.process(make_instrument(t))
         if official_tags is not None:
             self.official_tags = set(official_tags)
             self.store.put("official_tags", sorted(self.official_tags))

@@ -68,3 +68,9 @@ Compose在缺PM_GIT_REVISION时明确拒绝，补完整SHA后config --quiet通�
 恢复演练发现 uv 0.8.22 的内置Python下载目录没有3.12.14；已在 REINSTALL.md 改为先用 uv 0.12.10 下载Python，再用锁定的 uv 0.8.22 安装项目依赖。新下载的 Python 3.12.14 已实测安装成功，不依赖旧 Codex 内置 Python 路径。
 
 干净恢复验证：从实际 GitHub 公开 URL 克隆到新目录，使用独立下载的 Python3.12.14 和新 `.venv`，uv0.8.22按锁文件安装75个包；Ruff check/format通过，68测试通过（首次冷启动82.46秒，2警告），JS语法检查通过。未复制旧虚拟环境或参考源码。首次服务探测20秒超时，等待首次依赖加载后健康成功；未绕过系统安全检查。离线服务实测 `status=ok, mode=TEST, strategyStatus=PAUSED, liveExecutionEnabled=false`，首页及app.js均HTTP200，随后停止临时服务。此验证恢复的是开发环境，不是运行账本或真实钱包。
+# 2026-09-13 心跳与订阅恢复回归
+
+- 77项本地测试通过；包括繁忙WS仍定期PING、PONG超时、仅重订阅缺失完整盘口、新增Token保持旧连接，以及未变化元数据不重复入库。既有逐Fill目标、共享深度、持久化恢复回归仍通过。
+- 官方依据：[市场WebSocket](https://docs.polymarket.com/api-reference/wss/market)明确要求每10秒文本PING。真实公开探针35秒收到4次PONG，取消再订阅同一公开Token后再次收到book。没有真实签名或资金动作。
+- 独立公开行情模拟短测产生14笔Fill，10个native持仓，验证与同库重启均通过，结束TEST/PAUSED；不是正式服务器长期TEST验收。
+- 服务器部署、原账本保留及新运行区间见HANDOFF.md。没有通过减弱持久化或引入未知盘口估值来隐藏故障。

@@ -261,3 +261,115 @@ def test_sibling_unknown_blocks_empty_does_not(tmp_path):
     r.book("2", [], [])
     assert r.business["cycles"]["event"]["token_id"] == "1"
     r.close()
+
+
+def test_busy_feed_sends_heartbeat_and_recovers_only_missing_books(tmp_path, monkeypatch):
+    import json
+
+    r, _, t = setup(tmp_path)
+    r.add_tokens([replace(t, token_id="2")])
+    r.book("2", [], [], 0)
+    s = MarketService(r)
+    s.stream_state(("1", "2"), "AWAITING_BOOKS")
+    monkeypatch.setattr("pm_nautilus.market.HEARTBEAT_SECONDS", 0.01)
+    monkeypatch.setattr("pm_nautilus.market.RECOVERY_SECONDS", 0.04)
+
+    class Socket:
+        def __init__(self):
+            self.sent = []
+            self.pending = []
+
+        async def send(self, data):
+            self.sent.append(data)
+            if data == "PING":
+                self.pending.append("PONG")
+            elif json.loads(data)["operation"] == "subscribe":
+                self.pending.append(
+                    json.dumps(
+                        {
+                            "event_type": "book",
+                            "asset_id": "1",
+                            "market": "condition",
+                            "timestamp": 0,
+                            "bids": [],
+                            "asks": [],
+                        }
+                    )
+                )
+
+        async def recv(self):
+            await asyncio.sleep(0.001)
+            return self.pending.pop(0) if self.pending else "[]"
+
+    async def run():
+        ws = Socket()
+        task = asyncio.create_task(s.receive(ws, ("1", "2")))
+        try:
+            await asyncio.sleep(0.09)
+            assert not task.done()
+            assert ws.sent.count("PING") >= 3
+            updates = [json.loads(x) for x in ws.sent if x != "PING"]
+            assert updates == [
+                {"operation": "unsubscribe", "assets_ids": ["1"]},
+                {"operation": "subscribe", "assets_ids": ["1"]},
+            ]
+            assert all(r.books[x].ready for x in ("1", "2"))
+            assert s.streams[("1", "2")]["state"] == "READY"
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await s.close()
+
+    asyncio.run(run())
+    r.close()
+
+
+def test_busy_feed_without_pong_fails_closed(tmp_path, monkeypatch):
+    r, _, _ = setup(tmp_path)
+    s = MarketService(r)
+    s.stream_state(("1",), "AWAITING_BOOKS")
+    monkeypatch.setattr("pm_nautilus.market.HEARTBEAT_SECONDS", 0.01)
+    monkeypatch.setattr("pm_nautilus.market.RECOVERY_SECONDS", 0.03)
+
+    class Socket:
+        async def send(self, data):
+            pass
+
+        async def recv(self):
+            await asyncio.sleep(0.001)
+            return "[]"
+
+    async def run():
+        try:
+            with pytest.raises(ConnectionError, match="PONG"):
+                await asyncio.wait_for(s.receive(Socket(), ("1",)), 1)
+        finally:
+            await s.close()
+
+    asyncio.run(run())
+    r.close()
+
+
+def test_subscription_addition_preserves_existing_connections(tmp_path):
+    r, _, _ = setup(tmp_path)
+    s = MarketService(r)
+
+    async def idle(group):
+        await asyncio.Event().wait()
+
+    s.socket = idle
+
+    async def run():
+        try:
+            r.monitored = {"1", "2"}
+            await s.sync_subscriptions()
+            old = s.tasks[("1", "2")]
+            r.monitored.add("0")
+            await s.sync_subscriptions()
+            assert s.tasks[("1", "2")] is old and not old.cancelled()
+            assert ("0",) in s.tasks
+        finally:
+            await s.close()
+
+    asyncio.run(run())
+    r.close()

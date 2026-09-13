@@ -18,6 +18,8 @@ from .rules import Token, Fees
 GAMMA = "https://gamma-api.polymarket.com"
 WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 TAGS = f"{GAMMA}/tags/102982/related-tags/tags"
+HEARTBEAT_SECONDS = 10
+RECOVERY_SECONDS = 30
 
 
 def timestamp(value):
@@ -284,8 +286,13 @@ class MarketService:
             return
         # Batch size limits one socket, never the monitored universe. Stable sorted
         # chunks bound connections; changed chunks are invalid until fresh snapshots.
-        ids = sorted(self.runtime.monitored)
-        groups = {tuple(ids[i : i + 200]) for i in range(0, len(ids), 200)}
+        monitored = self.runtime.monitored
+        # Preserve existing groups: adding one ID must not reshuffle every socket.
+        groups = {tuple(tid for tid in group if tid in monitored) for group in self.tasks}
+        groups.discard(())
+        assigned = {tid for group in groups for tid in group}
+        ids = sorted(monitored - assigned)
+        groups.update(tuple(ids[i : i + 200]) for i in range(0, len(ids), 200))
         for group in self.tasks.keys() - groups:
             task = self.tasks.pop(group)
             task.cancel()
@@ -343,6 +350,51 @@ class MarketService:
                 r.disconnect([tid])
                 raise ConnectionError("tick 变化，需要新完整盘口")
 
+    async def receive(self, ws, group):
+        """Text heartbeat deadlines are independent of incoming market traffic."""
+        loop = asyncio.get_running_loop()
+        next_ping = loop.time()
+        next_recovery = loop.time() + RECOVERY_SECONDS
+        last_pong = loop.time()
+        while not self.closed:
+            now = loop.time()
+            if now >= next_ping:
+                if now - last_pong > RECOVERY_SECONDS:
+                    raise ConnectionError("市场文本心跳PONG超时")
+                await ws.send("PING")
+                self.streams[group]["lastPingAt"] = datetime.now(timezone.utc).isoformat()
+                next_ping = loop.time() + HEARTBEAT_SECONDS
+            if now >= next_recovery:
+                missing = [tid for tid in group if not self.runtime.books[tid].ready]
+                if missing:
+                    # Only retry missing snapshots; quiet but complete books stay valid.
+                    await ws.send(json.dumps({"operation": "unsubscribe", "assets_ids": missing}))
+                    await ws.send(json.dumps({"operation": "subscribe", "assets_ids": missing}))
+                    entry = self.streams[group]
+                    entry["snapshotRetries"] = entry.get("snapshotRetries", 0) + 1
+                next_recovery = loop.time() + RECOVERY_SECONDS
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=max(0.001, next_ping - loop.time()))
+            except TimeoutError:
+                continue
+            self.streams[group]["lastReceivedAt"] = datetime.now(timezone.utc).isoformat()
+            if raw == "PONG":
+                last_pong = loop.time()
+                self.streams[group]["lastPongAt"] = datetime.now(timezone.utc).isoformat()
+                continue
+            if raw == "PING":
+                await ws.send("PONG")
+                continue
+            messages = json.loads(raw)
+            for msg in messages if isinstance(messages, list) else [messages]:
+                self.message(msg, group)
+                # Large snapshot bursts must allow other sockets' timers to run.
+                await asyncio.sleep(0)
+            if self.streams[group]["state"] != "READY" and all(
+                self.runtime.books[tid].ready for tid in group
+            ):
+                self.stream_state(group, "READY")
+
     async def socket(self, group):
         r = self.runtime
         backoff = 1
@@ -366,26 +418,7 @@ class MarketService:
                         )
                         backoff = 1
                         self.stream_state(group, "AWAITING_BOOKS", previous_error)
-                        while not self.closed:
-                            try:
-                                raw = await asyncio.wait_for(ws.recv(), timeout=15)
-                            except TimeoutError:
-                                await ws.send("PING")
-                                raw = await asyncio.wait_for(ws.recv(), timeout=15)
-                            self.streams[group]["lastReceivedAt"] = datetime.now(
-                                timezone.utc
-                            ).isoformat()
-                            if raw in ("PONG", "PING"):
-                                if raw == "PING":
-                                    await ws.send("PONG")
-                                continue
-                            messages = json.loads(raw)
-                            for msg in messages if isinstance(messages, list) else [messages]:
-                                self.message(msg, group)
-                            if self.streams[group]["state"] != "READY" and all(
-                                r.books[tid].ready for tid in group
-                            ):
-                                self.stream_state(group, "READY")
+                        await self.receive(ws, group)
                 except (
                     ConnectionClosed,
                     OSError,

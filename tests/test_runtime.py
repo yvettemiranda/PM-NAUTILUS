@@ -5,6 +5,22 @@ from pm_nautilus.rules import Token, Fees
 DAY = 86400000000000
 
 
+def test_unchanged_metadata_does_not_rewrite_or_reregister(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from unittest.mock import Mock
+
+    r, _, t = setup(tmp_path)
+    save = Mock(wraps=r.store.save_token)
+    monkeypatch.setattr(r.store, "save_token", save)
+    r.add_tokens([t])
+    save.assert_not_called()
+    changed = replace(t, tick=10000)
+    r.add_tokens([changed])
+    save.assert_called_once_with(changed)
+    assert r.store.tokens()[t.token_id].tick == 10000
+    r.close()
+
+
 def setup(tmp_path, fees=False):
     clock = TestClock()
     clock.set_time(DAY)

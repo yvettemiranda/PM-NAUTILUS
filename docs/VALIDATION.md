@@ -74,3 +74,6 @@ Compose在缺PM_GIT_REVISION时明确拒绝，补完整SHA后config --quiet通�
 - 官方依据：[市场WebSocket](https://docs.polymarket.com/api-reference/wss/market)明确要求每10秒文本PING。真实公开探针35秒收到4次PONG，取消再订阅同一公开Token后再次收到book。没有真实签名或资金动作。
 - 独立公开行情模拟短测产生14笔Fill，10个native持仓，验证与同库重启均通过，结束TEST/PAUSED；不是正式服务器长期TEST验收。
 - 服务器部署、原账本保留及新运行区间见HANDOFF.md。没有通过减弱持久化或引入未知盘口估值来隐藏故障。
+- 补充跨连接完整快照时间基线回归：新快照允许重新建立基线但保留双侧消耗量，已就绪后继续拒绝旧时间戳，未就绪不接受增量。78项测试通过，GitHub Actions 34755364023 在 Linux x86_64/ARM64 均测试及Docker verify成功；最终代码提交bcec57d。
+- 19:48只读采样：第一轮心跳修复版本已运行约5小时，5组905盘口均READY、待定事件0、当前扫描/分类/流/服务错误为空，22个持仓，账本和SQLite校验通过。历史最近流事件为17:29的tick变更触发受控重连，不是新的心跳超时。此为按需采样，不宣称全时段零中断或长期验收完成。
+- 最终bcec57d服务器部署复验：新容器healthy，扫描21427事件后5组READY、缺失盘口事件0，22持仓20 READY/2 NO_BID；362条维护前原生事件逐条与备份一致、preferences一致。20:13:19 CST认证控制请求恢复TEST，LIVE仍false。部署过程中源码权限问题已修复，过程和剩余容量风险详见HANDOFF。

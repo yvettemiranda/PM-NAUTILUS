@@ -51,7 +51,10 @@ class Book:
     revision: int = 0
 
     def snapshot(self, bids: list[Level], asks: list[Level], timestamp: int):
-        if timestamp < self.timestamp:
+        # A reconnect snapshot establishes a new stream baseline. Venue snapshot
+        # clocks can lag the old stream's delta clock (observed by 1 ms).
+        # Preserve shadow consumption; reject regressions again once ready.
+        if self.ready and timestamp < self.timestamp:
             return False
         self.bid.update(bids)
         self.ask.update(asks)

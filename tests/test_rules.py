@@ -105,6 +105,24 @@ def test_unrelated_lower_bid_does_not_replenish():
     assert dict(b.bid.available())[35000] == 2_000_000
 
 
+def test_reconnect_snapshot_rebases_clock_without_replenishing_consumed_depth():
+    b = Book()
+    bids, asks = [(35000, 5_000_000)], [(40000, 8_000_000)]
+    assert b.snapshot(bids, asks, 1001)
+    b.bid.consume(35000, 4_000_000)
+    b.ask.consume(40000, 3_000_000)
+    assert not b.snapshot(bids, asks, 1000)
+    b.disconnect()
+    assert not b.delta("BID", bids, 1002)
+    assert b.snapshot(bids, asks, 1000)
+    assert b.ready and b.timestamp == 1000
+    assert dict(b.bid.available()) == {35000: 1_000_000}
+    assert dict(b.ask.available()) == {40000: 5_000_000}
+    assert not b.snapshot(bids, asks, 999)
+    assert not b.delta("BID", bids, 999)
+    assert b.delta("BID", bids, 1001)
+
+
 def test_preview_bid_uses_same_consumption_as_sell():
     from pm_nautilus.rules import preview
 

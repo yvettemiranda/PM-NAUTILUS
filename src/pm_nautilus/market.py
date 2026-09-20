@@ -9,7 +9,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 import httpx
-from websockets.asyncio.client import connect
+from websockets.asyncio.client import connect, process_exception
 from websockets.exceptions import ConnectionClosed
 
 from .config import micros
@@ -293,11 +293,18 @@ class MarketService:
         assigned = {tid for group in groups for tid in group}
         ids = sorted(monitored - assigned)
         groups.update(tuple(ids[i : i + 200]) for i in range(0, len(ids), 200))
+        # Leave one spare partial group to avoid reconnecting on every addition,
+        # but compact accumulated fragments. Never drop or cap eligible tokens.
+        if len(groups) > (len(monitored) + 199) // 200 + 1:
+            partial = sorted(tid for group in groups if len(group) < 200 for tid in group)
+            groups = {group for group in groups if len(group) == 200}
+            groups.update(tuple(partial[i : i + 200]) for i in range(0, len(partial), 200))
         for group in self.tasks.keys() - groups:
             task = self.tasks.pop(group)
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             self.streams.pop(group, None)
+        self.runtime.release_unmonitored()
         # Recompute after obsolete subscriptions have been removed.
         errors = [v["error"] for v in self.streams.values() if v.get("error")]
         if self.scan_status.get("streamError") != (errors[-1] if errors else None):
@@ -320,6 +327,7 @@ class MarketService:
                 if tid not in allowed or msg.get("market") != r.tokens[tid].condition_id:
                     continue
                 b = r.books[tid]
+                shadow = r.shadow_depth(b)
                 side = (
                     "BID"
                     if change.get("side") == "BUY"
@@ -328,7 +336,7 @@ class MarketService:
                     else None
                 )
                 if side and b.delta(side, [(micros(change["price"]), micros(change["size"]))], ts):
-                    r.store.save_book(tid, b)
+                    r.checkpoint_shadow(tid, shadow)
                     r.native.feed(r.tokens[tid], b)
                     r.dirty.add(r.tokens[tid].event_id)
             r.drain()
@@ -419,23 +427,16 @@ class MarketService:
                         backoff = 1
                         self.stream_state(group, "AWAITING_BOOKS", previous_error)
                         await self.receive(ws, group)
-                except (
-                    ConnectionClosed,
-                    OSError,
-                    ConnectionError,
-                    ValueError,
-                    TimeoutError,
-                ) as exc:
-                    # Normal public-feed disconnects are recoverable. The socket is
-                    # invalidated in finally and reconnected with bounded backoff.
-                    self.remember_error("streamError", exc)
-                    self.stream_state(group, "RECONNECTING", type(exc).__name__)
                 except Exception as exc:
-                    # A broken feed cannot retain an executable last-known book.
+                    # Use the pinned client's handshake classification (including
+                    # HTTP 500/502/503/504). Auth errors and unknown bugs stay fatal.
+                    retryable = isinstance(exc, (ConnectionClosed, ConnectionError, ValueError))
+                    retryable = retryable or process_exception(exc) is None
                     self.remember_error("streamError", exc)
-                    self.remember_error("serviceError", exc)
                     self.stream_state(group, "RECONNECTING", type(exc).__name__)
-                    r.pause()
+                    if not retryable:
+                        self.remember_error("serviceError", exc)
+                        r.pause()
                 finally:
                     r.disconnect(group)
                 await asyncio.sleep(backoff)

@@ -104,8 +104,8 @@ class Native:
         strategy.register(self.trader_id, self.portfolio, self.bus, self.cache, self.clock)
         self.execution.register_oms_type(strategy)
         self.execution.register_client(client)
-        for t in self.owner.tokens.values():
-            self.data.process(make_instrument(t))
+        for tid in {i["token_id"] for i in self.owner.store.intents().values()}:
+            self.ensure_instrument(self.owner.tokens[tid])
         # Initialize native order cache and rebuild positions by replaying canonical
         # native execution events. PM projection runs only after framework recovery.
         self.owner.replaying = True
@@ -124,9 +124,16 @@ class Native:
         for component in (self.data, self.risk, self.execution, strategy):
             component.start()
 
+    def ensure_instrument(self, t):
+        iid = instrument_id(t)
+        if self.cache.instrument(iid) is None:
+            self.data.process(make_instrument(t))
+        self.owner.instrument_tokens[str(iid)] = t.token_id
+
     def feed(self, t, book):
         """Publish complete public books through Nautilus DataEngine and Strategy."""
         iid = instrument_id(t)
+        self.ensure_instrument(t)
         deltas = [OrderBookDelta.clear(iid, 0, book.timestamp, book.timestamp)]
         values = [(OrderSide.BUY, p, q) for p, q in book.bid.external.items()]
         values += [(OrderSide.SELL, p, q) for p, q in book.ask.external.items()]

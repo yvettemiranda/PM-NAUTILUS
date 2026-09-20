@@ -19,7 +19,11 @@ class Side:
                 raise ValueError("非法盘口数值")
             # A reduction removes available public depth first. Consumed shadow size
             # remains up to new public size; later growth releases only the new size.
-            self.consumed[p] = min(self.consumed.get(p, 0), qty)
+            consumed = min(self.consumed.get(p, 0), qty)
+            if consumed:
+                self.consumed[p] = consumed
+            else:
+                self.consumed.pop(p, None)
             self.external[p] = qty
             if qty == 0:
                 self.external.pop(p, None)

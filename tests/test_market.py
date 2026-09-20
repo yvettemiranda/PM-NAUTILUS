@@ -373,3 +373,72 @@ def test_subscription_addition_preserves_existing_connections(tmp_path):
 
     asyncio.run(run())
     r.close()
+
+
+@pytest.mark.parametrize(
+    "status,retryable",
+    [(500, True), (502, True), (503, True), (504, True), (401, False), (403, False)],
+)
+def test_websocket_handshake_failure_classification(monkeypatch, status, retryable):
+    from websockets.exceptions import InvalidStatus
+    from websockets.http11 import Response
+    from websockets.datastructures import Headers
+
+    runtime = SimpleNamespace(
+        store=SimpleNamespace(get=lambda key, default=None: default, put=Mock()),
+        disconnect=Mock(),
+        pause=Mock(),
+    )
+    service = MarketService(runtime)
+
+    class FailedSocket:
+        async def __aenter__(self):
+            raise InvalidStatus(Response(status, "test", Headers()))
+
+        async def __aexit__(self, *args):
+            return False
+
+    async def stop(_):
+        raise asyncio.CancelledError
+
+    async def run():
+        monkeypatch.setattr("pm_nautilus.market.connect", lambda *a, **kw: FailedSocket())
+        monkeypatch.setattr("pm_nautilus.market.asyncio.sleep", stop)
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await service.socket(("1",))
+            assert runtime.pause.called is not retryable
+            assert ("serviceError" in service.scan_status) is not retryable
+            assert runtime.disconnect.call_count >= 2
+        finally:
+            await service.close()
+
+    asyncio.run(run())
+
+
+def test_subscription_churn_is_bounded_without_dropping_tokens(tmp_path):
+    r, _, _ = setup(tmp_path)
+    s = MarketService(r)
+
+    async def idle(group):
+        await asyncio.Event().wait()
+
+    s.socket = idle
+
+    async def run():
+        try:
+            r.monitored = set()
+            for i in range(650):
+                r.monitored.add(str(i))
+                await s.sync_subscriptions()
+                assert len(s.tasks) <= (len(r.monitored) + 199) // 200 + 1
+                assert {tid for group in s.tasks for tid in group} == r.monitored
+                assert sum(map(len, s.tasks)) == len(r.monitored)
+            r.monitored = set(sorted(r.monitored)[::3])
+            await s.sync_subscriptions()
+            assert {tid for group in s.tasks for tid in group} == r.monitored
+        finally:
+            await s.close()
+
+    asyncio.run(run())
+    r.close()

@@ -5,6 +5,68 @@ from pm_nautilus.rules import Token, Fees
 DAY = 86400000000000
 
 
+def test_quotes_do_not_write_and_shadow_survives_restart(tmp_path):
+    r, clock, _ = setup(tmp_path)
+    changes = r.store.db.total_changes
+    for n in range(1000):
+        r.book("1", [(15000, 100_000_000 + n)], [(20000, 50_000_000)])
+    assert r.store.db.total_changes == changes
+    r.start()
+    r.pause()
+    assert r.books["1"].ask.consumed[20000] == 50_000_000
+    changes = r.store.db.total_changes
+    for n in range(1000):
+        r.book("1", [(15000, 100_000_000 + n)], [(20000, 50_000_000)])
+    assert r.store.db.total_changes == changes
+    r.book("1", [(15000, 100_000_000)], [(20000, 20_000_000)])
+    assert r.books["1"].ask.consumed[20000] == 20_000_000
+    r.close()
+    r = Runtime(tmp_path / "test.sqlite", clock=clock)
+    assert not r.books["1"].ready
+    r.book("1", [(15000, 100_000_000)], [(20000, 50_000_000)])
+    assert r.books["1"].ask.available() == [(20000, 30_000_000)]
+    assert r.validate()["ok"]
+    r.close()
+
+
+def test_preorder_checkpoint_failure_cannot_commit_order(tmp_path, monkeypatch):
+    import sqlite3
+    import pytest
+
+    r, _, _ = setup(tmp_path)
+    r.book("1", [(15000, 100_000_000)], [(20000, 50_000_000)])
+
+    def fail(*args):
+        raise sqlite3.OperationalError("disk failure before order")
+
+    monkeypatch.setattr(r.store, "save_book", fail)
+    with pytest.raises(sqlite3.OperationalError):
+        r.start()
+    assert r.status == "PAUSED" and not r.validate()["ok"]
+    assert not r.store.intents() and not r.store.events()
+    assert r.cash() == 100_000_000
+    r.close()
+
+
+def test_unused_discovery_does_not_allocate_books_or_native_instruments(tmp_path):
+    from dataclasses import replace
+
+    r, clock, t = setup(tmp_path)
+    r.add_tokens([replace(t, token_id=str(i), event_id=str(i), open=False) for i in range(2, 1002)])
+    assert len(r.tokens) == 1001
+    assert len(r.books) == 0 and len(r.native.cache.instruments()) == 0
+    r.book("1", [(15000, 100_000_000)], [(20000, 50_000_000)])
+    assert len(r.books) == 1 and len(r.native.cache.instruments()) == 1
+    r.monitored.clear()
+    r.release_unmonitored()
+    assert len(r.books) == 0 and len(r.native.cache.instruments()) == 0
+    r.close()
+    r = Runtime(tmp_path / "test.sqlite", clock=clock)
+    assert len(r.books) == 0 and len(r.native.cache.instruments()) == 0
+    assert len(r.tokens) == 1001
+    r.close()
+
+
 def test_unchanged_metadata_does_not_rewrite_or_reregister(tmp_path, monkeypatch):
     from dataclasses import replace
     from unittest.mock import Mock
@@ -82,8 +144,13 @@ def test_projection_write_failure_pauses_and_replays_once(tmp_path, monkeypatch)
     r, clock, t = setup(tmp_path)
     r.book("1", [(15000, 100_000_000)], [(20000, 50_000_000)])
     original = r.store.save_book
+    calls = 0
 
     def fail(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return original(*args)  # Pre-order checkpoint succeeds; projection fails.
         raise sqlite3.OperationalError("controlled disk failure")
 
     monkeypatch.setattr(r.store, "save_book", fail)

@@ -12,7 +12,6 @@ from nautilus_trader.model.events import OrderFilled
 from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.trading.strategy import Strategy
 
-from .books import Book
 from .config import SCALE, Preferences, micros
 from .execution import TestExecution
 from .native import Native, instrument_id, make_instrument, quantity, price
@@ -62,12 +61,14 @@ class Runtime:
         self.mode = mode
         self.preferences = Preferences(**self.store.get("preferences"))
         self.tokens = self.store.tokens()
-        self.books = self.store.books()
+        from .store import BookCache
+
+        self.books = BookCache(self.store)
         self.business = self.store.get("business")
         self.official_tags = set(self.store.get("official_tags", []))
         self.monitored = set()
         self.events = {}
-        self.instrument_tokens = {str(instrument_id(t)): t.token_id for t in self.tokens.values()}
+        self.instrument_tokens = {}
         self.dirty = set()
         self.evaluations = {}
         self.replaying = False
@@ -135,20 +136,20 @@ class Runtime:
                 if self.tokens.get(t.token_id) == t:
                     continue
                 self.tokens[t.token_id] = t
-                self.instrument_tokens[str(instrument_id(t))] = t.token_id
                 self.store.save_token(t)
-                self.books.setdefault(t.token_id, Book())
-                self.native.data.process(make_instrument(t))
+                if str(instrument_id(t)) in self.instrument_tokens:
+                    self.native.data.process(make_instrument(t))
         if official_tags is not None:
             self.official_tags = set(official_tags)
             self.store.put("official_tags", sorted(self.official_tags))
         self.refresh_eligibility()
 
     def refresh_eligibility(self):
+        now = self.now
         self.monitored = {
             tid
             for tid, t in self.tokens.items()
-            if static_reason(t, self.preferences, self.now, self.official_tags) is None
+            if static_reason(t, self.preferences, now, self.official_tags) is None
             and t.condition_id not in self.business["settled"]
         }
         self.events = {}
@@ -158,14 +159,44 @@ class Runtime:
             self.monitored.add(cycle["token_id"])
         self.dirty.update(self.events)
 
+    def release_unmonitored(self):
+        # Called only after obsolete feed tasks have been cancelled and awaited.
+        # Historical execution instruments stay available for native accounting.
+        historical = {i["token_id"] for i in self.store.intents().values()}
+        for tid in self.books.keys() - self.monitored:
+            del self.books[tid]
+        for iid, tid in list(self.instrument_tokens.items()):
+            if tid not in self.monitored and tid not in historical:
+                self.native.cache.purge_instrument(instrument_id(self.tokens[tid]))
+                del self.instrument_tokens[iid]
+
     def book(self, token_id, bids, asks, timestamp=None):
         b = self.books[token_id]
+        shadow = self.shadow_depth(b)
         if not b.snapshot(bids, asks, self.now if timestamp is None else timestamp):
             return
-        self.store.save_book(token_id, b)
+        self.checkpoint_shadow(token_id, shadow)
         self.native.feed(self.tokens[token_id], b)
         self.dirty.add(self.tokens[token_id].event_id)
         self.drain()
+
+    @staticmethod
+    def shadow_depth(book):
+        return dict(book.bid.consumed), dict(book.ask.consumed)
+
+    def checkpoint_shadow(self, token_id, previous):
+        # Public quotes can be reacquired; consumed TEST depth cannot. Persist
+        # reductions immediately so a restart never resurrects consumed size.
+        if previous != self.shadow_depth(self.books[token_id]):
+            self.checkpoint_book(token_id)
+
+    def checkpoint_book(self, token_id):
+        try:
+            self.store.save_book(token_id, self.books[token_id])
+        except Exception as exc:
+            self.faulted = f"book checkpoint: {type(exc).__name__}: {exc}"
+            self.store.put("status", "PAUSED")
+            raise
 
     def disconnect(self, token_ids):
         for tid in token_ids:
@@ -401,6 +432,7 @@ class Runtime:
             )
             bid = max((p for p, q in available_bids if q), default=None)
             stop.observe(bid, b.bid.version, self.now, b.ready)
+            stop_changed = cycle["stop"] != asdict(stop)
             if dispatch:
                 cycle["stop"] = asdict(stop)
             if dispatch and stop.state == "EXITING":
@@ -410,7 +442,7 @@ class Runtime:
                 self.business["targets"] = {
                     k: v for k, v in self.business["targets"].items() if v["event_id"] != eid
                 }
-            if dispatch:
+            if dispatch and (stop_changed or stop.state == "EXITING"):
                 self.store.put("business", self.business)
             if b.ready and not any(i["side"] == "SELL" for i in active.values()):
                 if stop.state == "EXITING" and bid and cycle["quantity"] >= t.min_size:
@@ -512,6 +544,11 @@ class Runtime:
             self.evaluate(eid)
 
     def submit(self, t, side, qty, limit, cash=0, kind="TARGET", targets=None):
+        self.native.ensure_instrument(t)
+        if self.mode == "TEST" and kind != "SETTLEMENT":
+            # Write the pre-fill depth BEFORE any intent/native fill can commit.
+            # Projection still persists consumption atomically with business state.
+            self.checkpoint_book(t.token_id)
         if side == "BUY":
             kind = "BUY"
         oid = ClientOrderId(f"PM-{self.mode}-{uuid4().hex}")

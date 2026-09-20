@@ -14,6 +14,30 @@ from .config import Preferences
 from .rules import Token, Fees
 
 
+class BookCache(dict):
+    """Load durable shadow depth only when a token is actually needed."""
+
+    def __init__(self, store):
+        super().__init__()
+        self.store = store
+
+    def __missing__(self, token_id):
+        row = self.store.db.execute(
+            "SELECT payload FROM books WHERE token_id=?", (token_id,)
+        ).fetchone()
+        book = Book()
+        if row:
+            data = json.loads(row[0])
+            for side in ("bid", "ask"):
+                data[side] = Side(
+                    **{k: {int(p): q for p, q in v.items() if q} for k, v in data[side].items()}
+                )
+            data["ready"] = False
+            book = Book(**data)
+        self[token_id] = book
+        return book
+
+
 class Store:
     def __init__(self, path: str | Path, mode="TEST"):
         self.path = Path(path)
@@ -78,7 +102,7 @@ class Store:
 
     def put(self, key, value):
         self.db.execute(
-            "INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            "INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value != excluded.value",
             (key, json.dumps(value, ensure_ascii=False, separators=(",", ":"))),
         )
 

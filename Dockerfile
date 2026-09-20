@@ -7,10 +7,11 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY src ./src
 COPY LICENSES ./LICENSES
 COPY NOTICE.md ./NOTICE.md
-RUN uv sync --frozen --no-dev && useradd --uid 10001 --create-home pm && mkdir /data && chown pm:pm /data
+RUN chmod -R a+rX src LICENSES NOTICE.md && uv sync --frozen --no-dev && useradd --uid 10001 --create-home pm && mkdir /data && chown pm:pm /data
 ARG GIT_REVISION=local
 ENV PM_GIT_REVISION=${GIT_REVISION}
 USER pm
+RUN .venv/bin/python -c "import pm_nautilus.app"
 EXPOSE 8765
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s CMD ["/app/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/health',timeout=3)"]
 ENTRYPOINT ["/app/.venv/bin/pm-nautilus"]

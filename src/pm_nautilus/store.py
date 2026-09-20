@@ -147,9 +147,14 @@ class Store:
             (token.token_id, json.dumps(asdict(token))),
         )
 
-    def tokens(self):
+    def tokens(self, active_only=False):
         out = {}
-        for row in self.db.execute("SELECT payload FROM tokens"):
+        query = "SELECT payload FROM tokens"
+        if active_only:
+            # Retain every execution identity, including closed historical markets.
+            # Inactive discovery-only metadata remains durable, not resident in RAM.
+            query += " WHERE json_extract(payload,'$.open') IS NOT 0 OR token_id IN (SELECT token_id FROM intents)"
+        for row in self.db.execute(query):
             data = json.loads(row[0])
             data["fees"] = Fees(**data["fees"])
             data["category_ids"] = tuple(data["category_ids"])

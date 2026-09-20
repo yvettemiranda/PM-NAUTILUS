@@ -60,10 +60,31 @@ def test_unused_discovery_does_not_allocate_books_or_native_instruments(tmp_path
     r.monitored.clear()
     r.release_unmonitored()
     assert len(r.books) == 0 and len(r.native.cache.instruments()) == 0
+    assert len(r.tokens) == 1
+    assert len(r.store.tokens()) == 1001
     r.close()
     r = Runtime(tmp_path / "test.sqlite", clock=clock)
     assert len(r.books) == 0 and len(r.native.cache.instruments()) == 0
-    assert len(r.tokens) == 1001
+    assert len(r.tokens) == 1
+    assert len(r.store.tokens()) == 1001
+    r.close()
+
+
+def test_closed_execution_identity_survives_metadata_eviction_and_restart(tmp_path):
+    from dataclasses import replace
+
+    r, clock, t = setup(tmp_path)
+    r.book("1", [(15000, 100_000_000)], [(20000, 50_000_000)])
+    r.start()
+    r.pause()
+    r.add_tokens([replace(t, open=False)])
+    r.release_unmonitored()
+    assert "1" in r.tokens and "1" in r.monitored
+    assert r.validate()["ok"]
+    r.close()
+    r = Runtime(tmp_path / "test.sqlite", clock=clock)
+    assert "1" in r.tokens and not r.tokens["1"].open
+    assert r.cash() == 99_000_000 and r.validate()["ok"]
     r.close()
 
 

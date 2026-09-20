@@ -60,7 +60,7 @@ class Runtime:
         self.store = Store(path, mode)
         self.mode = mode
         self.preferences = Preferences(**self.store.get("preferences"))
-        self.tokens = self.store.tokens()
+        self.tokens = self.store.tokens(active_only=True)
         from .store import BookCache
 
         self.books = BookCache(self.store)
@@ -169,6 +169,9 @@ class Runtime:
             if tid not in self.monitored and tid not in historical:
                 self.native.cache.purge_instrument(instrument_id(self.tokens[tid]))
                 del self.instrument_tokens[iid]
+        for tid, token in list(self.tokens.items()):
+            if not token.open and tid not in self.monitored and tid not in historical:
+                del self.tokens[tid]
 
     def book(self, token_id, bids, asks, timestamp=None):
         b = self.books[token_id]

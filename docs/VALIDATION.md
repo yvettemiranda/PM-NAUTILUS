@@ -1,6 +1,17 @@
 # 验证结果与边界
 
+## 2026-09-20 长期 TEST 稳定性修复
+
+- 最终代码 `a4947c5c884cf48b2e500e9ddec73bc628a7d414`：本地89测试、Ruff/格式通过，前端未改且Node语法检查通过；GitHub Actions [35515717722](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/35515717722) 的x86_64/ARM64均成功。用户服务器真实Linux verify镜像89测试通过（9.55秒），以非root身份导入生产模块成功。
+- 新增回归覆盖临时500/502/503/504重连与401/403安全暂停、650次订阅增加的有界分组及全覆盖、按需盘口/native缓存、关闭元数据释放及历史持仓重放；1000次无持仓与1000次有持仓但无业务变化的报价均不增加SQLite变更计数。模拟深度缩减持久化、下单前写失败不生成订单、Fill投影写失败安全暂停且只重放一次均通过。
+- 再次运行独立公开行情短测：100个Event样本，10个选中Event，48个监控Token，10笔原生模拟Fill，10持仓；运行和同库重启核对均通过，现金112000微单位一致。开发样本最终PAUSED、私有连接0，不是服务器正式账本或实盘验收。
+- 服务器保留848条原生历史事件（seq<=1759）的完整序号/ID/类型/payload哈希，升级前后相同；SQLite完整性、原生持仓/周期/目标/预算/现金校验通过，未reset或删表。原配置与账本代次保留。
+- 22:16:53 CST在6组1017盘口全部READY、pending=0及账本验证通过后，通过认证HTTPS/CSRF/Origin恢复用户已授权的正式TEST。22:17复核容器healthy、零重启，TEST/RUNNING、LIVE=false，扫描/分类/流/服务当前错误均为空。历史故障时间保留，不伪装成从未发生。
+- 同一2GB主机采样：故障时容器约1.364GiB、available127MiB、swap约1.3GiB、I/O wait46–52%；恢复后容器646.5MiB、available966MiB、swap163MiB，采样I/O wait为0%。这是现场前后采样，不是相同市场负载的严格基准，也不等于已经通过长期无人值守验收。持续运行区间和后续复核见HANDOFF.md。
+
 ## 范围与版本
+
+2026-09-21 11:50 CST补充跨夜采样：同一a4947c5镜像healthy、零重启/OOM，TEST/RUNNING、LIVE=false；6组1011盘口全部READY、pending=0，32持仓31 READY/1 NO_BID，账本校验通过。内存642.8MiB、available约1GiB、swap183MiB、采样I/O wait=0%。最新完成扫描11:44:12并已进入下一轮，当前四类错误为空。距恢复约13.5小时，但不把未采样区间当连续全量监控或72小时验收；管理网络间歇连通问题见HANDOFF。
 
 验证日期：2026-09-06。原 PM-SMALL `eb8c6d8a09f9b0427890b7a2d744fc3485d1d3dc`；NautilusTrader 1.231.0，源码 `27a8e54e7ac3c57d6cbf8891f0283dfbaee97317`。所有账本为本次新建开发数据，不导入旧仓位。
 

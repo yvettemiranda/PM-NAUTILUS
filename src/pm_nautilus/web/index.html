@@ -12,27 +12,16 @@
       <h1 class="sr-only">PM-NAUTILUS</h1>
 
       <header class="topbar">
-        <button
-          id="mode-toggle"
-          class="mode-toggle"
-          type="button"
-          data-mode="TEST"
-          aria-label="当前 TEST 模式，点击切换到 LIVE"
-        >TEST</button>
+        <span class="brand">PM / NAUTILUS</span>
         <div class="topbar-actions">
-          <button id="run-toggle" class="button primary" type="button">START</button>
-          <button
-            id="config-toggle"
-            class="button secondary"
-            type="button"
-            aria-expanded="false"
-            aria-controls="config-panel"
-          >
-            配置
-          </button>
+          <button id="mode-toggle" class="mode-toggle" type="button">TEST</button>
+          <button id="status-toggle" class="status-button" type="button" aria-label="查看运行状态" aria-expanded="false" aria-controls="runtime-status"><span id="run-dot" class="status-dot"></span></button>
+          <button id="run-toggle" class="icon-button" type="button" aria-label="开始自动交易">▶</button>
+          <button id="config-toggle" class="icon-button" type="button" aria-label="交易配置" aria-expanded="false" aria-controls="config-panel">⚙</button>
         </div>
       </header>
-
+      <div id="runtime-status" class="inline-note" hidden></div>
+      <p id="connection-warning" class="warning" role="status" hidden></p>
       <p id="live-lock" class="inline-note" hidden>
         LIVE 尚未开放；纸面闭环和长期 TEST 验证完成前不能启用。
       </p>
@@ -268,32 +257,45 @@
         </form>
       </section>
 
-      <p id="cash-note" class="inline-note" aria-live="polite"></p>
-      <p id="redemption-status" class="inline-note"></p>
-      <section id="portfolio" class="portfolio" aria-label="资金与持仓">
-        <article><span>总资金</span><strong id="total-funds">—</strong></article>
-        <article><span>已实现</span><strong id="realized-pnl">—</strong></article>
-        <article><span>未实现</span><strong id="unrealized-pnl">—</strong></article>
-        <article><span>持仓价值</span><strong id="position-value">—</strong></article>
-        <article><span>单数</span><strong id="portfolio-position-count">—</strong></article>
+      <section class="equity-panel" aria-label="资金概览">
+        <div class="equity-label">累计净盈亏</div>
+        <div class="equity-head"><strong id="net-pnl">—</strong><span id="net-return"></span></div>
+        <div class="curve-label"><span>净盈亏 · U</span><span id="curve-status">等待采样</span></div>
+        <button id="equity-chart" type="button" aria-label="收益曲线，左右方向键查看采样"><svg id="equity-svg" role="img" aria-label="实际采样净盈亏"></svg></button>
+        <div id="curve-note" class="field-note">自本版本部署起采样，不补造历史。</div>
+        <div class="equity-money"><div><span>总资产</span><strong id="total-funds">—</strong></div><div><span>可用现金</span><strong id="available-cash">—</strong></div></div>
+        <details id="portfolio-details"><summary>明细</summary>
+          <section id="portfolio" class="portfolio" aria-label="资金明细">
+            <article><span>已实现</span><strong id="realized-pnl">—</strong></article>
+            <article><span>未实现</span><strong id="unrealized-pnl">—</strong></article>
+            <article><span>持仓估值</span><strong id="position-value">—</strong></article>
+            <article><span>持仓数</span><strong id="portfolio-position-count">—</strong></article>
+          </section>
+          <p id="cash-note" class="field-note"></p><p class="field-note">净盈亏含持仓浮动盈亏；估值按最佳买价扣费，不代表全部仓位可按此价卖出。</p>
+        </details>
       </section>
-
-      <section class="panel">
+      <nav class="view-tabs" role="tablist" aria-label="交易信息">
+        <button id="tab-positions" role="tab" aria-controls="positions-panel" aria-selected="true">持仓 <span id="tab-position-count"></span><span id="positions-dot" class="status-dot"></span></button>
+        <button id="tab-records" role="tab" aria-controls="trade-records-panel" aria-selected="false">记录<span id="records-dot" class="status-dot"></span></button>
+        <button id="tab-market" role="tab" aria-controls="market-panel" aria-selected="false">市场<span id="market-dot" class="status-dot"></span></button>
+      </nav>
+      <details class="module-status"><summary id="module-status-label">数据状态</summary><div id="module-status-detail"></div></details>
+      <section id="positions-panel" class="panel" role="tabpanel" aria-labelledby="tab-positions">
         <div class="section-heading">
           <div>
-            <span class="eyebrow">PORTFOLIO</span>
+            
             <h2>当前持仓</h2>
           </div>
           <span id="position-count" class="count">0个</span>
         </div>
-        <div id="positions" class="position-list" aria-live="polite"></div>
+        <div id="positions" class="position-list"></div>
         <div id="position-list-controls" class="load-more position-list-controls" hidden>
           <button id="toggle-positions" class="button secondary compact-button" type="button">展开其余持仓</button>
           <span id="position-display-count" class="count">当前显示0 / 0</span>
         </div>
       </section>
 
-      <section id="trade-records-panel" class="panel trade-records-panel" aria-label="交易记录">
+      <section id="trade-records-panel" class="panel trade-records-panel" role="tabpanel" aria-labelledby="tab-records" hidden>
         <button
           id="trade-records-toggle"
           class="trade-records-toggle"
@@ -303,7 +305,7 @@
           aria-label="展开交易记录"
         >
           <span class="trade-records-heading">
-            <span class="eyebrow">ACTIVITY</span>
+            
             <span class="trade-records-title">交易记录</span>
           </span>
           <span class="trade-records-toggle-state">
@@ -312,14 +314,16 @@
           </span>
         </button>
         <div id="trade-records-content" hidden>
-          <div id="trade-records" class="trade-record-list" aria-live="polite"></div>
+          <div id="trade-records" class="trade-record-list"></div>
+          <button id="more-records" class="button secondary" type="button">再显示20条</button>
+          <details class="redemption-details"><summary>结算与赎回</summary><p id="redemption-status" class="field-note"></p></details>
         </div>
       </section>
 
-      <section class="panel">
+      <section id="market-panel" class="panel" role="tabpanel" aria-labelledby="tab-market" hidden>
         <div class="section-heading scan-heading">
           <div class="scan-title">
-            <span class="eyebrow">DISCOVERY</span>
+            
             <div class="heading-line">
               <h2>扫描事件</h2>
               <span id="candidate-count" class="count">0个</span>
@@ -335,7 +339,7 @@
           ><strong aria-hidden="true">↑</strong></button>
         </div>
 
-        <div id="candidates" class="market-list" aria-live="polite"></div>
+        <div id="candidates" class="market-list"></div>
 
         <div class="load-more">
           <button id="load-more" class="button secondary" type="button">再显示20个</button>

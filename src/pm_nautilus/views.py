@@ -40,7 +40,7 @@ def token_view(r, t):
     }
 
 
-def dashboard(r, service=None, limit=20, live_enabled=False):
+def portfolio_view(r):
     positions = []
     values = []
     costs = 0
@@ -85,6 +85,20 @@ def dashboard(r, service=None, limit=20, live_enabled=False):
     claim_cost = sum(c["cost"] for c in pending)
     value = None if None in values else sum(values)
     total = None if value is None else r.cash() + value + receivable
+    portfolio = {
+        "totalFunds": units(total),
+        "realizedPnl": units(r.business["realized"]),
+        "unrealizedPnl": units(None if value is None else value + claim_value - costs - claim_cost),
+        "positionValue": units(value),
+        "availableCash": units(r.cash() - r.held_cash()),
+        "reservedCash": units(r.held_cash()),
+        "pendingRedemption": units(receivable),
+    }
+    return positions, portfolio
+
+
+def dashboard(r, service=None, limit=20, live_enabled=False):
+    positions, portfolio = portfolio_view(r)
     events = []
     for eid, ids in r.events.items():
         if not ids:
@@ -148,6 +162,8 @@ def dashboard(r, service=None, limit=20, live_enabled=False):
     )
     return {
         "version": "0.1.0",
+        "generation": r.store.generation,
+        "updatedAt": datetime.now(timezone.utc).isoformat(),
         "executionMode": r.mode,
         "liveExecutionEnabled": live_enabled,
         "strategy": {
@@ -159,17 +175,7 @@ def dashboard(r, service=None, limit=20, live_enabled=False):
         "preferences": r.preferences.public(),
         "positions": positions,
         "marketScan": scan,
-        "portfolio": {
-            "totalFunds": units(total),
-            "realizedPnl": units(r.business["realized"]),
-            "unrealizedPnl": units(
-                None if value is None else value + claim_value - costs - claim_cost
-            ),
-            "positionValue": units(value),
-            "availableCash": units(r.cash() - r.held_cash()),
-            "reservedCash": units(r.held_cash()),
-            "pendingRedemption": units(receivable),
-        },
+        "portfolio": portfolio,
         "redemptions": [
             {
                 k: v

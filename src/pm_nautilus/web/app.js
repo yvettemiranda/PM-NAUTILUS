@@ -1,7 +1,18 @@
+import { displayStatus, curveSegments } from "./ui-state.js";
+
 const $ = (selector) => document.querySelector(selector);
 
 const ui = {
   dashboard: null,
+  activeTab: "positions",
+  dashboardAt: 0,
+  dashboardError: null,
+  recordLimit: 20,
+  performance: null,
+  performanceAt: 0,
+  performanceLoading: false,
+  performanceError: null,
+  chartIndex: null,
   preferences: null,
   strategyStatus: "STOPPED",
   displayMode: "TEST",
@@ -27,7 +38,7 @@ const ui = {
 };
 
 const POSITION_PREVIEW_LIMIT = 20;
-const TRADE_RECORD_LIMIT = 20;
+
 const TRADE_RECORD_REFRESH_MS = 3_000;
 const CATEGORY_LABELS_ZH = {
   Politics: "政治",
@@ -73,6 +84,7 @@ async function api(path, options = {}) {
   if (path.startsWith("/api/dashboard")) path += `&mode=${ui.displayMode}`;
   options.headers = { ...options.headers, "x-pm-csrf": csrfToken };
   const response = await fetch(path, {
+    signal: AbortSignal.timeout(10000),
     ...options,
     headers:
       options.body === undefined
@@ -227,6 +239,12 @@ function currentPositions(positions = []) {
 
 function renderPortfolio(portfolio, positions = []) {
   setMoneyValue("#total-funds", portfolio?.totalFunds);
+  setMoneyValue("#available-cash", portfolio?.availableCash);
+  const pnl = portfolio?.unrealizedPnl == null || portfolio?.realizedPnl == null ? null : Number(portfolio.realizedPnl) + Number(portfolio.unrealizedPnl);
+  setMoneyValue("#net-pnl", pnl, true);
+  const initial = Number(ui.dashboard?.strategy?.initialCapital);
+  $("#net-return").textContent = ui.displayMode === "TEST" && pnl !== null && initial > 0 ? `${pnl > 0 ? "+" : ""}${(pnl / initial * 100).toFixed(2)}%` : "";
+  $("#net-return").dataset.tone = pnl > 0 ? "positive" : pnl < 0 ? "negative" : "neutral";
   setMoneyValue("#realized-pnl", portfolio?.realizedPnl, true);
   setMoneyValue("#unrealized-pnl", portfolio?.unrealizedPnl, true);
   setMoneyValue("#position-value", portfolio?.positionValue);
@@ -257,9 +275,9 @@ function renderRunControls() {
   const liveView = ui.displayMode === "LIVE";
   const runToggle = $("#run-toggle");
   if (!runToggle.classList.contains("is-pending")) {
-    runToggle.textContent = running ? "PAUSE" : "START";
+    runToggle.textContent = running ? "Ⅱ" : "▶";
   }
-  runToggle.disabled = ui.controlPending || (liveView && !ui.dashboard?.liveExecutionEnabled);
+  runToggle.disabled = !ui.dashboard || !ui.dashboardAt || Boolean(ui.dashboardError) || ui.controlPending || (liveView && !ui.dashboard?.liveExecutionEnabled);
   runToggle.title = runToggle.disabled && liveView ? "LIVE 尚未由服务器启用" : "";
   runToggle.setAttribute(
     "aria-label",
@@ -293,6 +311,7 @@ function renderPositions(positions = []) {
   const visible = ui.positionsExpanded
     ? current
     : current.slice(0, POSITION_PREVIEW_LIMIT);
+  $("#tab-position-count").textContent = formatCount(current.length);
   $("#position-count").textContent = `${formatCount(current.length)}单`;
   const controls = $("#position-list-controls");
   const toggle = $("#toggle-positions");
@@ -303,7 +322,8 @@ function renderPositions(positions = []) {
     ? "收起至前20个"
     : `展开其余${formatCount(current.length - POSITION_PREVIEW_LIMIT)}个`;
   toggle.setAttribute("aria-expanded", String(ui.positionsExpanded));
-  $("#positions").innerHTML = visible.length
+  const openIds = new Set([...$("#positions").querySelectorAll("details[open]")].map(x => x.dataset.token));
+  const positionMarkup = visible.length
     ? visible
         .map((position) => {
           const progress = Number(position.progressPercent);
@@ -330,17 +350,11 @@ function renderPositions(positions = []) {
           const stopLossSummary = position.stopLossThreshold === null
             ? ""
             : `<span>止损线 <strong>${formatCents(position.stopLossThreshold)} (${escapeHtml(position.stopLossMultiplier)}×)</strong></span>`;
-          return `<article class="position-row">
-            <div class="row-heading">
-              <div class="market-copy">${marketTitleMarkup(position)}${eventTitle}</div>
-              <div class="outcome-badge"><small>买入结果</small><strong>${escapeHtml(position.direction || "—")}</strong></div>
-            </div>
-            <div class="quote-grid position-quotes">
-              <div><span>实际买入</span><strong>${formatCents(position.averageBuyPrice)}</strong></div>
-              <div><span>当前可卖</span><strong>${currentSellPrice}</strong></div>
-              <div title="${escapeHtml(targets.map(formatCents).join("、"))}"><span>目标卖价</span><strong>${targetLabel}</strong></div>
-              <div><span>持仓数量</span><strong>${formatQuantity(position.quantity)}</strong></div>
-            </div>
+          return `<details class="position-row" data-token="${escapeHtml(position.tokenId)}" ${openIds.has(position.tokenId) ? "open" : ""}>
+            <summary class="position-summary"><div class="market-copy"><span class="position-title">${escapeHtml(position.marketQuestion || position.eventTitle)}</span><span class="position-sub">${escapeHtml(position.direction)} · 买入均价 ${formatCents(position.averageBuyPrice)}</span></div><div class="position-price"><strong>${currentSellPrice}</strong><span>目标 ${targetLabel}</span></div></summary>
+            <div class="position-detail">
+              <div class="row-heading"><div class="market-copy">${marketTitleMarkup(position)}${eventTitle}</div></div>
+              <div class="cycle-summary"><span>持仓数量 <strong>${formatQuantity(position.quantity)}</strong></span><span>各档目标 <strong>${targets.map(formatCents).join("、") || "—"}</strong></span></div>
             <div class="cycle-summary">
               <span>Event 周期 <strong>${escapeHtml(cycleStatus)}</strong></span>
               <span>冻结预算 <strong>${position.cycleBudget === null ? "—" : formatMoney(position.cycleBudget)}</strong></span>
@@ -349,16 +363,25 @@ function renderPositions(positions = []) {
             </div>
             <div class="progress-heading"><span>市场生命周期</span><strong>${progressText}</strong></div>
             ${progressMarkup(position.progressPercent, "市场生命周期")}
-          </article>`;
+            </div>
+          </details>`;
         })
         .join("")
     : '<p class="empty-state">暂无已成交持仓</p>';
+  // Keep focused/open details stable on unchanged 500ms refreshes.
+  if ($("#positions").dataset.markup !== positionMarkup) {
+    const focused = document.activeElement?.closest("details[data-token]")?.dataset.token;
+    $("#positions").innerHTML = positionMarkup;
+    $("#positions").dataset.markup = positionMarkup;
+    if (focused) [...$("#positions").querySelectorAll("details")].find(x => x.dataset.token === focused)?.querySelector("summary").focus({preventScroll:true});
+  }
 }
 
 function renderTradeRecords() {
   const toggle = $("#trade-records-toggle");
   const content = $("#trade-records-content");
   const count = $("#trade-records-count");
+  $("#more-records").hidden = ui.tradeRecords.length >= ui.tradeRecordTotalCount;
   toggle.setAttribute("aria-expanded", String(ui.tradeRecordsExpanded));
   toggle.setAttribute(
     "aria-label",
@@ -430,25 +453,24 @@ function tradeRecordMarkup(record) {
 async function loadTradeRecords({ silent = false } = {}) {
   if (ui.tradeRecordsLoading) return;
   const mode = ui.displayMode;
+  const version = ui.mutationVersion;
   ui.tradeRecordsLoading = true;
   ui.tradeRecordsError = null;
   renderTradeRecords();
   try {
-    const response = await api(`/api/test/trade-records?limit=${TRADE_RECORD_LIMIT}`);
-    if (mode !== ui.displayMode) return;
+    const response = await api(`/api/test/trade-records?limit=${ui.recordLimit}`);
+    if (mode !== ui.displayMode || version !== ui.mutationVersion) return;
     ui.tradeRecords = Array.isArray(response.records) ? response.records : [];
     ui.tradeRecordTotalCount = Number(response.totalCount) || 0;
     ui.tradeRecordsLoaded = true;
+    ui.tradeRecordsLoadedAt = Date.now();
   } catch (error) {
-    if (mode !== ui.displayMode) return;
+    if (mode !== ui.displayMode || version !== ui.mutationVersion) return;
     ui.tradeRecordsError = error.message;
     if (!silent) showMessage(`交易记录加载失败：${error.message}`, true);
   } finally {
-    if (mode === ui.displayMode) {
-      ui.tradeRecordsLoading = false;
-      ui.tradeRecordsLoadedAt = Date.now();
-      renderTradeRecords();
-    }
+    ui.tradeRecordsLoading = false;
+    if (mode === ui.displayMode && version === ui.mutationVersion) { renderTradeRecords(); renderStatus(); }
   }
 }
 
@@ -468,7 +490,7 @@ function renderCandidates() {
   const visible = ui.events;
   $("#candidate-count").textContent = ui.staleCandidateCount > 0
     ? `可交易${formatCount(ui.candidateCount)}个事件 · 待定${formatCount(ui.staleCandidateCount)}`
-    : `${formatCount(ui.candidateCount)}个事件`;
+    : `可交易 ${formatCount(ui.candidateCount)} · 监控 ${formatCount(ui.displayCandidateCount)}`;
   $("#display-count").textContent = `当前显示 ${formatCount(visible.length)} / ${formatCount(ui.displayCandidateCount)}`;
   const loadMore = $("#load-more");
   const allVisible = visible.length >= ui.displayCandidateCount;
@@ -672,8 +694,10 @@ function updateSortToggle(direction) {
 
 function applyDashboard(dashboard) {
   ui.dashboard = dashboard;
+  ui.dashboardAt = Date.now();
+  ui.dashboardError = null;
   renderModeControl();
-  $("#cash-note").textContent = `可用 ${formatMoney(dashboard.portfolio.availableCash)} · 已占用 ${formatMoney(dashboard.portfolio.reservedCash)} · 待赎回 ${formatMoney(dashboard.portfolio.pendingRedemption)}`;
+  $("#cash-note").textContent = `可用 ${formatMoney(dashboard.portfolio.availableCash)} · 待成交订单占用 ${formatMoney(dashboard.portfolio.reservedCash)} · 待赎回 ${formatMoney(dashboard.portfolio.pendingRedemption)}`;
   $("#redemption-status").textContent = (dashboard.redemptions || []).map(c => `${c.condition_id.slice(0, 10)}… ${c.state}${c.error ? `：${c.error}` : ""}`).join(" · ");
   $("#redemption-status").hidden = !$("#redemption-status").textContent;
   ui.preferences = dashboard.preferences;
@@ -688,6 +712,9 @@ function applyDashboard(dashboard) {
   renderCandidates();
   renderScanStatus(dashboard.marketScan);
   renderPreferences(dashboard.preferences, dashboard.strategy);
+  renderStatus();
+  if (ui.performance?.generation !== dashboard.generation) { ui.performance = null; ui.performanceAt = 0; drawCurve(); }
+  if (Date.now() - ui.performanceAt > 30000) void loadPerformance();
   if (
     ui.tradeRecordsExpanded &&
     Date.now() - ui.tradeRecordsLoadedAt >= TRADE_RECORD_REFRESH_MS
@@ -707,6 +734,7 @@ async function loadDashboard({ silent = false } = {}) {
     const dashboard = await api(`/api/dashboard?limit=${ui.visibleCandidateCount}`);
     if (mutationVersion === ui.mutationVersion) applyDashboard(dashboard);
   } catch (error) {
+    if (mutationVersion === ui.mutationVersion) { ui.dashboardError = error.message; renderStatus(); renderRunControls(); }
     if (!silent) showMessage(`数据刷新失败：${error.message}`, true);
   } finally {
     ui.loading = false;
@@ -834,15 +862,12 @@ function savedPreferencePayload(overrides = {}) {
 $("#config-toggle").addEventListener("click", () => {
   const open = $("#config-panel").hidden;
   if (open && ui.dashboard) {
-    ui.configDirty = false;
-    renderPreferences(ui.preferences, ui.dashboard.strategy, true);
+    renderPreferences(ui.preferences, ui.dashboard.strategy);
   }
   setConfigOpen(open);
 });
 
 $("#config-close").addEventListener("click", () => {
-  ui.configDirty = false;
-  if (ui.dashboard) renderPreferences(ui.preferences, ui.dashboard.strategy, true);
   setConfigOpen(false);
 });
 
@@ -973,6 +998,7 @@ $("#reset-test").addEventListener("click", async () => {
     recordMutation();
     ui.visibleCandidateCount = 20;
     ui.configDirty = false;
+    ui.performance = null; ui.performanceAt = 0; ui.recordLimit = 20;
     ui.tradeRecords = [];
     ui.tradeRecordTotalCount = 0;
     ui.tradeRecordsLoaded = false;
@@ -990,12 +1016,16 @@ $("#reset-test").addEventListener("click", async () => {
 });
 
 $("#mode-toggle").addEventListener("click", () => {
-  if (ui.controlPending || ui.loading) return;
-  if (ui.configDirty) { showMessage("请先保存设置或关闭设置面板，再切换模式", true); return; }
+  if (ui.controlPending || ui.loading || ui.performanceLoading || ui.tradeRecordsLoading) return;
+  if (ui.configDirty) { showMessage("有未保存设置，请先保存；如需放弃草稿，可刷新页面后切换模式", true); return; }
   recordMutation();
   ui.tradeRecordsLoaded = false; ui.tradeRecordsLoadedAt = 0; ui.tradeRecords = [];
   ui.visibleCandidateCount = 20;
   ui.displayMode = ui.displayMode === "TEST" ? "LIVE" : "TEST";
+  ui.dashboard = null; ui.dashboardAt = 0; ui.dashboardError = null; ui.strategyStatus = "STOPPED";
+  ui.performance = null; ui.performanceAt = 0; ui.performanceError = null; ui.recordLimit = 20;
+  renderPortfolio(null); renderPositions([]); renderTradeRecords(); drawCurve(); renderStatus();
+  $("#candidates").innerHTML = ""; $("#redemption-status").textContent = "";
   renderModeControl();
   renderRunControls();
   showMessage(
@@ -1051,6 +1081,82 @@ $("#load-more").addEventListener("click", async () => {
   ui.visibleCandidateCount = Math.min(ui.displayCandidateCount, ui.visibleCandidateCount + 20);
   await loadDashboard();
 });
+
+function renderStatus() {
+  const state = displayStatus(ui.dashboard, { lastSuccess: ui.dashboardAt, error: ui.dashboardError });
+  const records = ui.tradeRecordsError ? "error" : ui.tradeRecordsLoadedAt ? "ready" : ui.tradeRecordsLoading ? "waiting" : "unknown";
+  for (const [id, value] of [["run-dot", state.run], ["positions-dot", state.feed], ["market-dot", state.scan], ["records-dot", records]]) {
+    const dot = $(`#${id}`); dot.dataset.state = value;
+    dot.setAttribute("role", "img"); dot.setAttribute("aria-label", {ready:"正常", waiting:"更新中", error:"异常", off:"未运行", unknown:"未确认"}[value]);
+  }
+  $("#connection-warning").textContent = state.warning;
+  $("#connection-warning").hidden = !state.warning;
+  $(".equity-panel").classList.toggle("is-stale", Boolean(ui.dashboardAt && (ui.dashboardError || Date.now() - ui.dashboardAt > 10000)));
+  const s = ui.dashboard?.marketScan || {}, groups = s.diagnostics?.streams?.groups || [];
+  const runText = state.run === "error" ? state.warning : !ui.dashboardAt ? "运行状态未确认" : ui.strategyStatus === "RUNNING" ? "运行中" : "已暂停新买入；已有仓位仍继续退出和赎回。";
+  $("#runtime-status").textContent = `${runText}${s.lastServiceError ? ` 最近故障：${s.lastServiceError} · ${formatDate(s.lastServiceErrorAt)}` : ""}`;
+  $("#status-toggle").setAttribute("aria-label", `查看运行状态：${runText}`);
+  const info = ui.activeTab === "positions" ? ["行情", `${groups.filter(g=>g.state === "READY").length}/${groups.length} 组就绪 · ${groups.reduce((n,g)=>n+g.readyBookCount,0)}/${groups.reduce((n,g)=>n+g.tokenCount,0)} 盘口完整`, ...groups.map((g,i)=>`组${i+1}：${g.state}，心跳 ${formatClock(g.lastPongAt)}${g.error ? `，${g.error}` : ""}`)] : ui.activeTab === "market" ? ["扫描", `最近完成 ${formatDate(s.lastScanAt)} · ${s.scanning ? "扫描中" : "等待下一轮"}`, s.lastError || s.categoryError || `监控 ${formatCount(ui.displayCandidateCount)} 个事件，当前可交易 ${formatCount(ui.candidateCount)} 个`] : ["同步", `最近成功 ${formatClock(ui.tradeRecordsLoadedAt || null)}`, ui.tradeRecordsError || (ui.tradeRecordsLoaded ? "记录已同步；无新成交也属于正常。" : "打开记录后读取")];
+  $("#module-status-label").textContent = `${info[0]} · ${ui.activeTab === "records" ? ({ready:"已同步",error:"更新失败",waiting:"读取中",unknown:"未读取"}[records]) : ({ready:"正常",error:"需关注",waiting:"更新中",off:"未连接",unknown:"未确认"}[ui.activeTab === "market" ? state.scan : state.feed])}`;
+  $("#module-status-detail").textContent = info.slice(1).join("\n");
+}
+
+async function loadPerformance() {
+  if (ui.performanceLoading) return;
+  ui.performanceLoading = true;
+  const mode=ui.displayMode, version=ui.mutationVersion;
+  try {
+    const result=await api(`/api/${mode}/performance`);
+    if (mode !== ui.displayMode || version !== ui.mutationVersion) return;
+    ui.performance = result; ui.performanceError = result.error; ui.performanceAt=Date.now(); ui.chartIndex=null; drawCurve();
+  } catch(error) {
+    if (mode === ui.displayMode && version === ui.mutationVersion) { ui.performanceError=error.message; ui.performanceAt=Date.now(); drawCurve(); }
+  } finally { ui.performanceLoading=false; }
+}
+
+function drawCurve() {
+  const svg=$("#equity-svg"), button=$("#equity-chart");
+  const points=ui.performance?.points || [], segments=curveSegments(points), valid=segments.flat();
+  const w=Math.max(180,button.getBoundingClientRect().width),h=112,left=30,right=10,top=10,bottom=23;
+  svg.setAttribute("viewBox",`0 0 ${w} ${h}`); svg.replaceChildren();
+  const add=(tag,attrs,text)=>{const node=document.createElementNS("http://www.w3.org/2000/svg",tag);for(const [k,v] of Object.entries(attrs))node.setAttribute(k,String(v));if(text!==undefined)node.textContent=text;svg.appendChild(node);return node;};
+  $("#curve-status").textContent = ui.performanceError ? "采样或读取异常" : valid.length < 2 ? "等待更多采样" : `最近${points.length}个采样`;
+  $("#curve-note").textContent = ui.performanceError ? `曲线更新失败：${ui.performanceError}` : points.length ? `每分钟采样 · 始于 ${formatDate(points[0].at)} · 未知与中断处留空` : "自本版本部署起采样，不补造历史。";
+  if (!valid.length) {add("text",{x:w/2,y:58,"text-anchor":"middle"},"暂无有效收益采样");return;}
+  const values=valid.map(p=>Number(p.pnl)),min=Math.min(0,...values),max=Math.max(0,...values),pad=Math.max((max-min)*.15,.01);
+  const from=points[0].at,to=points.at(-1).at;
+  const x=t=>left+(to === from ? 0.5 : (t-from)/(to-from))*(w-left-right), y=v=>top+(max+pad-v)/(max-min+2*pad)*(h-top-bottom);
+  add("line",{x1:left,x2:w-right,y1:y(0),y2:y(0),class:"curve-zero"});add("text",{x:0,y:y(0)+4},"0");
+  for (const segment of segments) {
+    if(segment.length>1)add("polyline",{points:segment.map(p=>`${x(p.at)},${y(Number(p.pnl))}`).join(" "),class:"curve-line"});
+    else add("circle",{cx:x(segment[0].at),cy:y(Number(segment[0].pnl)),r:2,class:"curve-point"});
+  }
+  const selected=ui.chartIndex===null?valid.at(-1):valid[Math.min(valid.length-1,ui.chartIndex)];
+  add("circle",{cx:x(selected.at),cy:y(Number(selected.pnl)),r:3,class:"curve-point"});
+  if(ui.chartIndex!==null){add("line",{x1:x(selected.at),x2:x(selected.at),y1:top,y2:h-bottom,class:"curve-guide"});$("#curve-status").textContent=`${formatClock(selected.at)} · ${formatMoney(selected.pnl,true)}`;}
+  const dateLabel=t=>from===to?formatClock(t):new Date(from).toDateString()===new Date(to).toDateString()?formatClock(t).slice(0,5):formatDate(t);
+  add("text",{x:left,y:h-3,"text-anchor":"start"},dateLabel(from));if(to!==from)add("text",{x:w-right,y:h-3,"text-anchor":"end"},dateLabel(to));
+}
+
+$("#equity-chart").addEventListener("pointermove",event=>{
+  if(event.pointerType!=="mouse"&&!event.buttons)return;
+  const points=curveSegments(ui.performance?.points || []).flat();if(!points.length)return;
+  const box=event.currentTarget.getBoundingClientRect();const all=ui.performance.points;
+  const target=all[0].at+Math.max(0,Math.min(1,(event.clientX-box.left-30)/(box.width-40)))*(all.at(-1).at-all[0].at);
+  ui.chartIndex=points.reduce((best,p,i)=>Math.abs(p.at-target)<Math.abs(points[best].at-target)?i:best,0);drawCurve();
+});
+$("#equity-chart").addEventListener("pointerleave",()=>{ui.chartIndex=null;drawCurve();});
+$("#equity-chart").addEventListener("keydown",e=>{if(!["ArrowLeft","ArrowRight"].includes(e.key))return;e.preventDefault();const n=curveSegments(ui.performance?.points||[]).flat().length;ui.chartIndex=Math.max(0,Math.min(n-1,(ui.chartIndex??n-1)+(e.key==="ArrowLeft"?-1:1)));drawCurve();});
+new ResizeObserver(drawCurve).observe($("#equity-chart"));
+$("#status-toggle").addEventListener("click",()=>{const el=$("#runtime-status");el.hidden=!el.hidden;$("#status-toggle").setAttribute("aria-expanded",String(!el.hidden));});
+for (const tab of document.querySelectorAll('.view-tabs [role="tab"]')) tab.addEventListener("click",()=>{
+  ui.activeTab=tab.id.replace("tab-","");
+  for (const other of document.querySelectorAll('.view-tabs [role="tab"]')) {other.setAttribute("aria-selected",String(other===tab));$(`#${other.getAttribute("aria-controls")}`).hidden=other!==tab;}
+  ui.tradeRecordsExpanded=ui.activeTab==="records";renderTradeRecords();renderStatus();
+  if(ui.tradeRecordsExpanded)void loadTradeRecords();
+});
+$("#more-records").addEventListener("click",()=>{ui.recordLimit=Math.min(10000,ui.recordLimit+20);void loadTradeRecords();});
+window.setInterval(renderStatus,1000);
 
 renderModeControl();
 renderRunControls();

@@ -19,6 +19,7 @@ from .redemption import RedemptionService
 from .store import Store
 from .strategy import Runtime
 from .views import dashboard, records
+from .performance import PerformanceSampler
 
 
 def create_app(data_dir=None, public_data=True, test_clock=None):
@@ -31,6 +32,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
     runtimes = {}
     services = {}
     cold = {}
+    samplers = {}
     live_enabled = os.getenv("PM_LIVE_ENABLED") == "true"
 
     async def attach(mode, runtime, wallet=None):
@@ -41,6 +43,9 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         service.on_resolution = redeem.run_once
         if public_data:
             service.loop_task = asyncio.create_task(service.run())
+        sampler = PerformanceSampler(runtime)
+        samplers[mode] = sampler
+        sampler.task = asyncio.create_task(sampler.run())
 
     @asynccontextmanager
     async def lifespan(app):
@@ -75,6 +80,9 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             yield
         finally:
             failures = []
+            for sampler in samplers.values():
+                sampler.task.cancel()
+            await asyncio.gather(*(s.task for s in samplers.values()), return_exceptions=True)
             for r in runtimes.values():
                 try:
                     r.pause()
@@ -105,6 +113,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.runtimes = runtimes
     app.state.services = services
+    app.state.samplers = samplers
 
     @app.middleware("http")
     async def security(request, call_next):
@@ -139,6 +148,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         response = await call_next(request)
         response.headers["x-content-type-options"] = "nosniff"
         response.headers["referrer-policy"] = "no-referrer"
+        response.headers["cache-control"] = "no-store"
         response.headers["content-security-policy"] = (
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         )
@@ -166,6 +176,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         return {
             "version": "0.1.0",
             "executionMode": "LIVE",
+            "generation": store.generation,
             "liveExecutionEnabled": False,
             "strategy": {"status": "PAUSED", "initialCapital": None, "availableCash": None},
             "preferences": Preferences(**store.get("preferences")).public(),
@@ -266,6 +277,8 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         r = runtimes["TEST"]
         if r.status != "PAUSED":
             raise ValueError("先暂停TEST再重置")
+        samplers["TEST"].task.cancel()
+        await asyncio.gather(samplers["TEST"].task, return_exceptions=True)
         await services["TEST"].close()
         r.store.reset()
         r.close()
@@ -288,6 +301,20 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             runtimes[mode].validate()
             if mode in runtimes
             else {"ok": False, "errors": ["LIVE未连接"]}
+        )
+
+    @app.get("/api/{mode}/performance")
+    async def performance(mode: str):
+        mode = mode_name(mode)
+        return (
+            samplers[mode].view()
+            if mode in samplers
+            else {
+                "generation": cold[mode].generation,
+                "sampleSeconds": 60,
+                "error": None,
+                "points": [],
+            }
         )
 
     app.mount("/", StaticFiles(directory=Path(__file__).parent / "web", html=True), name="web")

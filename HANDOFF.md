@@ -183,3 +183,14 @@ Linux临时环境使用 `.reference/lima/bin/limactl`，LIMA_HOME=$PWD/.referenc
 - 本地91项Python测试、3项JS状态/曲线测试、Ruff与JS语法通过；320/390px浏览器无横向溢出，持仓展开、记录、LIVE隔离与禁用已实测。服务器及GitHub完成情况将在部署后补记。
 
 - 首次正式浏览器复验发现历史静态缓存仍可能被复用，补充HTML资源版本标识以保证旧用户加载新JS/CSS；部署完成状态待最终核对。
+
+## UI正式部署验收（2026-09-22 15:10 CST）
+- 应用最终提交及运行镜像：`27146fb1c2bca490a714faac89012932a564217a`。GitHub Actions `35697922799` 的 Linux x86_64/ARM64 全部通过（91项Python测试、3项JS测试、Ruff、语法、Docker verify）；服务器前一应用提交 `1cf3aae` 亦实际完成91项Linux测试，最终差异仅HTML资源版本和文档。
+- 服务器先完成镜像构建，再暂停TEST并停机备份。保留两份0600完整备份：`backups/pre-ui-20260922.tgz`（55,367,071字节）和 `backups/pre-ui-cache-20260922.tgz`，含runtime/server、.env、compose.override.yaml。未覆盖旧备份，未reset。
+- 首次版本写入命令因换行转义失败而安全停止，修正后启动；正式浏览器随后发现历史JS/CSS缓存混用，补加资源版本标识并于15:07:58启动最终镜像。此维护打断此前连续运行区间，不声明72小时稳定性验收通过。
+- 停机备份与新实例逐条核对：955条原生事件的序号、ID、类型和原始payload全部一致；generation、preferences、initial_capital、business完全一致（含持仓周期、目标与盈亏）；.env除镜像SHA外不变，compose.override.yaml逐字节一致。SQLite quick_check和应用账本validation均通过；没有清理books、模拟消耗或历史。
+- 确认新实例PAUSED、完整行情恢复、账本校验通过后，通过正常HTTPS认证与CSRF接口于15:10:06恢复此前已授权TEST。15:10:21只读复验：TEST/RUNNING、LIVE=false、healthy、restarts=0、OOM=false、backgroundErrors为空。
+- 全量扫描15:09:09完成，8组1429盘口全部READY、pending=0，扫描/分类/行情/服务当前错误均为空。41持仓，现金91.567528U、总资产104.242650U、已实现23.099122U、未实现-18.856472U。以上为瞬时模拟值。
+- 容器约489.5MiB；主机available990MiB、swap170MiB。Nginx配置检查通过，HTTPS原配置保留，.env与两份备份仍0600。
+- 正式Chrome已验证新UI、真实收益采样、195条交易记录入口、持仓展开、运行绿点；无浏览器脚本错误。本地320/390px无横向溢出；模拟断网明确标记旧快照并禁用控制。开发服务已停止，开发数据与正式账本分离。
+- 本段为交付文档补记；后续文档同步不重启运行镜像。曲线每分钟采样，只展示最近1440条，旧采样仍保留；09-22部署前的历史没有被伪造为曲线。最大回撤/分类表现等扩展报告未在本次实现。

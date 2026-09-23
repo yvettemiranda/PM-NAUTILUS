@@ -35,8 +35,8 @@ uv python install 3.12.14
 curl -LsSf https://astral.sh/uv/0.8.22/install.sh | sh
 uv --version  # 应为 0.8.22
 uv sync --frozen --extra dev
-uv run --frozen ruff check src tests scripts
-uv run --frozen ruff format --check src tests scripts
+uv run --frozen ruff check src tests scripts deploy/live-secrets.py
+uv run --frozen ruff format --check src tests scripts deploy/live-secrets.py
 uv run --frozen pytest -q
 uv run --frozen pm-nautilus --offline --data-dir runtime/environment-check
 ```

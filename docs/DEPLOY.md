@@ -19,8 +19,8 @@ python3.12 -m venv .venv
 .venv/bin/python -m pip install uv==0.8.22
 .venv/bin/uv sync --frozen --extra dev
 .venv/bin/pytest -q
-.venv/bin/ruff check src tests
-.venv/bin/ruff format --check src tests
+.venv/bin/ruff check src tests deploy/live-secrets.py
+.venv/bin/ruff format --check src tests deploy/live-secrets.py
 ```
 
 `--offline --data-dir runtime/ui-preview` 只查看本地 UI；该选项不提供行情，已有仓位也无法依靠实时盘口退出，仅用于开发验证。`runtime/` 全部不入 Git。`.python-version` 和 `uv.lock` 为固定依赖依据。

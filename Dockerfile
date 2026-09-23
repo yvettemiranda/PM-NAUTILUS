@@ -19,6 +19,7 @@ CMD ["--host", "0.0.0.0"]
 FROM base AS verify
 USER root
 COPY tests ./tests
+COPY deploy/live-secrets.py ./deploy/live-secrets.py
 RUN uv sync --frozen --extra dev
-RUN .venv/bin/ruff check src tests && .venv/bin/pytest -q
+RUN .venv/bin/ruff check src tests deploy/live-secrets.py && .venv/bin/ruff format --check src tests deploy/live-secrets.py && .venv/bin/pytest -q
 USER pm

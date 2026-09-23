@@ -53,6 +53,8 @@ uv run --frozen pm-nautilus --offline --data-dir runtime/environment-check
 
 本仓库只保证项目开发材料可恢复。服务器的最新 TEST/LIVE 账本、`.env`、本地 `compose.override.yaml`、`compose.live.yaml` 需要按 [部署指南](DEPLOY.md)加密成账本快照；`/etc/pm-nautilus/live.json.age` 密文另行备份，解锁口令与密文分开保管。`/run/pm-nautilus/live.json` 是临时明文，不备份。换电脑后只需克隆 GitHub 即可继续开发或远程管理原服务器，不必把签名私钥复制到新电脑。
 
+若账本快照使用 age 接收公钥加密，还须另行安全迁移对应的 identity 私钥；GitHub 无法恢复它。2026-09-23 的服务器快照采用此方式，解密身份文件与服务器备份位置见 `HANDOFF.md`。
+
 迁移到新服务器时先停旧实例并保存最新一致性账本，核对未完成的真实订单与链上交易；然后在新服务器恢复加密备份和本地配置、只读验证账本，人工解锁凭据，确保旧实例不会再使用同一钱包和账本，最后启动新实例核对 LIVE。不能拿较早的 LIVE 快照直接启动交易；服务器重启后默认只启 TEST，LIVE 须按部署指南重新人工解锁。
 
 需要重新生成完整源码文档或离线源码备份时：

@@ -194,3 +194,13 @@ Linux临时环境使用 `.reference/lima/bin/limactl`，LIMA_HOME=$PWD/.referenc
 - 容器约489.5MiB；主机available990MiB、swap170MiB。Nginx配置检查通过，HTTPS原配置保留，.env与两份备份仍0600。
 - 正式Chrome已验证新UI、真实收益采样、195条交易记录入口、持仓展开、运行绿点；无浏览器脚本错误。本地320/390px无横向溢出；模拟断网明确标记旧快照并禁用控制。开发服务已停止，开发数据与正式账本分离。
 - 本段为交付文档补记；后续文档同步不重启运行镜像。曲线每分钟采样，只展示最近1440条，旧采样仍保留；09-22部署前的历史没有被伪造为曲线。最大回撤/分类表现等扩展报告未在本次实现。
+
+## LIVE 本地签名准备与 TEST 升级（2026-09-23）
+- 用户选择 age 加密凭据包、人工解锁到 `/run` tmpfs、只读挂入容器的本地签名方式。所选地址是 EOA 签名者与关联 Safe 资金地址（signature_type=2）；地址仅在私有预检输入，不写入公开仓库。用户明确沿用现有策略规则，不添加首轮总投入、单笔金额或最多笔数限制。没有收到、读取或存储真实私钥和 CLOB 凭据。
+- 代码加入交互式加密/解锁脚本、显式 LIVE Compose 覆盖、只读私有预检、全账户未知挂单与 Condition 份额核对、启动与错误脱敏、重启默认 TEST 的 systemd 单元。LIVE 仍需真实凭据、资金和授权后才能私有预检；未进行真实签名、下单、approve、redeem 或链上写入。
+- 应用代码提交 `9e30a87afd30a48fa0260972265364b872da1b1b` 已推送 GitHub main；Actions run `35871534421` 完成且通过。Mac 本地 118 项测试通过，Ruff 和格式检查通过；Docker verify 包含凭据脚本测试。之后如有文档补记提交，不代表运行镜像变更。
+- 服务器从旧提交 `01cd7f29f65283006978a099c02217aedfeb4e0c` 固定切换到 `9e30a87afd30a48fa0260972265364b872da1b1b`，先在旧 TEST 运行时构建新镜像，再短暂停机备份、重建基础 Compose 的 TEST 容器。原有 `compose.override.yaml` 保留。服务恢复后通过认证且带 CSRF 的本机 API 显式 START；实测健康为 `TEST/RUNNING`、`liveExecutionEnabled=false`、同代码 SHA、`backgroundErrors={}`。固定巡检显示应用账本 validation 无错误、SQLite quick_check=ok、当前 service/stream/category 错误为空；49 个模拟持仓和原有 TEST 规则仍在。
+- 停机时 TEST 与 LIVE SQLite quick_check 均为 ok。LIVE 原生事件与订单意图均为 0，业务账本为空；将当前 TEST `preferences` 原值复制到空的 LIVE 账本并读回逐字相等，没有复制模拟交易、资金或持仓。用户在真正启用 LIVE 前仍须在已认证 UI 再核对规则。
+- 服务器已安装 Ubuntu `age` 1.1.1，启用 `/etc/systemd/system/pm-nautilus-test-boot.service`；其 Docker 与项目路径已核对，开机只用基础 Compose 加现有 HTTPS override 重建 TEST。仅验证 `systemctl is-enabled=enabled`，未为了测试而重启主机；重启后的策略默认 PAUSED，须人工确认。服务器本地 `compose.live.yaml` 已准备且 `0600`，三份 Compose 静态校验通过，但当前启动命令没有包含第三份。
+- 服务器保存两份停机 age recipient 密文：`/opt/pm-nautilus/backups/pre-live-20260923.tgz.age`（58,692,888 字节）和复制规则后的 `/opt/pm-nautilus/backups/pre-live-prepared-20260923.tgz.age`（58,692,577 字节），均 root 拥有、`0600`；含 `runtime/server`、`.env`、HTTPS override。后一份密文的 SHA-256 为 `6abd54512a697d1b3c1de5ca17993b841aafed995ca79728035cc5593f4d278b`。解密 identity 仅在当前 Mac 的 `~/.config/pm-nautilus/backup-identity.txt`，目录 `0700`、文件 `0600`，不在服务器或 GitHub。曾尝试用 OrcaTerm 文件管理器下载后一份密文，远端显示传输成功，但本机下载目录未见文件，因此未完成异地备份或本机解密校验；服务器临时下载副本已清理，root 备份仍在。identity 也尚未另行离线备份；迁移电脑/服务器前必须分别安全备份，不能误认为 GitHub 克隆包含正式账本。
+- `/run/pm-nautilus/live.json` 尚不存在；没有实际 LIVE 凭据，也未启用 LIVE。服务器目前仍位于硅谷；官方地理限制的新开仓实测留待用户迁移到允许地区后完成。下一次实际 LIVE 操作：本人在可信终端创建 age 密文并妥善保存口令，传输密文到目标服务器、人工解锁、用指定公开地址进行只读私有预检、核对资金/授权/未知挂单与 LIVE 策略参数，然后再明确切换和启动。不得把私钥、口令或 API 凭据发到聊天或 Git。

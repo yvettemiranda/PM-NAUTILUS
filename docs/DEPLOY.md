@@ -121,6 +121,8 @@ cd /opt/pm-nautilus
 
 备份会让 age 再次询问口令，以解密到管道并用 `tar -t` 验证压缩包；全部成功才将临时密文原子链接到最终文件并重启。若任一步失败，命令立即中止，不能继续升级或恢复旧快照；原服务保持停止，排查后用维护前相同的 Compose 文件组合显式恢复。若维护前运行 LIVE，恢复前检查 `/run/pm-nautilus/live.json` 仍存在，否则先人工解锁；`compose_args` 必须在 `stop` 前加入第三份文件，并沿用到 `start`。若想从 LIVE 切为 TEST，须按 7.3 停止并以基础两份文件执行 `up -d --force-recreate`，不能用 `start` 切换模式。
 
+也可用 `age -r <接收公钥>` 加密备份，并把对应的 age identity 私钥单独保存在可信电脑上；服务器只需要公钥。先在持有 identity 的可信终端用 `age -d -i <identity路径> -o - <快照> | tar -tzf -` 验证密文与归档，再把解密后的内容通过受认证的传输方式恢复到已停止的目标服务器。identity、密文和服务器不能只保留在同一处；换电脑前须安全转存 identity。2026-09-23 的停机快照采用此方式，具体路径与状态记在根目录 `HANDOFF.md`，不上传 GitHub。
+
 如已有 LIVE 加密凭据，再单独备份 `/etc/pm-nautilus/live.json.age` 到受限的离线位置；加密密文、age 口令和账本备份不要放在同一个可直接访问的位置。不要复制 `/run/pm-nautilus/live.json` 明文。上述账本快照本身也要保存其 age 口令。备份及解锁文件不能上传 Git。备份时不要把运行中的单个 `.sqlite` 拷贝而遗漏 WAL。LIVE 账本可能含待广播的已签名交易原文，仍按敏感数据处理。
 
 新服务器恢复时，先确保旧实例已停止；克隆并固定目标代码提交，然后在**停止应用**的目录中把最新加密快照通过管道解密并解包，不写出明文压缩包：
@@ -181,6 +183,8 @@ mkdir -m 700 ~/pm-nautilus-private
 python3 deploy/live-secrets.py create --vault ~/pm-nautilus-private/live.json.age
 scp ~/pm-nautilus-private/live.json.age <管理员>@<服务器>:~/live.json.age
 ```
+
+如果没有现成的 CLOB L2 凭据，先按 `REINSTALL.md` 安装本项目锁定依赖，再将创建命令改为 `.venv/bin/python deploy/live-secrets.py create --derive-api-credentials --vault ~/pm-nautilus-private/live.json.age`。这会在本机通过官方 SDK 创建或派生 API 凭据，仍由你在本机终端输入私钥与 age 口令；不会把私钥放进命令参数或 Git。
 
 服务器安装 age 后，把收到的密文安装为 root 所有的 `0600` 文件。也可以直接在服务器运行 `sudo python3 deploy/live-secrets.py create`，但本地创建只传输密文，更符合私钥不离开本地电脑的要求。
 

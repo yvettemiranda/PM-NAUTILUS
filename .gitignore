@@ -20,5 +20,6 @@ artifacts/private/
 
 backups/
 compose.live.yaml
+compose.override.yaml
 
 artifacts/

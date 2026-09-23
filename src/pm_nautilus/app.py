@@ -64,17 +64,28 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 from .live import load_settings, live_factory
                 from .redemption import PolygonWallet
 
-                settings = load_settings()
-                wallet = PolygonWallet(settings)
-                await asyncio.to_thread(wallet.preflight)
-                runtime = Runtime(
-                    root / "LIVE" / "state.sqlite", mode="LIVE", live_factory=live_factory(settings)
-                )
-                # Activation may fail after native queues/private tasks have started.
-                # Register ownership before awaiting it so cleanup still reaches them.
-                runtimes["LIVE"] = runtime
-                await runtime.client.activate()
-                await attach("LIVE", runtime, wallet)
+                stage = "凭据读取"
+                try:
+                    settings = load_settings()
+                    stage = "钱包只读核对"
+                    wallet = PolygonWallet(settings)
+                    await asyncio.to_thread(wallet.preflight)
+                    stage = "执行账本构建"
+                    runtime = Runtime(
+                        root / "LIVE" / "state.sqlite",
+                        mode="LIVE",
+                        live_factory=live_factory(settings, wallet),
+                    )
+                    # Activation may fail after native queues/private tasks have started.
+                    # Register ownership before awaiting it so cleanup still reaches them.
+                    runtimes["LIVE"] = runtime
+                    stage = "执行状态核对"
+                    await runtime.client.activate()
+                    stage = "行情服务初始化"
+                    await attach("LIVE", runtime, wallet)
+                except Exception as exc:
+                    # SDK/RPC errors can include a credential-bearing URL or response.
+                    raise RuntimeError(f"LIVE{stage}失败 ({type(exc).__name__})") from None
             else:
                 cold["LIVE"] = Store(root / "LIVE" / "state.sqlite", "LIVE")
             yield
@@ -108,7 +119,8 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 s.close()
             lock.close()
             if failures:
-                raise ExceptionGroup("组件关闭失败", failures)
+                kinds = ",".join(sorted({type(error).__name__ for error in failures}))
+                raise RuntimeError(f"组件关闭失败 ({kinds})") from None
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.runtimes = runtimes

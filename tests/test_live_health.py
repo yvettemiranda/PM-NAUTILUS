@@ -34,9 +34,15 @@ def test_live_health_recovers_only_after_complete_validation(monkeypatch, valid)
     client = SimpleNamespace(
         owner=owner,
         ready=True,
+        open_orders_clear=True,
         sync_owned=AsyncMock(side_effect=[ConnectionError("temporary outage"), None]),
         generate_position_status_reports=AsyncMock(),
     )
+
+    async def check_open_orders():
+        client.open_orders_clear = True
+
+    client._check_open_orders = AsyncMock(side_effect=check_open_orders)
     rounds = []
 
     async def finish_round(_delay):

@@ -618,6 +618,8 @@ class Runtime:
     def start(self):
         if self.mode == "LIVE" and not self.client.ready:
             raise ValueError("LIVE 尚未完成实际账户核对")
+        if self.mode == "LIVE" and not self.client.open_orders_clear:
+            raise ValueError("LIVE 账户开放挂单核对未通过")
         result = self.validate()
         if not result["ok"]:
             raise ValueError("账本核对失败，不能启动: " + ", ".join(result["errors"]))

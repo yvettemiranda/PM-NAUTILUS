@@ -7,10 +7,12 @@ ownership, bounded quote buys, confirmed-only fills, and conservative terminal c
 import asyncio
 import json
 import os
+import re
+import stat
 from dataclasses import asdict
 from decimal import Decimal
 from hashlib import sha256
-from pathlib import Path
+from urllib.parse import urlsplit
 
 import msgspec
 from py_clob_client_v2.client import ClobClient
@@ -37,17 +39,37 @@ from nautilus_trader.model.objects import Money, AccountBalance
 
 from .config import SCALE, micros
 from .execution import TestExecution
+from .live_account_guard import audit_open_orders, condition_inventory_matches
 from .native import price, quantity
 from .rules import cost, ceil_div, static_reason, Fees, preview, arbitrate
 
 
-def load_settings():
-    if os.environ.get("PM_LIVE_ENABLED") != "true":
+def load_settings(*, require_live_enabled: bool = True):
+    if require_live_enabled and os.environ.get("PM_LIVE_ENABLED") != "true":
         raise ValueError("LIVE 未由服务器显式启用")
-    path = Path(os.environ["PM_LIVE_CREDENTIALS_FILE"])
-    if path.stat().st_mode & 0o077:
-        raise ValueError("LIVE凭据文件须仅属主可读写 (chmod 600)")
-    settings = json.loads(path.read_text())
+    path = os.environ.get("PM_LIVE_CREDENTIALS_FILE")
+    if not path:
+        raise ValueError("LIVE凭据文件路径未配置")
+    try:
+        # Check the opened inode, not a pathname that can be replaced between
+        # stat() and read(). O_NONBLOCK prevents a FIFO from blocking at open().
+        flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+        with os.fdopen(os.open(path, flags), encoding="utf-8") as stream:
+            info = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_uid not in {10001, os.geteuid()}
+            ):
+                raise ValueError("LIVE凭据文件须为权限0600、由UID10001或运行用户持有的普通文件")
+            try:
+                settings = json.load(stream)
+            except (ValueError, UnicodeError):
+                raise ValueError("LIVE凭据文件JSON无效") from None
+    except OSError:
+        raise ValueError("LIVE凭据文件无法安全读取，请检查路径、属主及文件类型") from None
+    if not isinstance(settings, dict):
+        raise ValueError("LIVE凭据文件JSON须为对象")
     for key in (
         "private_key",
         "api_key",
@@ -59,12 +81,36 @@ def load_settings():
     ):
         if key not in settings or settings[key] is None:
             raise ValueError(f"LIVE凭据缺少 {key}")
-    if settings["signature_type"] not in (0, 2):
+    if type(settings["signature_type"]) is not int or settings["signature_type"] not in (0, 2):
         raise ValueError("须核对实际钱包；当前支持EOA或单签Safe的完整交易/赎回路径")
+    if not isinstance(settings["private_key"], str) or not re.fullmatch(
+        r"0x[0-9a-fA-F]{64}", settings["private_key"]
+    ):
+        raise ValueError("LIVE签名密钥格式无效")
+    if not isinstance(settings["funder"], str) or not re.fullmatch(
+        r"0x[0-9a-fA-F]{40}", settings["funder"]
+    ):
+        raise ValueError("LIVE资金地址格式无效")
+    if any(
+        not isinstance(settings[key], str) or not settings[key].strip()
+        for key in ("api_key", "api_secret", "passphrase")
+    ):
+        raise ValueError("LIVE CLOB API 凭据格式无效")
+    try:
+        rpc_url = urlsplit(settings["rpc_url"])
+    except (TypeError, ValueError):
+        raise ValueError("LIVE Polygon RPC URL 无效") from None
+    if rpc_url.scheme != "https" or not rpc_url.hostname:
+        raise ValueError("LIVE Polygon RPC 必须使用 HTTPS")
+    if (
+        "auto_approve_redemption" in settings
+        and type(settings["auto_approve_redemption"]) is not bool
+    ):
+        raise ValueError("LIVE 自动赎回授权设置无效")
     return settings
 
 
-def live_factory(settings):
+def live_factory(settings, wallet):
     def create(owner):
         creds = ApiCreds(settings["api_key"], settings["api_secret"], settings["passphrase"])
         http = ClobClient(
@@ -89,19 +135,22 @@ def live_factory(settings):
             provider,
             PolymarketWebSocketAuth(creds.api_key, creds.api_secret, creds.api_passphrase),
             config,
+            wallet=wallet,
         )
 
     return create
 
 
 class LiveExecution(PolymarketExecutionClient):
-    def __init__(self, owner, http, provider, auth, config):
+    def __init__(self, owner, http, provider, auth, config, wallet=None):
         self.owner = owner
+        self.wallet = wallet
         n = owner.native
         super().__init__(
             asyncio.get_running_loop(), http, n.bus, n.cache, n.clock, provider, auth, config, None
         )
         self.ready = False
+        self.open_orders_clear = False
         self.reconciliation_task = None
         self._release_verified = False
         self._pending_native = set()
@@ -323,6 +372,12 @@ class LiveExecution(PolymarketExecutionClient):
         if not self.buy_valid(o, i):
             self.deny(o, "签名期间控制/资格发生变化")
             return
+        if not await self._check_buy_account(r.tokens[i["token_id"]]):
+            self.deny(o, "账户开放挂单或同Condition份额核对未通过")
+            return
+        if not self.buy_valid(o, i):
+            self.deny(o, "核对期间控制/资格发生变化")
+            return
         self.generate_order_submitted(o.strategy_id, o.instrument_id, o.client_order_id, r.now)
         venue = self._expected_venue_order_id(signed, neg_risk=r.tokens[i["token_id"]].neg_risk)
         await self._post_signed_order(
@@ -373,6 +428,42 @@ class LiveExecution(PolymarketExecutionClient):
         async with self._sync_lock:
             await self._sync_owned()
 
+    async def _check_open_orders(self):
+        audit = await audit_open_orders(
+            self._http_client, self.owner.store.intents(active_only=True)
+        )
+        self.open_orders_clear = audit.ok
+        if not audit.ok:
+            self.owner.pause()
+            self.owner.store.put(
+                "live_error",
+                "账户存在程序外开放挂单" if audit.unknown_count else audit.error,
+            )
+        return audit.ok
+
+    async def _check_buy_account(self, token):
+        if not await self._check_open_orders():
+            return False
+        condition_ids = tuple(
+            t.token_id for t in self.owner.tokens.values() if t.condition_id == token.condition_id
+        )
+        own = {}
+        for cycle in self.owner.business["cycles"].values():
+            held = self.owner.tokens.get(cycle["token_id"])
+            if held and held.condition_id == token.condition_id:
+                own[held.token_id] = own.get(held.token_id, 0) + cycle["quantity"]
+        try:
+            if self.wallet is None or len(condition_ids) != 2:
+                raise ValueError("Incomplete inventory context")
+            actual = await asyncio.to_thread(self.wallet.token_balances, condition_ids)
+        except Exception:
+            actual = {}
+        if not condition_inventory_matches(condition_ids, actual, own):
+            self.owner.pause()
+            self.owner.store.put("live_error", "同Condition实际份额与程序持仓不一致")
+            return False
+        return True
+
     async def _sync_owned(self):
         r = self.owner
         intents = r.store.intents(active_only=True)
@@ -415,8 +506,7 @@ class LiveExecution(PolymarketExecutionClient):
                 continue
             result = await asyncio.to_thread(self._http_client.get_order, venue)
             if not result:
-                r.store.put("live_error", "订单结果不明，保留额度与Event锁")
-                continue
+                raise ValueError("订单结果不明，保留额度与Event锁")
             if str(result.get("asset_id")) != i["token_id"]:
                 raise ValueError("订单查询身份不一致")
             associated = set(result.get("associate_trades") or [])
@@ -523,6 +613,7 @@ class LiveExecution(PolymarketExecutionClient):
         if not ok or not self.owner.validate()["ok"]:
             raise ValueError("LIVE原生执行核对失败")
         self.ready = True
+        await self._check_open_orders()
         self.reconciliation_task = asyncio.create_task(self.maintain())
 
     async def maintain(self):
@@ -532,11 +623,14 @@ class LiveExecution(PolymarketExecutionClient):
                 await self.generate_position_status_reports(None)
                 if not self.owner.validate()["ok"]:
                     raise ValueError("LIVE账本校验未通过")
+                await self._check_open_orders()
                 self.ready = True
-                self.owner.store.put("live_error", None)
+                if self.open_orders_clear:
+                    self.owner.store.put("live_error", None)
                 self.owner.drain()
             except Exception as exc:
                 self.ready = False
+                self.open_orders_clear = False
                 self.owner.pause()
                 self.owner.store.put("live_error", type(exc).__name__)
             await asyncio.sleep(5)

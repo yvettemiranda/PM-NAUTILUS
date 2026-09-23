@@ -21,6 +21,10 @@ ADAPTERS = {
 ZERO = "0x" + "00" * 20
 
 
+class RedemptionCheckError(ValueError):
+    """A static, application-owned message that is safe to persist for the UI."""
+
+
 def abi(name, args, outputs=(), view=True):
     return {
         "type": "function",
@@ -69,50 +73,53 @@ class PolygonWallet:
         self.funder = Web3.to_checksum_address(settings["funder"])
         self.signature_type = settings["signature_type"]
         if self.signature_type not in (0, 2):
-            raise ValueError("当前赎回支持 EOA(0) 与单签 Safe(2)，须先核对实际钱包类型")
+            raise RedemptionCheckError("当前赎回支持 EOA(0) 与单签 Safe(2)，须先核对实际钱包类型")
         if self.signature_type == 0 and self.funder != self.signer.address:
-            raise ValueError("EOA资金账户必须与签名账户相同")
+            raise RedemptionCheckError("EOA资金账户必须与签名账户相同")
         self.auto_approve = settings.get("auto_approve_redemption") is True
         self.ctf = self.w3.eth.contract(address=CTF, abi=TOKEN_ABI)
 
     def preflight(self):
         if self.w3.eth.chain_id != 137:
-            raise ValueError("RPC不是Polygon主网")
+            raise RedemptionCheckError("RPC不是Polygon主网")
         for address in [CTF, PUSD, *ADAPTERS.values()]:
             if not self.w3.eth.get_code(Web3.to_checksum_address(address)):
-                raise ValueError("官方合约地址没有部署代码")
+                raise RedemptionCheckError("官方合约地址没有部署代码")
         if self.signature_type == 2:
             safe = self.w3.eth.contract(address=self.funder, abi=SAFE_ABI)
             if (
                 safe.functions.getThreshold().call() != 1
                 or self.signer.address not in safe.functions.getOwners().call()
             ):
-                raise ValueError("Safe须为本签名账户可执行的单签钱包")
+                raise RedemptionCheckError("Safe须为本签名账户可执行的单签钱包")
 
     def owned_balances(self, claim):
+        return self.token_balances(claim["payouts"])
+
+    def token_balances(self, token_ids):
+        """Read both outcomes from the CTF contract before a new LIVE buy."""
         return {
-            tid: self.ctf.functions.balanceOf(self.funder, int(tid)).call()
-            for tid in claim["payouts"]
+            tid: self.ctf.functions.balanceOf(self.funder, int(tid)).call() for tid in token_ids
         }
 
     def prepare(self, claim):
         self.preflight()
         balances = self.owned_balances(claim)
         if any(balances[tid] != claim["rights"].get(tid, 0) for tid in balances):
-            raise ValueError("同Condition余额与本程序权利不一致，拒绝覆盖手动资产")
+            raise RedemptionCheckError("同Condition余额与本程序权利不一致，拒绝覆盖手动资产")
         condition = bytes.fromhex(claim["condition_id"][2:])
         den = self.ctf.functions.payoutDenominator(condition).call()
         if den == 0:
-            raise ValueError("链上尚未正式结算")
+            raise RedemptionCheckError("链上尚未正式结算")
         nums = [self.ctf.functions.payoutNumerators(condition, i).call() for i in (0, 1)]
         if [n * SCALE // den for n in nums] != list(claim["payouts"].values()):
-            raise ValueError("链上结算比例与官方市场结果不一致")
+            raise RedemptionCheckError("链上结算比例与官方市场结果不一致")
         target = Web3.to_checksum_address(ADAPTERS[claim["neg_risk"]])
         approved = self.ctf.functions.isApprovedForAll(self.funder, target).call()
         operation = "REDEEM"
         if not approved:
             if not self.auto_approve:
-                raise ValueError("缺少赎回适配器授权；账户配置后方可开启自动授权")
+                raise RedemptionCheckError("缺少赎回适配器授权；账户配置后方可开启自动授权")
             call = self.ctf.functions.setApprovalForAll(target, True)
             target = CTF
             operation = "APPROVE"
@@ -140,7 +147,7 @@ class PolygonWallet:
         }
         tx["gas"] = self.w3.eth.estimate_gas(tx) * 12 // 10
         if self.w3.eth.get_balance(self.signer.address) < tx["gas"] * tx["gasPrice"]:
-            raise ValueError("签名账户POL不足以支付链上手续费")
+            raise RedemptionCheckError("签名账户POL不足以支付链上手续费")
         signed = self.signer.sign_transaction(tx)
         return {
             "raw_tx": Web3.to_hex(signed.raw_transaction),
@@ -153,7 +160,7 @@ class PolygonWallet:
         try:
             result = Web3.to_hex(self.w3.eth.send_raw_transaction(claim["raw_tx"]))
             if result.lower() != claim["tx_hash"].lower():
-                raise ValueError("RPC返回的交易哈希不一致")
+                raise RedemptionCheckError("RPC返回的交易哈希不一致")
         except ValueError as exc:
             if not any(x in str(exc).lower() for x in ("already known", "known transaction")):
                 raise
@@ -296,7 +303,7 @@ class RedemptionService:
                     await self.advance(claim)
                 except Exception as exc:
                     claim["error"] = (
-                        str(exc)[:180] if isinstance(exc, ValueError) else type(exc).__name__
+                        str(exc) if isinstance(exc, RedemptionCheckError) else type(exc).__name__
                     )
                     r.store.put("business", r.business)
         finally:

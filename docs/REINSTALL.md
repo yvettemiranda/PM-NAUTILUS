@@ -49,9 +49,11 @@ uv run --frozen pm-nautilus --offline --data-dir runtime/environment-check
 
 ## 3. 仓库不保存的内容
 
-`.env`、密码、私钥、钱包/API/RPC凭据、SQLite账本、runtime、日志、参考项目、虚拟机、虚拟环境以及本地 artifacts/backups 均不上传。GitHub 仓库不保存服务器正式 TEST 账本；从仓库恢复会创建新的本地开发账本，不会复制服务器或其他电脑的成交历史。
+`.env`、密码、私钥、钱包/API/RPC凭据、加密凭据包、SQLite账本、runtime、日志、参考项目、虚拟机、虚拟环境以及本地 artifacts/backups 均不上传。GitHub 仓库不保存服务器正式 TEST/LIVE 账本；从仓库恢复会创建新的本地开发账本，不会复制服务器或其他电脑的成交历史。
 
-如果另有自己需要保留的电脑文件或凭据，需自行单独备份；本仓库只保证项目开发材料可恢复。未来正式运行产生的账本与服务器凭据按 DEPLOY.md 加密备份，不能提交公开仓库。
+本仓库只保证项目开发材料可恢复。服务器的最新 TEST/LIVE 账本、`.env`、本地 `compose.override.yaml`、`compose.live.yaml` 需要按 [部署指南](DEPLOY.md)加密成账本快照；`/etc/pm-nautilus/live.json.age` 密文另行备份，解锁口令与密文分开保管。`/run/pm-nautilus/live.json` 是临时明文，不备份。换电脑后只需克隆 GitHub 即可继续开发或远程管理原服务器，不必把签名私钥复制到新电脑。
+
+迁移到新服务器时先停旧实例并保存最新一致性账本，核对未完成的真实订单与链上交易；然后在新服务器恢复加密备份和本地配置、只读验证账本，人工解锁凭据，确保旧实例不会再使用同一钱包和账本，最后启动新实例核对 LIVE。不能拿较早的 LIVE 快照直接启动交易；服务器重启后默认只启 TEST，LIVE 须按部署指南重新人工解锁。
 
 需要重新生成完整源码文档或离线源码备份时：
 

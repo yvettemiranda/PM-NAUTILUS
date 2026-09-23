@@ -1,9 +1,15 @@
 # Opt-in example only. Copy to repository root as compose.live.yaml ONLY after
-# explicit LIVE authorization, actual wallet preflight and credential setup.
+# explicit LIVE authorization, actual wallet preflight and manual unlock.
+# Always combine it after compose.yaml and the existing compose.override.yaml.
 services:
   app:
     environment:
       PM_LIVE_ENABLED: "true"
       PM_LIVE_CREDENTIALS_FILE: /run/secrets/live.json
     volumes:
-      - ./runtime/secrets/live.json:/run/secrets/live.json:ro
+      - type: bind
+        source: /run/pm-nautilus/live.json
+        target: /run/secrets/live.json
+        read_only: true
+        bind:
+          create_host_path: false

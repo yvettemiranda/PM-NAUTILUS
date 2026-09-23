@@ -1,0 +1,15 @@
+[Unit]
+Description=Start PM-NAUTILUS in TEST mode after a host reboot
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/pm-nautilus
+# Adjust WorkingDirectory and docker path to the actual server before installing.
+# The LIVE overlay is deliberately omitted. The local HTTPS override is required.
+ExecStart=/usr/bin/docker compose --env-file .env -f compose.yaml -f compose.override.yaml up -d --force-recreate
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -24,7 +24,7 @@
   --signature-type 2
 ```
 
-默认使用 Polygon PublicNode；如需自己的 RPC，可通过 `PM_PREFLIGHT_RPC_URL` 环境变量指定（不要将带密钥 URL 放入截图或提交）。程序不输出 RPC URL 或异常详细内容。所有链状态查询固定在同一个区块；允许的方法仅有 chainId、blockNumber、getCode、getBalance、eth_call。检查 EOA/Safe 归属、关键合约有代码、pUSD/POL 余额、两种 Exchange allowance 及 CTF 交易/赎回授权。命令成功只表示公开检查完成；余额为零或未授权会原样报告，不表示可以启用 LIVE。需要认证的 CLOB 账户、开放订单及仓位归属仍需后续独立检查；不能用应用 START/PAUSE 代替它。
+默认使用 Polygon PublicNode；如需自己的 RPC，可通过 `PM_PREFLIGHT_RPC_URL` 环境变量指定（不要将带密钥 URL 放入截图或提交）。程序不输出 RPC URL 或异常详细内容。所有链状态查询固定在同一个区块；允许的方法仅有 chainId、blockNumber、getCode、getBalance、eth_call。检查 EOA/Safe 归属、关键合约有代码、pUSD/POL 余额、两种 Exchange allowance 及 CTF 交易/赎回授权。命令成功只表示公开检查完成；余额为零或未授权会原样报告，不表示可以启用 LIVE。不能用应用 START/PAUSE 代替只读预检。
 
 ## 尚未验收
 
@@ -36,3 +36,11 @@
 ## 本次本地验证
 
 初次审计 `pytest -q`：70 passed。随后实现诊断修复和独立只读工具，73 passed，2 个既有第三方弃用警告；Ruff check 与 format --check 通过。只读工具已对用户授权的公开地址完成 Polygon 实际查询；没有签名、私有连接或链上写入。服务器部署状态以 HANDOFF 为准。
+
+## 2026-09-23 后续实现（尚未实盘验收）
+
+用户选定加密凭据包及人工解锁方式。`deploy/live-secrets.py` 在可信终端接收私钥和 CLOB 凭据，用 age 加密后才写入磁盘；服务器人工解锁到 `/run` tmpfs，并以只读挂载交给 UID10001 的容器。开机单元重建 TEST，LIVE 必须再次人工解锁；具体安装、备份和迁移步骤见 [DEPLOY.md](DEPLOY.md)。GitHub 不含私钥、钱包地址、凭据包或 LIVE 账本。
+
+新增 `pm_nautilus.private_preflight`，在一次性容器中读取已解锁凭据与现有 LIVE 账本，只读核对预期签名地址和资金地址、Polygon Safe 权限、pUSD/POL、CLOB L2 认证及全页开放挂单；这仍不能证明真实下单和赎回成功。LIVE 运行时在启动、定期核对和新买单提交前检查当前凭据可见的全部开放挂单；程序外订单阻止新买，绝不自动取消。每次新买前还读取该 Condition 两个结果 token 的链上份额，要求与本程序账本持仓一致；已有人工持仓不导入。
+
+这些改动保留 TEST/LIVE 分库及原策略参数，没有新增总投入、单笔或试单次数上限。实际凭据导入、账户资金和授权、服务器环境、新成交与赎回闭环仍必须逐项实测；当前服务器的 LIVE 开关保持关闭。

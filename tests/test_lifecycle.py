@@ -38,7 +38,7 @@ def test_failed_live_activation_closes_registered_runtime(tmp_path, monkeypatch)
     monkeypatch.setenv("PM_LIVE_ENABLED", "true")
     monkeypatch.setenv("PM_UI_PASSWORD", "controlled-local-password")
     monkeypatch.setattr("pm_nautilus.live.load_settings", lambda: {})
-    monkeypatch.setattr("pm_nautilus.live.live_factory", lambda _: controlled_factory)
+    monkeypatch.setattr("pm_nautilus.live.live_factory", lambda *_: controlled_factory)
     monkeypatch.setattr(
         "pm_nautilus.redemption.PolygonWallet",
         lambda _: SimpleNamespace(preflight=lambda: None),
@@ -56,7 +56,7 @@ def test_failed_live_activation_closes_registered_runtime(tmp_path, monkeypatch)
 
     async def run():
         app = app_module.create_app(tmp_path, public_data=False)
-        with pytest.raises(ValueError, match="controlled activation failure"):
+        with pytest.raises(RuntimeError, match="LIVE执行状态核对失败 \\(ValueError\\)"):
             async with app.router.lifespan_context(app):
                 pytest.fail("Activation failure must abort startup")
 

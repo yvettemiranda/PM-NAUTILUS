@@ -210,6 +210,7 @@ def test_confirmed_spend_cannot_reuse_stale_cash_for_second_event(tmp_path):
             for t in tokens:
                 runtime.book(t.token_id, [(90_000, 100_000_000)], [(100_000, 10_000_000)])
             runtime.client.ready = True
+            runtime.client.open_orders_clear = True
             runtime.start()
             await flush()
             assert len(runtime.store.intents()) == 1
@@ -246,6 +247,7 @@ def test_live_cash_fak_rounds_limit_down_to_tick_without_raising_budget(tmp_path
             r.update_preferences({"maxBuyPriceCents": "98.7"})
             r.book(t.token_id, [(90000, 100_000_000)], [(100000, 10_000_000)])
             r.client.ready = True
+            r.client.open_orders_clear = True
             r.start()
             await flush()
             oid = next(iter(r.store.intents()))
@@ -255,6 +257,7 @@ def test_live_cash_fak_rounds_limit_down_to_tick_without_raising_budget(tmp_path
             )
             r.client._expected_venue_order_id = Mock(return_value=VenueOrderId("venue-1"))
             r.client._post_signed_order = AsyncMock()
+            r.client._check_buy_account = AsyncMock(return_value=True)
             await r.client._submit_market_order(SimpleNamespace(order=order), None)
             args = r.client._http_client.create_market_order.call_args.args[0]
             assert args.price == 0.98 and args.amount == 1 and args.order_type == "FAK"

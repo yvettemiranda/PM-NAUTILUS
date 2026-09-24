@@ -7,7 +7,8 @@ After=docker.service
 Type=oneshot
 WorkingDirectory=/opt/pm-nautilus
 # Adjust WorkingDirectory and docker path to the actual server before installing.
-# The LIVE overlay is deliberately omitted. The local HTTPS override is required.
+# The LIVE overlay is deliberately omitted. Remove the local HTTPS override on
+# a new server that does not have compose.override.yaml.
 ExecStart=/usr/bin/docker compose --env-file .env -f compose.yaml -f compose.override.yaml up -d --force-recreate
 RemainAfterExit=yes
 

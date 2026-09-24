@@ -2,6 +2,8 @@
 
 默认交付：TEST + PAUSED，LIVE 未启用。下列部署步骤不启动正式长期 TEST。代码、TEST 数据、LIVE 数据各自独立；不得复制 PM-SMALL 的数据库、钱包会话或历史运行目录。
 
+非技术用户在新电脑和新服务器上放弃旧 TEST 模拟记录、准备首次实盘时，先按 [从 GitHub 到首次实盘](START_FRESH_LIVE.md)确认顺序，再由执行部署的人使用本手册。若本程序已产生真实 LIVE 订单或持仓，须走本手册的迁移及对账流程，不能按空白安装覆盖。
+
 ## 1. Mac 本地开发
 
 要求 macOS 26+ arm64（所选 Nautilus wheel 的最低要求）、Python 3.12.14。其他 Mac 版本使用本地 Linux 容器。新开发环境先按 [环境配置指南](REINSTALL.md) 下载 Python 并安装锁定依赖；在克隆目录运行：
@@ -56,7 +58,7 @@ mkdir -p runtime/server
 sudo chown 10001:10001 runtime/server
 ```
 
-在 `.env` 写入 `PM_GIT_REVISION` 的完整 SHA、随机 UI 密码（至少16字符）、允许的域名。账号固定 `pm`。密码可用 `openssl rand -hex 24` 本地生成；只保存于该文件。不要把真实密码放进聊天、命令参数、Git 或一般文档。当前服务器已有本地 `compose.override.yaml`，它是 HTTPS 控制请求正常工作的组成部分；下面的 Compose 命令均显式包含它。新服务器须先根据自己的反代配置创建并验证覆盖文件；若没有反代，则只使用基础 `compose.yaml`，并相应修改开机单元，不能照搬旧服务器的代理信任设置。
+在 `.env` 写入 `PM_GIT_REVISION` 的完整 SHA、随机 UI 密码（至少16字符）、允许的域名。账号固定 `pm`。密码可用 `openssl rand -hex 24` 本地生成；只保存于该文件。不要把真实密码放进聊天、命令参数、Git 或一般文档。当前服务器已有本地 `compose.override.yaml`，它是 HTTPS 控制请求正常工作的组成部分；下面的 Compose 命令均显式包含它。新服务器须先根据自己的反代配置创建并验证覆盖文件；若没有反代，则只使用基础 `compose.yaml`，并相应修改开机单元，不能照搬旧服务器的代理信任设置。**若要从 GitHub 的公开规则文件恢复首次实盘，不要先运行下面的 `up -d`；须按 [新手指南](START_FRESH_LIVE.md)在首次启动前离线初始化并导入两个空白账本。**
 
 ```sh
 docker compose --env-file .env -f compose.yaml -f compose.override.yaml config --quiet
@@ -67,6 +69,8 @@ curl -fsS http://127.0.0.1:8765/api/health
 ```
 
 健康结果需包含 TEST、PAUSED、`liveExecutionEnabled=false` 和对应代码 SHA。默认仅绑定服务器回环地址。最小访问方式：在自己的 Mac 上运行 `ssh -L 8765:127.0.0.1:8765 <用户>@<服务器>`，然后访问本机端口并以 `pm` 登录。
+
+**全新服务器没有本地 `compose.override.yaml` 时**，上面命令去掉 `-f compose.override.yaml`，从 `docker compose --env-file .env -f compose.yaml config --quiet`、`build`、`up -d`、`ps` 依次执行；若使用公开规则文件，就在 `build` 与首次 `up -d` 之间按新手指南导入。应用启动后的公开扫描会写入数据，严格的全新账本导入工具会拒绝再次导入。下文所有带该覆盖文件的命令，在新机器没有该文件时同样删去这个 `-f` 参数。
 
 `deploy/nginx.conf.example` 提供可审查的独立虚拟主机样例；替换实际域名和证书路径后先运行 `nginx -t`。如使用公网域名，沿用服务器现有 HTTPS 反代，在新独立配置中转发到 `127.0.0.1:8765`，把域名加入 `PM_ALLOWED_HOSTS`。保留原 Host/Origin，使用 HTTPS。不要直接公开容器端口，不要把 Basic 密码通过明文公网 HTTP 发送。切换任何已有公网入口前必须保存旧配置，明确旧服务、新服务端口和回滚动作。
 
@@ -94,6 +98,8 @@ restrict,command="/usr/local/sbin/pm-nautilus-monitor"
 该公钥必须与普通运维密钥分开，私钥不得提交 Git。`restrict` 禁止 PTY、端口/Agent/X11 转发，强制命令忽略调用方传入的 SSH 命令，只返回资源、服务、证书、容器、健康、脱敏面板、账本验证、SQLite quick-check 和近期错误快照。脚本需要目标用户具备其中固定只读命令的免密 sudo；安装后必须实测传入任意命令仍只返回巡检快照。它不能用于部署、重启、修改配置或紧急修复；这些操作仍走单独授权的管理入口。
 
 ## 5. 备份、升级、回滚
+
+本节适用于保留旧账本、升级或回滚。若明确放弃旧 TEST 模拟历史，且本程序从未有真实 LIVE 交易，新服务器可建立空白账本；旧 TEST 密文快照不构成首次启用 LIVE 的必备条件。**空白账本不会自动恢复旧服务器上调过的策略设置**，须核对并应用仓库的 `config/strategy-profile.json`，在 LIVE START 前分别读回 TEST 和 LIVE 的设置。该公开文件不会随旧服务器后续改动自动更新。曾经使用过的钱包仍可能有本程序外的真实挂单/持仓：私有预检查原有挂单，原有持仓须另行只读核对。
 
 停机备份可确保两个模式与 SQLite WAL 一致；LIVE 已启用时先 PAUSE 并确认所有在途买单终态，持仓退出中应选择维护时机。备份前先按**当前实际模式**选择文件组合：TEST 使用基础两份，LIVE 额外加入 `compose.live.yaml`。维护期间保持同一组合；`start` 只重启原容器，不会应用新配置或切换模式。
 
@@ -123,7 +129,7 @@ cd /opt/pm-nautilus
 
 也可用 `age -r <接收公钥>` 加密备份，并把对应的 age identity 私钥单独保存在可信电脑上；服务器只需要公钥。先在持有 identity 的可信终端用 `age -d -i <identity路径> -o - <快照> | tar -tzf -` 验证密文与归档，再把解密后的内容通过受认证的传输方式恢复到已停止的目标服务器。identity、密文和服务器不能只保留在同一处；换电脑前须安全转存 identity。2026-09-23 的停机快照采用此方式，具体路径与状态记在根目录 `HANDOFF.md`，不上传 GitHub。
 
-如已有 LIVE 加密凭据，再单独备份 `/etc/pm-nautilus/live.json.age` 到受限的离线位置；加密密文、age 口令和账本备份不要放在同一个可直接访问的位置。不要复制 `/run/pm-nautilus/live.json` 明文。上述账本快照本身也要保存其 age 口令。备份及解锁文件不能上传 Git。备份时不要把运行中的单个 `.sqlite` 拷贝而遗漏 WAL。LIVE 账本可能含待广播的已签名交易原文，仍按敏感数据处理。
+如已有 LIVE 加密凭据，再单独备份 `/etc/pm-nautilus/live.json.age` 到受限的离线位置；加密密文、age 口令和账本备份不要放在同一个可直接访问的位置。不要复制 `/run/pm-nautilus/live.json` 明文。账本快照若用 age 口令模式，须保存对应口令；若用 recipient 公钥模式，须保存对应 identity 私钥。备份及解锁文件不能上传 Git。备份时不要把运行中的单个 `.sqlite` 拷贝而遗漏 WAL。LIVE 账本可能含待广播的已签名交易原文，仍按敏感数据处理。
 
 新服务器恢复时，先确保旧实例已停止；克隆并固定目标代码提交，然后在**停止应用**的目录中把最新加密快照通过管道解密并解包，不写出明文压缩包：
 
@@ -206,7 +212,9 @@ docker compose --env-file .env -f compose.yaml -f compose.override.yaml -f compo
 docker compose --env-file .env -f compose.yaml -f compose.override.yaml -f compose.live.yaml run --rm --no-deps --entrypoint /app/.venv/bin/python app -m pm_nautilus.private_preflight --expected-signer 0x你的公开签名地址 --expected-funder 0x你的Safe资金地址 --data-dir /data
 ```
 
-这条私有预检在一次性容器中只读检查凭据对应地址、链上余额与授权、CLOB 账户和已有挂单、本程序 LIVE 账本；不下单、不取消旧挂单。运行前须确认应用镜像已从包含 `private_preflight` 的目标提交构建。退出码 `0` 表示可进入新买验证，`2` 表示认证成功但资金、授权或未知挂单仍阻止新买，`1` 表示检查失败。旧手动挂单需本人处理，程序不会自动取消。真实凭据导入前不能运行此命令。只有预检返回 `0`，且首次启用前已完成下文 7.2 的开机 TEST 单元，再启动服务并核对 LIVE：
+这条私有预检在一次性容器中只读检查凭据对应地址、链上余额与授权、CLOB 账户和已有挂单、本程序 LIVE 账本；不下单、不取消旧挂单。运行前须确认应用镜像已从包含 `private_preflight` 的目标提交构建。退出码 `0` 表示可进入新买验证，`2` 表示认证成功但资金、授权或未知挂单仍阻止新买，`1` 表示检查失败。旧手动挂单需本人处理，程序不会自动取消；**钱包原有持仓须单独核对**。真实凭据导入前不能运行此命令。
+
+首次启用前，还须从目标服务器与将来交易相同的网络出口查询 [Polymarket 官方地区接口](https://docs.polymarket.com/api-reference/geoblock) `GET https://polymarket.com/api/geoblock`，确认 `blocked=false` 且当前所在地允许 API 新开仓。地区检查不是私有预检的一部分；若受限，停在检查阶段。只有预检返回 `0`、地区与钱包原有持仓已核对，且完成下文 7.2 的开机 TEST 单元，再启动服务并核对 LIVE：
 
 ```sh
 docker compose --env-file .env -f compose.yaml -f compose.override.yaml -f compose.live.yaml up -d --force-recreate
@@ -218,7 +226,7 @@ docker compose --env-file .env -f compose.yaml -f compose.override.yaml -f compo
 
 ### 7.2 主机重启后默认回到 TEST
 
-在首次启用 LIVE 前，将 `deploy/pm-nautilus-test-boot.service.example` 的 `WorkingDirectory` 与 Docker 路径改为实际服务器值，确认本地 `compose.override.yaml` 存在，再安装开机单元：
+在首次启用 LIVE 前，将 `deploy/pm-nautilus-test-boot.service.example` 的 `WorkingDirectory` 与 Docker 路径改为实际服务器值。若新服务器没有 `compose.override.yaml`，还须把单元中的 `-f compose.override.yaml` 删去，保留基础 `compose.yaml`；本单元必须与该服务器实际 TEST Compose 文件组合一致。核对后安装：
 
 ```sh
 sudo install -m 0644 deploy/pm-nautilus-test-boot.service.example /etc/systemd/system/pm-nautilus-test-boot.service

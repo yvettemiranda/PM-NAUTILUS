@@ -2,6 +2,8 @@
 
 本指南适用于新电脑、全新系统或独立开发目录。项目公开仓库为：https://github.com/yvettemiranda/PM-NAUTILUS 。它是长期有效的开发环境恢复说明，不记录某一次电脑重装或服务器部署阶段；当前运行状态以根目录 `HANDOFF.md` 为准。
 
+如果目的是买新服务器、放弃旧 TEST 模拟记录、首次启用本程序实盘，请先读 [从 GitHub 到首次实盘](START_FRESH_LIVE.md)。下面的 Python/uv 步骤是开发环境重建细节，不是用户需要独自逐条完成的实盘清单。
+
 ## 1. 克隆项目
 
 在新电脑终端执行（公开克隆无需登录）：
@@ -51,9 +53,11 @@ uv run --frozen pm-nautilus --offline --data-dir runtime/environment-check
 
 `.env`、密码、私钥、钱包/API/RPC凭据、加密凭据包、SQLite账本、runtime、日志、参考项目、虚拟机、虚拟环境以及本地 artifacts/backups 均不上传。GitHub 仓库不保存服务器正式 TEST/LIVE 账本；从仓库恢复会创建新的本地开发账本，不会复制服务器或其他电脑的成交历史。
 
-本仓库只保证项目开发材料可恢复。服务器的最新 TEST/LIVE 账本、`.env`、本地 `compose.override.yaml`、`compose.live.yaml` 需要按 [部署指南](DEPLOY.md)加密成账本快照；`/etc/pm-nautilus/live.json.age` 密文另行备份，解锁口令与密文分开保管。`/run/pm-nautilus/live.json` 是临时明文，不备份。换电脑后只需克隆 GitHub 即可继续开发或远程管理原服务器，不必把签名私钥复制到新电脑。
+本仓库只保证项目开发材料可恢复。**若用户明确放弃旧 TEST 模拟历史，且本程序尚未产生真实 LIVE 订单、持仓或在途交易，新服务器可以从空白账本开始；旧模拟账本备份不是首次实盘的前提。**已获用户同意公开的 `config/strategy-profile.json` 保存当前交易设置，但空白账本不会因 GitHub 克隆而自动采用它；应先确认文件仍是想用的版本，再分别应用并读回 TEST、LIVE。钱包以前在本程序之外产生的挂单和持仓也不会因新建账本而消失，仍须在接入时核对。
 
-若账本快照使用 age 接收公钥加密，还须另行安全迁移对应的 identity 私钥；GitHub 无法恢复它。2026-09-23 的服务器快照采用此方式，解密身份文件与服务器备份位置见 `HANDOFF.md`。
+若要保留旧 TEST 历史，或本程序后来已经有真实 LIVE 交易，应按 [部署指南](DEPLOY.md)对服务器最新 TEST/LIVE 账本、`.env`、本地 `compose.override.yaml`、`compose.live.yaml` 制作并验证加密快照；`/etc/pm-nautilus/live.json.age` 密文另行备份，解锁口令与密文分开保管。`/run/pm-nautilus/live.json` 是临时明文，不备份。换电脑后只需克隆 GitHub 即可继续开发或远程管理原服务器，不必把签名私钥复制到新电脑。
+
+若决定恢复旧账本，且快照使用 age 接收公钥加密，还须另行安全迁移对应的 identity 私钥；GitHub 无法恢复它。2026-09-23 的服务器快照采用此方式，解密身份文件与服务器备份位置见 `HANDOFF.md`。选择空白账本开始时，不需要该旧账本的解密 identity。
 
 迁移到新服务器时先停旧实例并保存最新一致性账本，核对未完成的真实订单与链上交易；然后在新服务器恢复加密备份和本地配置、只读验证账本，人工解锁凭据，确保旧实例不会再使用同一钱包和账本，最后启动新实例核对 LIVE。不能拿较早的 LIVE 快照直接启动交易；服务器重启后默认只启 TEST，LIVE 须按部署指南重新人工解锁。
 

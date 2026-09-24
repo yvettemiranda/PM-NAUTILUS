@@ -4,6 +4,12 @@ PM-NAUTILUS 是基于 [NautilusTrader](https://github.com/nautechsystems/nautilu
 
 程序只管理自身产生的订单、仓位和赎回权利，不导入 PM-SMALL 的历史账本，也不接管手动仓位。TEST 与 LIVE 使用同一套策略规则，执行适配器和资金来源相互隔离。
 
+## 换电脑、换服务器后从零开始
+
+不保留旧 TEST 模拟记录、准备在新服务器首次使用本程序实盘时，先看 [从 GitHub 到首次实盘](docs/START_FRESH_LIVE.md)。该指南用普通语言说明你需要准备什么、哪些步骤可以交给 Codex，以及最终由谁启动真实交易。
+
+GitHub 保存程序、说明和你同意公开的 [策略设置文件](config/strategy-profile.json)；新服务器安装时须将这份文件中的规则应用到独立的 TEST、LIVE 账本并读回核对。该文件不会自动追踪旧服务器日后的改动，也不保存钱包秘密、密码或交易记录。只克隆仓库不会交易。若本程序后来已经产生真实订单或持仓，就不能再把旧 LIVE 记录当作可丢弃的模拟历史；应按 [部署与运维手册](docs/DEPLOY.md)迁移并对账。
+
 ## 主要功能
 
 - 通过 Gamma keyset 全分页发现开放 Event，同步官方市场类别并持续订阅公开订单簿。

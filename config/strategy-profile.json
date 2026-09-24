@@ -1,0 +1,36 @@
+{
+  "allCategories": true,
+  "candidateSortDirection": "ASC",
+  "marketTypes": [
+    "BINARY",
+    "TERNARY",
+    "MULTI"
+  ],
+  "maxBuyPriceCents": "3",
+  "maxMarketDurationDays": 365,
+  "maxMarketProgressPercent": 20,
+  "minBidAskRatioPercent": 50,
+  "minBuyPriceCents": "1",
+  "minMarketDurationDays": 30,
+  "orderAmount": "1",
+  "selectedCategoryIds": [
+    "2",
+    "1",
+    "21",
+    "64",
+    "78",
+    "120",
+    "100265",
+    "1401",
+    "596",
+    "100328",
+    "84",
+    "100343",
+    "144",
+    "1422"
+  ],
+  "stopLossEnabled": false,
+  "stopLossMultiplier": "0.4",
+  "targetSellPriceIncreaseCents": "1",
+  "targetSellPriceMultiplier": "1.5"
+}

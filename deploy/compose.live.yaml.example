@@ -1,6 +1,8 @@
-# Opt-in example only. Copy to repository root as compose.live.yaml ONLY after
-# explicit LIVE authorization, actual wallet preflight and manual unlock.
-# Always combine it after compose.yaml and the existing compose.override.yaml.
+# Opt-in example only. After manual unlock, copy to the repository root as
+# compose.live.yaml for configuration checks and the one-off private preflight.
+# Do not use it with `up` for the persistent app until preflight passes and the
+# user explicitly chooses to enter the LIVE context.
+# Combine it after compose.yaml and any local compose.override.yaml in use.
 services:
   app:
     environment:

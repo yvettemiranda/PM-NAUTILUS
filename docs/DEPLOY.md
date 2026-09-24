@@ -222,7 +222,7 @@ docker compose --env-file .env -f compose.yaml -f compose.override.yaml -f compo
 
 `compose.live.yaml` 只读挂载 `/run` 中的明文文件，缺失时直接失败，不会自动创建目录。基础 Compose 始终保持 `PM_LIVE_ENABLED=false`；只有显式加入 LIVE 覆盖文件才连接钱包。单机 Compose 的文件挂载并不提供加密存储或 UID 重映射，故这里由脚本在主机上设置属主和权限。[Docker Compose 文件 secret 说明](https://docs.docker.com/compose/how-tos/use-secrets/) · [文件挂载权限说明](https://docs.docker.com/reference/compose-file/services/)
 
-启动 LIVE 上下文仅连接和核对；状态仍 PAUSED。TEST 和 LIVE 设置存于两套账本，不会自动继承。首次启动后，在已认证的 UI 分别切到 TEST/LIVE 读取完整设置，或在同一已认证浏览器中只读打开 `/api/TEST/preferences` 和 `/api/LIVE/preferences`，对照各自 `preferences` 的类别、筛选、每 Event 每轮金额、目标与止损。随后在 LIVE 保存确认的参数，切回 TEST 和 LIVE 各复查一次。`orderAmount` 是现有的每 Event 每轮预算；不另加首轮总投入、单笔金额或最多笔数限制。用户切换 LIVE 视图并按 START 才允许真实新买。未完成核对、未知订单、资金/份额不一致均阻止新买。PAUSE 后目标退出、止损和赎回继续；不得通过关掉 LIVE 门来代替安全暂停现有仓位。
+启动 LIVE 上下文仅连接和核对；状态仍 PAUSED。TEST 和 LIVE 设置存于两套账本，不会自动继承。首次启动后，在已认证的 UI 分别切到 TEST/LIVE 读取完整设置，或在同一已认证浏览器中只读打开 `/api/TEST/preferences` 和 `/api/LIVE/preferences`，对照各自 `preferences` 的类别、筛选、每 Event 每轮金额、目标与止损。若按新手指南在首次启动前导入了公开规则文件，此处只需读回核对；否则须在 LIVE 保存确认的参数，再切回 TEST 和 LIVE 各复查一次。`orderAmount` 是现有的每 Event 每轮预算；不另加首轮总投入、单笔金额或最多笔数限制。用户切换 LIVE 视图并按 START 才允许真实新买。未完成核对、未知订单、资金/份额不一致均阻止新买。PAUSE 后目标退出、止损和赎回继续；不得通过关掉 LIVE 门来代替安全暂停现有仓位。
 
 ### 7.2 主机重启后默认回到 TEST
 

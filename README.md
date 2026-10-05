@@ -27,6 +27,8 @@ GitHub 保存程序、说明和你同意公开的 [策略设置文件](config/st
 
 仓库默认 `PM_LIVE_ENABLED=false`，不包含钱包、API、RPC、服务器密码或真实账本。LIVE 代码可供后续受控启用，但实际钱包类型、凭据、余额、授权和链上流程必须在目标环境单独核验。不要把自动化测试通过等同于真实资金验收。
 
+LIVE 发单若确定尚未进入交易所请求，会结束本地订单并释放资金和 Event 占用；一旦请求可能已发出但结果不明，会暂停新买、保留占用并等待账户核对。账户挂单核对使用查询完成后的最新本地订单记录；持续存在的程序外挂单仍阻止新买。健康接口也会报告交易运行时及 LIVE 维护任务故障。上述行为不改变策略金额和筛选规则。
+
 当前服务器、正式 TEST 和最新验证状态会变化，以 [HANDOFF.md](HANDOFF.md) 为准；README 只描述长期有效的程序使用方式。
 
 ## 开发环境
@@ -71,10 +73,11 @@ uv run --frozen pm-nautilus --offline --data-dir runtime/ui-preview
 ## 验证
 
 ```sh
-uv run --frozen ruff check src tests scripts
-uv run --frozen ruff format --check src tests scripts
+uv run --frozen ruff check src tests scripts deploy/live-secrets.py
+uv run --frozen ruff format --check src tests scripts deploy/live-secrets.py
 uv run --frozen pytest -q
 node --check src/pm_nautilus/web/app.js
+node --test tests/*.test.mjs
 ```
 
 `scripts/public_smoke.py` 使用独立临时账本进行真实公开行情短测。它会使用明确的开发采样配置，不替代正式全分页扫描或长期 TEST，也不会建立私有交易连接、读取钱包或进行链上操作。

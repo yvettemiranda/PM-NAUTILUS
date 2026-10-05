@@ -25,7 +25,7 @@ def test_unknown_open_order_pauses_new_buys_without_canceling_manual_order():
     assert client.open_orders_clear is False
     owner.pause.assert_called_once_with()
     assert values["live_error"] == "账户存在程序外开放挂单"
-    clob.get_open_orders.assert_called_once_with()
+    assert clob.get_open_orders.call_count == 2
 
 
 def test_buy_requires_exact_chain_holdings_for_both_outcomes():

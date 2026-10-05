@@ -141,6 +141,39 @@ def live_factory(settings, wallet):
     return create
 
 
+class _TrackedRetryManager:
+    """Mark the boundary where a submitted order may reach the venue."""
+
+    def __init__(self, inner, execution):
+        self.inner = inner
+        self.execution = execution
+
+    async def run(self, name, details, *args, **kwargs):
+        if name == "submit_order" and details:
+            # RetryManager may schedule post_order in a worker thread. From this
+            # point, cancellation cannot prove that no request reached the venue.
+            self.execution._post_possible.add(str(details[0]))
+        return await self.inner.run(name, details, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
+class _TrackedRetryPool:
+    def __init__(self, inner, execution):
+        self.inner = inner
+        self.execution = execution
+
+    async def acquire(self):
+        return _TrackedRetryManager(await self.inner.acquire(), self.execution)
+
+    async def release(self, manager):
+        return await self.inner.release(manager.inner)
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
 class LiveExecution(PolymarketExecutionClient):
     def __init__(self, owner, http, provider, auth, config, wallet=None):
         self.owner = owner
@@ -149,12 +182,15 @@ class LiveExecution(PolymarketExecutionClient):
         super().__init__(
             asyncio.get_running_loop(), http, n.bus, n.cache, n.clock, provider, auth, config, None
         )
+        self._retry_manager_pool = _TrackedRetryPool(self._retry_manager_pool, self)
         self.ready = False
         self.open_orders_clear = False
         self.reconciliation_task = None
         self._release_verified = False
         self._pending_native = set()
         self._pending_conversions = set()
+        self._submitting = {}
+        self._post_possible = set()
         self._boot_intents = set(owner.store.intents())
         self._sync_lock = asyncio.Lock()
         # Historical snapshot only supports native journal reconstruction. No LIVE
@@ -189,6 +225,11 @@ class LiveExecution(PolymarketExecutionClient):
             self._pending_native.add(key)
         r.freeze_fill_rules(event)
         r.store.journal(event)
+        if (
+            type(event).__name__ == "OrderSubmitted"
+            and str(event.client_order_id) in self._submitting
+        ):
+            self._submitting[str(event.client_order_id)] = True
         super()._send_order_event(event)
 
     def _handle_ws_order_msg(self, msg, wait_for_ack):
@@ -285,13 +326,52 @@ class LiveExecution(PolymarketExecutionClient):
                 raise ValueError("只有实际回款确认后才能关闭赎回仓位")
             TestExecution.submit_order(self, command)
             return
-        if not self.ready:
-            self.deny(o, "LIVE核对未完成")
-            return
-        if o.side == OrderSide.BUY and not self.buy_valid(o, i):
-            self.deny(o, "发单前资格/资金/暂停状态已变化")
-            return
-        await super()._submit_order(command)
+        oid = str(o.client_order_id)
+        self._submitting[oid] = False
+        try:
+            if not self.ready:
+                self.deny(o, "LIVE核对未完成")
+                return
+            if o.side == OrderSide.BUY and not self.buy_valid(o, i):
+                self.deny(o, "发单前资格/资金/暂停状态已变化")
+                return
+            await super()._submit_order(command)
+        except (Exception, asyncio.CancelledError) as exc:
+            self._finish_failed_submit(o, exc)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+        finally:
+            self._submitting.pop(oid, None)
+            self._post_possible.discard(oid)
+
+    def _finish_failed_submit(self, order, exc, *, submitted=None):
+        """Release only when the retry manager never reached the POST boundary."""
+        r = self.owner
+        oid = str(order.client_order_id)
+        intent = r.store.intent(oid)
+        self.ready = False
+        self.open_orders_clear = False
+        # A failed submit must stop new buys without issuing cancel requests for
+        # other in-flight orders whose venue outcome still needs reconciliation.
+        r.store.put("status", "PAUSED")
+        if intent and not intent.get("terminal") and oid not in self._post_possible:
+            reason = f"未向交易所提交：{type(exc).__name__}"
+            was_submitted = self._submitting.get(oid) if submitted is None else submitted
+            if was_submitted:
+                self.generate_order_rejected(
+                    order.strategy_id,
+                    order.instrument_id,
+                    order.client_order_id,
+                    reason,
+                    r.now,
+                )
+            else:
+                self.deny(order, reason)
+            r.store.put("live_error", f"订单 {oid} 提交前失败：{type(exc).__name__}")
+        elif intent and not intent.get("terminal"):
+            # An in-flight worker can complete after the awaiting task fails.
+            # Never release this reservation or resubmit the order automatically.
+            r.store.put("live_error", f"订单 {oid} 结果未确认：{type(exc).__name__}")
 
     def buy_valid(self, o, i):
         r = self.owner
@@ -393,7 +473,11 @@ class LiveExecution(PolymarketExecutionClient):
         i = r.store.intent(order.client_order_id)
         venue = kwargs.get("expected_venue_order_id")
         if venue is None:
-            self.deny(order, "无法持久化订单确定性身份")
+            # Submission was generated, but no venue identity means no POST is
+            # permitted. Reject the submitted order so its intent is released.
+            self._finish_failed_submit(
+                order, ValueError("无法持久化订单确定性身份"), submitted=True
+            )
             return
         i["venue_id"] = str(venue)
         i["submitted_ns"] = r.now
@@ -402,6 +486,28 @@ class LiveExecution(PolymarketExecutionClient):
         r.store.save_intent(order.client_order_id, i)
         self._cache.add_venue_order_id(order.client_order_id, venue)
         await super()._post_signed_order(order, signed_order, **kwargs)
+
+    def _is_unknown_submit_result(self, exc):
+        # The pinned retry manager also returns None after a cancelled POST,
+        # without recording an exception. The worker thread may still complete.
+        # A server error likewise cannot prove the venue refused the order.
+        status = getattr(exc, "status_code", None)
+        return (
+            exc is None
+            or super()._is_unknown_submit_result(exc)
+            or (isinstance(status, int) and status >= 500)
+        )
+
+    def _handle_unknown_submit_result(
+        self, order, expected_venue_order_id, reason, base_quantity=None
+    ):
+        super()._handle_unknown_submit_result(
+            order, expected_venue_order_id, reason, base_quantity=base_quantity
+        )
+        self.ready = False
+        self.open_orders_clear = False
+        self.owner.store.put("status", "PAUSED")
+        self.owner.store.put("live_error", f"订单 {order.client_order_id} 结果未确认")
 
     async def _update_account_state(self):
         confirmed_claims = {
@@ -430,7 +536,7 @@ class LiveExecution(PolymarketExecutionClient):
 
     async def _check_open_orders(self):
         audit = await audit_open_orders(
-            self._http_client, self.owner.store.intents(active_only=True)
+            self._http_client, lambda: self.owner.store.intents(active_only=True)
         )
         self.open_orders_clear = audit.ok
         if not audit.ok:

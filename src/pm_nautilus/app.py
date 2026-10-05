@@ -217,12 +217,28 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
 
     @app.get("/api/health")
     async def health():
-        failures = {
-            mode: service.scan_status.get("serviceError") or "market_task_stopped"
-            for mode, service in services.items()
-            if service.scan_status.get("serviceError")
-            or (service.loop_task is not None and service.loop_task.done() and not service.closed)
-        }
+        failures = {}
+        for mode, service in services.items():
+            runtime = runtimes[mode]
+            issues = []
+            if service.scan_status.get("serviceError"):
+                # MarketService stores only the exception class name here.
+                issues.append(service.scan_status["serviceError"])
+            if service.loop_task is not None and service.loop_task.done() and not service.closed:
+                issues.append("market_task_stopped")
+            # These can include private RPC details; expose stable codes only.
+            if runtime.faulted:
+                issues.append("runtime_faulted")
+            if runtime.business.get("recovery_error"):
+                issues.append("recovery_error")
+            if mode == "LIVE":
+                if runtime.store.get("live_error"):
+                    issues.append("live_account_error")
+                task = runtime.client.reconciliation_task
+                if task is None or task.done():
+                    issues.append("live_maintenance_task_stopped")
+            if issues:
+                failures[mode] = ",".join(issues)
         body = {
             "status": "degraded" if failures else "ok",
             "version": "0.1.0",

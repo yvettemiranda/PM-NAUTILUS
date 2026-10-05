@@ -58,6 +58,8 @@ class Store:
           order_id TEXT PRIMARY KEY,event_id TEXT NOT NULL,token_id TEXT NOT NULL,
           side TEXT NOT NULL,payload TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS intents_active ON intents(event_id,json_extract(payload,'$.terminal'));
+        CREATE INDEX IF NOT EXISTS intents_open ON intents(order_id)
+          WHERE json_extract(payload,'$.terminal')=0;
         CREATE INDEX IF NOT EXISTS native_fill_order ON native_events(kind,json_extract(CAST(payload AS TEXT),'$.client_order_id'));
         """)
         self.serializer = MsgSpecSerializer(encoding=msgspec.json)

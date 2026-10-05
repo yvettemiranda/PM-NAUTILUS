@@ -1,11 +1,13 @@
 # PM-NAUTILUS 接手记录
 
-## 最新进展：四项维护修复（2026-10-05）
+## 最新进展：四项维护修复与服务器部署（2026-10-05—06）
 
-- 针对 `19866ffa8cd73431ff377c9e3dd65080aa85b0f9` 审查确认的四项问题，已在本地修复 LIVE 提交前异常收尾、账户挂单核对竞态、交易组件故障的健康报告及全局活动订单索引。没有更改筛选、预算、每轮金额、止盈止损或收益目标。
+- 针对 `19866ffa8cd73431ff377c9e3dd65080aa85b0f9` 审查确认的四项问题，代码提交 `552b02d8aaf2719cb5230403c01cba8d41dad38e` 修复 LIVE 提交前异常收尾、账户挂单核对竞态、交易组件故障的健康报告及全局活动订单索引。没有更改筛选、预算、每轮金额、止盈止损或收益目标。
 - 发单安全边界进一步覆盖重试管理器在实际请求前获取失败：此时本地订单正常终结并释放 1U 占用及 Event 锁；进入可能发出请求的阶段后，即使等待任务取消，仍保留占用并暂停以供对账。未知挂单仅在再次完整查询后仍存在时判为外部挂单。
-- 本地 `pytest -q` 为 151 项通过，Ruff 检查/格式、JS 语法及 3 项 JS 测试均通过；全部为离线验证，没有真实签名、下单、批准、赎回或链上写入。
-- **交付尚未完成。**浏览器自动审批拒绝将本地源码文件上传到公开 GitHub 仓库；本次未绕过拒绝，也未推送 GitHub 或部署服务器。服务器最近一次只读检查仍为旧代码的 TEST/RUNNING、LIVE=false；不能把本地修复当作线上已生效。待 GitHub 发布获允许后，再按 `docs/DEPLOY.md` 停机备份、部署固定 SHA、核对账本及恢复 TEST。此条状态只反映截至本段记录时的事实。
+- 本地 `pytest -q` 为 151 项通过，Ruff 检查/格式、JS 语法及 3 项 JS 测试均通过。[GitHub Actions run 37335756478](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/37335756478) 的 Ubuntu x86_64/ARM64 作业及 Docker verify 均通过；代码提交已在公开仓库 `main`。浏览器上传曾被自动审批拒绝，随后用户通过 Git 推送完成发布。
+- 腾讯云服务器先将原 TEST 暂停、停止应用，再对 `runtime/server`、`.env` 和本地 Compose 配置制作 age 加密备份 `backups/pre-four-fixes-20261005-155930.tgz.age`（100,200,056 字节，权限 0600，SHA-256 `da38ba6e2474a6dda66b23e1607a8b1ee57857f41c3f730c3f23b4d12d76df04`）。新镜像为 `pm-nautilus:552b02d8aaf2719cb5230403c01cba8d41dad38e`，镜像 ID `sha256:6f3cce552bacba4b72ef7429ee783debb87bbca98fc9b3a27faa3a3fa20b1035`；没有启用 LIVE 覆盖配置。
+- 升级前后 TEST 原生事件同为 2,355 条，原始序列/身份/种类/payload 哈希同为 `e412d09bd6f3a6497759e66d7e0a93ec734f87ff31bb46d48af2016835b4fa07`；订单记录数同为 486，账本代次 `7109e2cb-6957-41f3-8159-1632c68973eb` 和规则设置哈希 `7514e8c46550f7763217daf2522e106a28a8afd9e482ee7747d0b5708998b651` 均保持一致。TEST/LIVE 的 SQLite `quick_check` 均为 `ok`，新 `intents_open` 索引已创建；LIVE 仍为 0 条事件、0 条订单，设置不变。
+- 服务器 `/api/TEST/validation` 返回 `ok=true`、`errors=[]`。2026-10-06 约 00:03 CST 恢复已授权的 TEST：`/api/health` 为 HTTP 200、`status=ok`、TEST/RUNNING、LIVE=false、`backgroundErrors={}`；容器 healthy、零重启、未 OOM。最近一轮扫描于 2026-10-05T16:03:00Z 完成，扫描 21,712 个 Event，6/6 行情组及 1,161/1,161 个盘口 READY，当前扫描/行情/服务错误为空。以上是部署后的现场采样，不代表持续无人值守或真实交易验收；未进行真实签名、下单、批准、赎回或链上写入。本段取代下文较早日期记录中的旧服务器镜像状态。
 
 ## 当前有效范围与状态
 完整执行根目录 PM-SMALL_Nautilus_Codex_Instructions.md。独立新应用、新账本，只管理本程序交易；保留原UI及交易规则；实现TEST、LIVE接入、自动赎回。安全默认仍为TEST + PAUSED，LIVE未启用。未导入旧账本或钱包，未做真实签名/下单/approve/redeem/链上写入。正式长期TEST已于2026-09-08启动；其连续区间与中断须以下文实测记录为准。

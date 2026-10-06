@@ -58,7 +58,7 @@ mkdir -p runtime/server
 sudo chown 10001:10001 runtime/server
 ```
 
-在 `.env` 写入 `PM_GIT_REVISION` 的完整 SHA、随机 UI 密码（至少16字符）、允许的域名。账号固定 `pm`。密码可用 `openssl rand -hex 24` 本地生成；只保存于该文件。不要把真实密码放进聊天、命令参数、Git 或一般文档。当前服务器已有本地 `compose.override.yaml`，它是 HTTPS 控制请求正常工作的组成部分；下面的 Compose 命令均显式包含它。新服务器须先根据自己的反代配置创建并验证覆盖文件；若没有反代，则只使用基础 `compose.yaml`，并相应修改开机单元，不能照搬旧服务器的代理信任设置。**若要从 GitHub 的公开规则文件恢复首次实盘，不要先运行下面的 `up -d`；须按 [新手指南](START_FRESH_LIVE.md)在首次启动前离线初始化并导入两个空白账本。**
+在 `.env` 写入 `PM_GIT_REVISION` 的完整 SHA、随机 UI 密码（至少16字符）、允许的域名。账号固定 `pm`。密码可用 `openssl rand -hex 24` 本地生成；只保存于该文件。不要把真实密码放进聊天、命令参数、Git 或一般文档。当前服务器已有本地 `compose.override.yaml`，它是 HTTPS 控制请求正常工作的组成部分；下面的 Compose 命令均显式包含它。新服务器须先根据自己的反代配置创建并验证覆盖文件；若没有反代，则只使用基础 `compose.yaml`，并相应修改开机单元。基础配置的 `PM_TRUST_HTTPS_PROXY` 默认为 `false`；**只有**应用端口限于回环地址、Nginx 覆写 `X-Forwarded-Proto`、HTTPS 已验证后，才在 `.env` 设为 `true`。**若要从 GitHub 的公开规则文件恢复首次实盘，不要先运行下面的 `up -d`；须在首次启动前离线初始化并导入两个空白账本。**
 
 ```sh
 docker compose --env-file .env -f compose.yaml -f compose.override.yaml config --quiet
@@ -66,6 +66,14 @@ docker compose --env-file .env -f compose.yaml -f compose.override.yaml build
 docker compose --env-file .env -f compose.yaml -f compose.override.yaml up -d
 docker compose --env-file .env -f compose.yaml -f compose.override.yaml ps
 curl -fsS http://127.0.0.1:8765/api/health
+```
+
+**首次安装且要采用 GitHub 公开规则时**，在 `build` 与第一次 `up -d` 之间运行以下三条命令。它们只接受全新、未使用的 TEST/LIVE 账本；脚本已随镜像包含，并将两套规则同时写入后保持 PAUSED。若任何数据库已经存在，先查清来源，不能为了让命令通过而删除真实账本。没有 `compose.override.yaml` 的新机器只删除以下命令中的对应 `-f` 片段。
+
+```sh
+test ! -e runtime/server/TEST/state.sqlite && test ! -e runtime/server/LIVE/state.sqlite
+docker compose --env-file .env -f compose.yaml -f compose.override.yaml run --rm --no-deps --entrypoint /app/.venv/bin/python app -c 'from pathlib import Path; from pm_nautilus.store import Store; root=Path("/data"); [Store(root/m/"state.sqlite",m).close() for m in ("TEST","LIVE")]'
+docker compose --env-file .env -f compose.yaml -f compose.override.yaml run --rm --no-deps --entrypoint /app/.venv/bin/python app /app/scripts/apply_preferences.py --data-dir /data --profile /app/config/strategy-profile.json
 ```
 
 健康结果需包含 TEST、PAUSED、`liveExecutionEnabled=false` 和对应代码 SHA。默认仅绑定服务器回环地址。最小访问方式：在自己的 Mac 上运行 `ssh -L 8765:127.0.0.1:8765 <用户>@<服务器>`，然后访问本机端口并以 `pm` 登录。
@@ -82,7 +90,7 @@ curl -fsS http://127.0.0.1:8765/api/health
 2. `docker compose --env-file .env -f compose.yaml -f compose.override.yaml ps` 健康；网页设置、五项资金摘要、TEST/LIVE 切换、记录可读取。
 3. 启动后 PAUSED；浏览器切至 LIVE 不能启动未启用的实盘，不能填写虚拟实盘资金。
 4. 查看数据卷存在 `TEST/state.sqlite`、`LIVE/state.sqlite`，模式互不共用。
-5. 在 PAUSED 状态记下配置与资金，用 `docker compose --env-file .env -f compose.yaml -f compose.override.yaml restart` 重启；若已启用 LIVE，再加入 `-f compose.live.yaml`，确认同库配置/资金一致、仍为 PAUSED。
+5. 在 PAUSED 状态记下配置与资金，用 `docker compose --env-file .env -f compose.yaml -f compose.override.yaml restart` 重启，确认同库配置/资金一致、仍为 PAUSED；网页钱包版本的 LIVE 会锁定，须在网页解锁重查。只有旧式 LIVE 覆盖部署才需额外加入 `-f compose.live.yaml`。
 6. 已有仓位时需验证目标、止损、应收与交易记录都恢复，先在开发 TEST 目录验证，不借此擅自启动正式长期活动。
 
 控制 API 需要登录和 `x-pm-csrf`，令牌来自已认证 GET 响应头，浏览器自动处理。不要把未认证 POST 能否成功当作健康检查。正式长期 TEST 应在整体验收后由用户点击 START；PAUSE 只停止新买，保留已有仓位退出和回款。
@@ -101,7 +109,7 @@ restrict,command="/usr/local/sbin/pm-nautilus-monitor"
 
 本节适用于保留旧账本、升级或回滚。若明确放弃旧 TEST 模拟历史，且本程序从未有真实 LIVE 交易，新服务器可建立空白账本；旧 TEST 密文快照不构成首次启用 LIVE 的必备条件。**空白账本不会自动恢复旧服务器上调过的策略设置**，须核对并应用仓库的 `config/strategy-profile.json`，在 LIVE START 前分别读回 TEST 和 LIVE 的设置。该公开文件不会随旧服务器后续改动自动更新。曾经使用过的钱包仍可能有本程序外的真实挂单/持仓：私有预检查原有挂单，原有持仓须另行只读核对。
 
-停机备份可确保两个模式与 SQLite WAL 一致；LIVE 已启用时先 PAUSE 并确认所有在途买单终态，持仓退出中应选择维护时机。备份前先按**当前实际模式**选择文件组合：TEST 使用基础两份，LIVE 额外加入 `compose.live.yaml`。维护期间保持同一组合；`start` 只重启原容器，不会应用新配置或切换模式。
+停机备份可确保两个模式与 SQLite WAL 一致；LIVE 已启用时先 PAUSE 并确认所有在途买单终态，持仓退出中应选择维护时机。**网页钱包版本始终使用基础 Compose 与现有 HTTPS 覆盖文件**；只有仍在使用旧式 `compose.live.yaml` 的历史部署才需在备份与恢复时加入第三份文件。维护期间保持同一组合；`start` 只重启原容器，不会应用新配置或切换模式。
 
 ```bash
 cd /opt/pm-nautilus
@@ -125,11 +133,11 @@ cd /opt/pm-nautilus
 )
 ```
 
-备份会让 age 再次询问口令，以解密到管道并用 `tar -t` 验证压缩包；全部成功才将临时密文原子链接到最终文件并重启。若任一步失败，命令立即中止，不能继续升级或恢复旧快照；原服务保持停止，排查后用维护前相同的 Compose 文件组合显式恢复。若维护前运行 LIVE，恢复前检查 `/run/pm-nautilus/live.json` 仍存在，否则先人工解锁；`compose_args` 必须在 `stop` 前加入第三份文件，并沿用到 `start`。若想从 LIVE 切为 TEST，须按 7.3 停止并以基础两份文件执行 `up -d --force-recreate`，不能用 `start` 切换模式。
+备份会让 age 再次询问口令，以解密到管道并用 `tar -t` 验证压缩包；全部成功才将临时密文原子链接到最终文件并重启。若任一步失败，命令立即中止，不能继续升级或恢复旧快照；原服务保持停止，排查后用维护前相同的 Compose 文件组合显式恢复。网页钱包版本的加密文件位于 `runtime/server/wallet/live.vault`，已随 `runtime/server` 一起备份；恢复后仍须在网页解锁并核对。只有旧式 LIVE 覆盖部署才需检查 `/run/pm-nautilus/live.json` 并继续使用第三份 Compose 文件。
 
 也可用 `age -r <接收公钥>` 加密备份，并把对应的 age identity 私钥单独保存在可信电脑上；服务器只需要公钥。先在持有 identity 的可信终端用 `age -d -i <identity路径> -o - <快照> | tar -tzf -` 验证密文与归档，再把解密后的内容通过受认证的传输方式恢复到已停止的目标服务器。identity、密文和服务器不能只保留在同一处；换电脑前须安全转存 identity。2026-09-23 的停机快照采用此方式，具体路径与状态记在根目录 `HANDOFF.md`，不上传 GitHub。
 
-如已有 LIVE 加密凭据，再单独备份 `/etc/pm-nautilus/live.json.age` 到受限的离线位置；加密密文、age 口令和账本备份不要放在同一个可直接访问的位置。不要复制 `/run/pm-nautilus/live.json` 明文。账本快照若用 age 口令模式，须保存对应口令；若用 recipient 公钥模式，须保存对应 identity 私钥。备份及解锁文件不能上传 Git。备份时不要把运行中的单个 `.sqlite` 拷贝而遗漏 WAL。LIVE 账本可能含待广播的已签名交易原文，仍按敏感数据处理。
+网页钱包版本的 `runtime/server/wallet/live.vault` 应与 LIVE 账本保持同一份备份；若是旧式手工加密凭据部署，另须备份 `/etc/pm-nautilus/live.json.age`，且不得复制 `/run/pm-nautilus/live.json` 明文。账本快照若用 age 口令模式，须保存对应口令；若用 recipient 公钥模式，须保存对应 identity 私钥。备份及解锁文件不能上传 Git。备份时不要把运行中的单个 `.sqlite` 拷贝而遗漏 WAL。LIVE 账本可能含待广播的已签名交易原文，仍按敏感数据处理。
 
 新服务器恢复时，先确保旧实例已停止；克隆并固定目标代码提交，然后在**停止应用**的目录中把最新加密快照通过管道解密并解包，不写出明文压缩包：
 
@@ -144,7 +152,7 @@ if test -f compose.live.yaml; then chmod 600 compose.live.yaml; fi
 sudo chown -R 10001:10001 runtime/server
 ```
 
-恢复后先做 SQLite 与应用账本只读校验，核对所有真实在途订单和链上状态，再从单独备份安装加密凭据并人工解锁。确认旧服务器不会再次运行同一钱包后才能启动新服务器 LIVE。不能把旧 LIVE 快照直接当作最新交易事实。
+恢复后先做 SQLite 与应用账本只读校验，核对所有真实在途订单和链上状态；网页钱包版本的加密钱包随数据目录一同恢复，用户再在网页人工解锁。确认旧服务器不会再次运行同一钱包后才能启用新服务器 LIVE。不能把旧 LIVE 快照直接当作最新交易事实。
 
 升级：记录当前 SHA和镜像标签 → PAUSE → 停服务并备份 → 拉取已验证提交 → 更新 `.env` SHA → build/up → 检查健康与同库资金。回滚：停新版本 → checkout 上一个 SHA → `.env` 改回对应镜像标签 → 用该版本启动。数据库格式变更必须先验证兼容；不能拿 TEST reset 解决升级问题。真实钱包发生交易后，严禁恢复旧 LIVE 账本直接启动：必须把旧快照与最新真实回报核对，避免遗失已发生的权利或重复赎回。
 
@@ -158,102 +166,36 @@ sudo chown -R 10001:10001 runtime/server
 - 长时间无成交先看公开扫描、盘口与筛选条件，不能用强制下单验证网络。无买盘估值0，未知盘口估值显示未知。
 - 小于交易所最小卖出量的残余仓位不能伪造卖出；保留并等待可合法退出或正式结算。
 
-## 7. 后续 LIVE 配置与启用
+## 7. 网页 LIVE 钱包与实盘启用
 
-仓库默认不读取真实钱包、不签署真实订单，也不进行 approve、redeem 或其他链上写。只有完成 TEST 验收、确认实际钱包类型与独立资金账户，并获得明确 LIVE 启用授权后，才进入本节流程。
+新版本的日常操作入口是同一个 HTTPS 网页。默认 Compose 仍写着 `PM_LIVE_ENABLED=false`；这表示应用开机后不自动连接真实钱包。用户切到 LIVE 页面只是查看，不会下单。**无需运行 `compose.live.yaml`、`deploy/live-secrets.py` 或进入服务器解锁。**这些旧文件仅供尚未迁移的旧式部署参考，不能与网页钱包方式同时启用。
 
-实现支持 Polygon 主网 EOA（signature_type=0，signer=funder）和单签 Safe（signature_type=2，signer 是 owner、threshold=1）。Magic/PolyProxy、Deposit Wallet、多签 Safe 不能冒充这两种路径；若实际账户属于其他类型，须按其官方路径补齐并验证后再启用。仓库不记录实际钱包类型或凭据，当前外部准备状态以 HANDOFF.md 为准。
+安装者先按前文部署基础 Compose、Nginx HTTPS、至少 16 字符的 UI 登录密码，并保留服务器本地 `compose.override.yaml`。Nginx 必须覆写 `X-Forwarded-Proto`，应用容器端口仅绑定宿主机回环；仅此可信路径在服务器 `.env` 设置 `PM_TRUST_HTTPS_PROXY=true`。公网钱包操作在后端也强制要求 HTTPS。加密备份恢复可能超过 Nginx 默认的 1 MiB 上传限制，反代应按 `deploy/nginx.conf.example` **只对** `/api/live/wallet/restore` 放宽至 180 MiB 并允许较长上传时间。初次服务器安装、证书和 Docker 仍需管理员完成一次；此后用户在网页完成日常钱包操作。
 
-LIVE 凭据不经过网页、聊天、Git、命令参数或 `.env`。推荐在可信的本地电脑运行 `deploy/live-secrets.py create`：它逐项隐藏输入，在内存中组装下列 JSON，调用 [age 的口令模式](https://github.com/FiloSottile/age/blob/main/doc/age.1.html)加密后才写文件，只把密文传到服务器。age 口令由 age 直接从终端读取，应单独保存在自己的密码管理器中。仓库只保存脚本，不保存加密文件或口令。字段结构为：
+程序目前只支持 Polygon 主网普通钱包（签名地址和资金地址相同）或单签 Safe（签名地址是唯一 owner，阈值 1）。网页会根据私钥或 **12 词 BIP39 助记词**派生签名地址，要求填 Polymarket 显示的公开资金地址，并只读核对两者的归属。它会调用固定版本 SDK 创建或派生 CLOB API 凭据；这一步有账户认证签名，但不签订单或链上交易。其他钱包类型会被拒绝，不能通过修改地址或签名类型强行接入。
 
-```json
-{
-  "private_key": "创建时交互式输入",
-  "api_key": "创建时交互式输入",
-  "api_secret": "创建时交互式输入",
-  "passphrase": "创建时交互式输入",
-  "funder": "实际资金账户地址",
-  "signature_type": 2,
-  "rpc_url": "实际Polygon RPC",
-  "auto_approve_redemption": false
-}
-```
+### 7.1 用户在网页上的顺序
 
-CLOB V2 客户端、当前 pUSD、标准/neg-risk 抵押适配器地址固定在所选实现。EOA 需备 POL 支付手续费；Safe 由受支持 owner 支付外层交易手续费。启动前只读核对链ID、合约代码、资金账户与 Safe 权限。CLOB 下单授权需要账户预先完成；赎回授权未满足时保留应收并显示原因。创建脚本固定 `auto_approve_redemption=false`；如以后需要自动授权，须另行审查并修改加密配置。服务器进程运行期间仍可在内存和 `/run` 读取私钥，root/Docker 管理员也能读取；加密存储主要保护关机后的磁盘和备份。
+1. 登录 HTTPS 网页，切到 **LIVE**。先查看并保存 LIVE 规则；TEST 规则独立，切换视图不改变运行模式。仍使用现有策略的每 Event 每轮金额、筛选和止损规则，不加新的投入或笔数限制。
+2. 选择 12 个助记词或私钥，填写公开的 Polymarket 资金地址，设置至少 12 字符的解锁密码。助记词/私钥经 HTTPS 到达服务器；助记词不写盘。派生的签名密钥和 API 凭据存入 `/data/wallet/live.vault`，文件 `0600`、目录 `0700`，服务器只保存加密文件。**服务器解锁后内存中持有签名密钥**，这是一台服务器独立运行所必需的。秘密不要发到聊天、GitHub、URL 或截图。
+3. 网页进行只读检查：钱包类型及所有权、Polygon 网络、CLOB 余额和授权、手续费余额、现有挂单、钱包旧持仓与 LIVE 账本归属，以及从**服务器交易出口**查询 Polymarket 地区接口。未通过时停在检查页面，不启用 LIVE。已有手动持仓/挂单不会自动算作程序仓位。余额或授权缺失须按钱包/Polymarket 的正常操作补齐，再在网页重查；程序不会悄悄批准或转入资金。
+4. 检查全通过后，核对页面的签名和资金地址、确认当前 LIVE 规则，点击“启用实盘”。程序先接通并核对账户，状态仍为 **LIVE / PAUSED**。随后只有用户点击右上角 **▶** 才会开始新买。PAUSE 停止新买，但已有仓位的卖出、止损和赎回仍可能继续。
 
-### 7.1 创建、解锁并接入本地签名
+主机或应用重启后，默认只运行 TEST；LIVE 页显示 **LOCKED**。用户在网页输入解锁密码、重新检查并启用，再自行决定是否点 ▶。锁定期间程序不维护已有 LIVE 仓位，网页不得把不可见持仓显示成已清仓。解锁密码丢失时不能靠 GitHub 找回钱包；请保管原钱包恢复方式和网页加密备份。
 
-先在可信本地电脑安装 age 和 Python 3.9+，核对脚本来自目标提交，再创建私有目录并交互式输入凭据。创建操作只用于新凭据；若加密文件已存在，脚本会拒绝覆盖。不要在聊天、shell 命令或文本文件中粘贴私钥。
+美国来源的 API 新开仓受 [Polymarket 官方地区规则](https://docs.polymarket.com/api-reference/geoblock)限制。当前硅谷服务器应在地区核对中阻止启用；换服务器后必须从新服务器自身网络出口重新检查，不能沿用旧服务器或自己电脑的结果。
 
-```sh
-age --version
-mkdir -m 700 ~/pm-nautilus-private
-python3 deploy/live-secrets.py create --vault ~/pm-nautilus-private/live.json.age
-scp ~/pm-nautilus-private/live.json.age <管理员>@<服务器>:~/live.json.age
-```
+### 7.2 网页加密备份与换服务器
 
-如果没有现成的 CLOB L2 凭据，先按 `REINSTALL.md` 安装本项目锁定依赖，再将创建命令改为 `.venv/bin/python deploy/live-secrets.py create --derive-api-credentials --vault ~/pm-nautilus-private/live.json.age`。这会在本机通过官方 SDK 创建或派生 API 凭据，仍由你在本机终端输入私钥与 age 口令；不会把私钥放进命令参数或 Git。
+LIVE 页面“换服务器时备份或恢复”可下载单个 `.pmnb` 加密包，包含**同一时点**的加密钱包和 LIVE SQLite 账本。下载时再次输入解锁密码；备份包用该密码单独加密。把文件与密码分开保管，不上传 GitHub。它不包含 TEST 模拟历史、服务器登录密码、证书或 Nginx 设置；公开策略文件也不会自动记录网页后续调整。较大的 LIVE 账本若超过网页备份上限，应由管理员按第 5 节做一致性停机备份。
 
-服务器安装 age 后，把收到的密文安装为 root 所有的 `0600` 文件。也可以直接在服务器运行 `sudo python3 deploy/live-secrets.py create`，但本地创建只传输密文，更符合私钥不离开本地电脑的要求。
+迁移时先在旧服务器暂停新买、确认在途订单，下载最新备份，随后停止旧服务器的应用；不要让新旧服务器同时管理同一个钱包。管理员在新服务器安装相同或兼容的已验证版本，配置 HTTPS/登录并保持空白 LIVE 账本。用户进入新网页 LIVE 页，上传 `.pmnb`、输入解锁密码恢复；恢复后状态 **LOCKED**，还需解锁、从新服务器出口核对账户，并手动启用/START。若备份以后旧服务器又有订单、卖出或赎回，新服务器的实际份额核对会阻止直接启用；先处理账本差异，不能覆盖最新真实记录。**GitHub 本身没有真实账本或钱包。**
 
-```sh
-sudo apt-get install age
-sudo install -d -o root -g root -m 0700 /etc/pm-nautilus
-sudo install -o root -g root -m 0600 ~/live.json.age /etc/pm-nautilus/live.json.age
-rm ~/live.json.age
-sudo stat -c '%U %a %n' /etc/pm-nautilus/live.json.age
-```
+网页恢复只接受空白 LIVE 账本，拒绝覆盖已有钱包或交易历史。服务器升级和回滚继续遵守第 5 节的停机备份；不能用旧备份抹掉未知结果的真实订单。`deploy/live-secrets.py`、`compose.live.yaml.example` 属于旧式手工接入路径，已配置该路径的部署需先由管理员审查迁移，不得把旧 `/run` 明文和新网页钱包同时提供给一个应用。
 
-在每次主机重启后人工解锁。脚本先确认 `/run` 是 tmpfs，校验加密文件属主与权限，再通过 age 交互式询问口令、校验 JSON，并原子创建 `/run/pm-nautilus/live.json`（UID 10001、`0600`）。失败时不会留下新的明文文件。不要通过 shell 重定向、环境变量或命令参数传递私钥/口令。
+### 7.3 开机与版本更新
 
-```sh
-sudo python3 deploy/live-secrets.py unlock
-sudo stat -c '%u %a %n' /run/pm-nautilus/live.json
-cp deploy/compose.live.yaml.example compose.live.yaml
-docker compose --env-file .env -f compose.yaml -f compose.override.yaml -f compose.live.yaml config --quiet
-docker compose --env-file .env -f compose.yaml -f compose.override.yaml -f compose.live.yaml run --rm --no-deps --entrypoint /app/.venv/bin/python app -m pm_nautilus.private_preflight --expected-signer 0x你的公开签名地址 --expected-funder 0x你的Safe资金地址 --data-dir /data
-```
-
-这条私有预检在一次性容器中只读检查凭据对应地址、链上余额与授权、CLOB 账户和已有挂单、本程序 LIVE 账本；不下单、不取消旧挂单。运行前须确认应用镜像已从包含 `private_preflight` 的目标提交构建。退出码 `0` 表示可进入新买验证，`2` 表示认证成功但资金、授权或未知挂单仍阻止新买，`1` 表示检查失败。旧手动挂单需本人处理，程序不会自动取消；**钱包原有持仓须单独核对**。真实凭据导入前不能运行此命令。
-
-首次启用前，还须从目标服务器与将来交易相同的网络出口查询 [Polymarket 官方地区接口](https://docs.polymarket.com/api-reference/geoblock) `GET https://polymarket.com/api/geoblock`，确认 `blocked=false` 且当前所在地允许 API 新开仓。地区检查不是私有预检的一部分；若受限，停在检查阶段。只有预检返回 `0`、地区与钱包原有持仓已核对，且完成下文 7.2 的开机 TEST 单元，再启动服务并核对 LIVE：
-
-```sh
-docker compose --env-file .env -f compose.yaml -f compose.override.yaml -f compose.live.yaml up -d --force-recreate
-```
-
-`compose.live.yaml` 只读挂载 `/run` 中的明文文件，缺失时直接失败，不会自动创建目录。基础 Compose 始终保持 `PM_LIVE_ENABLED=false`；只有显式加入 LIVE 覆盖文件才连接钱包。单机 Compose 的文件挂载并不提供加密存储或 UID 重映射，故这里由脚本在主机上设置属主和权限。[Docker Compose 文件 secret 说明](https://docs.docker.com/compose/how-tos/use-secrets/) · [文件挂载权限说明](https://docs.docker.com/reference/compose-file/services/)
-
-启动 LIVE 上下文仅连接和核对；状态仍 PAUSED。TEST 和 LIVE 设置存于两套账本，不会自动继承。首次启动后，在已认证的 UI 分别切到 TEST/LIVE 读取完整设置，或在同一已认证浏览器中只读打开 `/api/TEST/preferences` 和 `/api/LIVE/preferences`，对照各自 `preferences` 的类别、筛选、每 Event 每轮金额、目标与止损。若按新手指南在首次启动前导入了公开规则文件，此处只需读回核对；否则须在 LIVE 保存确认的参数，再切回 TEST 和 LIVE 各复查一次。`orderAmount` 是现有的每 Event 每轮预算；不另加首轮总投入、单笔金额或最多笔数限制。用户切换 LIVE 视图并按 START 才允许真实新买。未完成核对、未知订单、资金/份额不一致均阻止新买。PAUSE 后目标退出、止损和赎回继续；不得通过关掉 LIVE 门来代替安全暂停现有仓位。
-
-### 7.2 主机重启后默认回到 TEST
-
-在首次启用 LIVE 前，将 `deploy/pm-nautilus-test-boot.service.example` 的 `WorkingDirectory` 与 Docker 路径改为实际服务器值。若新服务器没有 `compose.override.yaml`，还须把单元中的 `-f compose.override.yaml` 删去，保留基础 `compose.yaml`；本单元必须与该服务器实际 TEST Compose 文件组合一致。核对后安装：
-
-```sh
-sudo install -m 0644 deploy/pm-nautilus-test-boot.service.example /etc/systemd/system/pm-nautilus-test-boot.service
-sudo systemctl daemon-reload
-sudo systemctl enable pm-nautilus-test-boot.service
-```
-
-开机时 `/run` 明文已消失，旧 LIVE 容器因挂载源缺失不能运行；该单元用 `compose.yaml + compose.override.yaml` 重建 TEST。**不要在已有 LIVE 仓位时把 TEST 运行误认为仓位仍被管理**：主机重启后须人工解锁，并再次使用三份 Compose 文件重建 LIVE，核对账户、订单和账本；重启后策略仍为 PAUSED。
-
-### 7.3 手动结束 LIVE 并重新锁定
-
-先核对所有在途订单和仓位退出安排，再停 LIVE、用基础两份 Compose 文件重建 TEST；确认旧 LIVE 容器已结束且健康接口 `liveExecutionEnabled=false`，最后才删除 `/run` 明文文件：
-
-```sh
-docker compose --env-file .env -f compose.yaml -f compose.override.yaml -f compose.live.yaml stop app
-docker compose --env-file .env -f compose.yaml -f compose.override.yaml up -d --force-recreate
-docker compose --env-file .env -f compose.yaml -f compose.override.yaml ps
-curl -fsS http://127.0.0.1:8765/api/health
-sudo rm -- /run/pm-nautilus/live.json
-sudo test ! -e /run/pm-nautilus/live.json
-```
-
-删除宿主机路径本身不会使**仍在运行**的 LIVE 容器、其 bind mount 或进程内存失去私钥，因此不能把单独执行 `rm` 当成锁定。重新启用 LIVE 须再次人工解锁并完成私有预检。TEST 运行时不会管理既有 LIVE 仓位。
-
-自动赎回分为 IDENTIFIED → SUBMITTED → CONFIRMED → CREDITED；TEST先模拟确认，再模拟入账。LIVE提交前保存交易哈希、nonce与同一签名原文；重启仅查询或重发同一交易，不创建新身份。链上收据需成功且至少32块确认，核对pUSD回款与自有权利后刷新实际账户余额。应收不占可下单现金。同 Condition 若存在额外手动资产，整Condition赎回会影响它们，因此自动赎回拒绝该混合权利，等待人工核对，不接管手动资产。
+`deploy/pm-nautilus-test-boot.service.example` 仍可作为开机 TEST 单元；它重建基础 Compose，应用不会自动启用 LIVE。升级时先记录版本与资金、暂停 TEST/LIVE 所需动作、停服务并按第 5 节备份，再拉取固定 SHA、构建和启动基础 Compose。确认 TEST 账本、网页、健康和 LIVE 锁定状态后，由用户在网页解锁与重新核对；升级本身不能自动按 ▶。
 
 ## 8. 故障排查
 
@@ -272,4 +214,4 @@ sudo test ! -e /run/pm-nautilus/live.json
 
 清理本次 Linux 验证虚拟机：工作区 `.reference/lima/bin/limactl`，实例 `pm-verify`，`LIMA_HOME` 为工作区 `.reference/lima-home`。验证结束停机；保留文件便于复验，不作为生产服务使用。
 
-未来已明确授权 LIVE 后，所有 `config`、`build`、`up`、`ps`、`stop` 命令都须显式包含现有的 `compose.override.yaml`；LIVE 时再加入第三份 `compose.live.yaml`。不要在服务器上用省略 override 的命令覆盖当前 HTTPS 反代信任设置。
+现有服务器的所有 `config`、`build`、`up`、`ps`、`stop` 命令都须显式包含本地 `compose.override.yaml`。网页 LIVE 钱包沿用基础 Compose，不加入 `compose.live.yaml`；只有尚未迁移的旧式部署才用第三份文件。不要在服务器上用省略 override 的命令覆盖当前 HTTPS 反代信任设置。

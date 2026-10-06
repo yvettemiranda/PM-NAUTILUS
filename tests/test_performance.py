@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
 from pm_nautilus.app import create_app
-from pm_nautilus.performance import PerformanceSampler
+from pm_nautilus.performance import DAY_MS, HOUR_MS, PerformanceSampler
 from pm_nautilus.strategy import Runtime
 from test_runtime import setup
 
@@ -27,10 +27,46 @@ def test_observed_pnl_unknown_books_no_bid_and_restart(tmp_path):
     r = Runtime(tmp_path / "test.sqlite", clock=clock)
     sampler = PerformanceSampler(r)
     assert sampler.session != session
-    assert len(sampler.view()["points"]) == 3
+    assert len(sampler.view()["points"]) == 1
     sampler.sample(181000)
     assert sampler.view()["points"][-1]["pnl"] is None
     assert r.validate()["ok"]
+    r.close()
+
+
+def test_hourly_daily_history_and_discontinuities(tmp_path):
+    r, _, _ = setup(tmp_path)
+    sampler = PerformanceSampler(r)
+    generation = r.store.generation
+    rows = [(generation, "first", minute * 60_000, 1_000_000, 101_000_000) for minute in range(61)]
+    rows.extend(
+        [
+            (generation, "first", HOUR_MS + 60_000, None, None),
+            (generation, "first", HOUR_MS + 120_000, 2_000_000, 102_000_000),
+            (generation, "first", 2 * DAY_MS, 3_000_000, 103_000_000),
+            (generation, "second", 35 * DAY_MS, 4_000_000, 104_000_000),
+            ("another-generation", "other", 36 * DAY_MS, 999_000_000, 999_000_000),
+        ]
+    )
+    r.store.db.executemany(
+        "INSERT INTO equity_samples(generation,session,at_ms,pnl,total) VALUES(?,?,?,?,?)", rows
+    )
+    view = sampler.view()
+    hourly, daily = view["series"]["H"], view["series"]["D"]
+    assert view["points"] == hourly
+    assert [p["bucket"] for p in hourly] == [0, 1, 48, 840]
+    assert [p["pnl"] for p in daily] == ["2", "3", "4"]
+    assert hourly[1]["breakBefore"] is True
+    assert daily[0]["breakBefore"] is True
+    assert daily[1]["breakBefore"] is True
+    assert daily[-1]["session"] == "second"
+
+    r.store.db.execute(
+        "INSERT INTO equity_samples(generation,session,at_ms,pnl,total) VALUES(?,?,?,?,?)",
+        (generation, "second", 36 * DAY_MS, 5_000_000, 105_000_000),
+    )
+    refreshed = sampler.view()["series"]["D"]
+    assert [p["pnl"] for p in refreshed] == ["2", "3", "4", "5"]
     r.close()
 
 

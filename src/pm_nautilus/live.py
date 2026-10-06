@@ -44,30 +44,8 @@ from .native import price, quantity
 from .rules import cost, ceil_div, static_reason, Fees, preview, arbitrate
 
 
-def load_settings(*, require_live_enabled: bool = True):
-    if require_live_enabled and os.environ.get("PM_LIVE_ENABLED") != "true":
-        raise ValueError("LIVE 未由服务器显式启用")
-    path = os.environ.get("PM_LIVE_CREDENTIALS_FILE")
-    if not path:
-        raise ValueError("LIVE凭据文件路径未配置")
-    try:
-        # Check the opened inode, not a pathname that can be replaced between
-        # stat() and read(). O_NONBLOCK prevents a FIFO from blocking at open().
-        flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
-        with os.fdopen(os.open(path, flags), encoding="utf-8") as stream:
-            info = os.fstat(stream.fileno())
-            if (
-                not stat.S_ISREG(info.st_mode)
-                or stat.S_IMODE(info.st_mode) != 0o600
-                or info.st_uid not in {10001, os.geteuid()}
-            ):
-                raise ValueError("LIVE凭据文件须为权限0600、由UID10001或运行用户持有的普通文件")
-            try:
-                settings = json.load(stream)
-            except (ValueError, UnicodeError):
-                raise ValueError("LIVE凭据文件JSON无效") from None
-    except OSError:
-        raise ValueError("LIVE凭据文件无法安全读取，请检查路径、属主及文件类型") from None
+def validate_settings(settings):
+    """Validate credentials loaded from either the legacy file or a locked web vault."""
     if not isinstance(settings, dict):
         raise ValueError("LIVE凭据文件JSON须为对象")
     for key in (
@@ -108,6 +86,33 @@ def load_settings(*, require_live_enabled: bool = True):
     ):
         raise ValueError("LIVE 自动赎回授权设置无效")
     return settings
+
+
+def load_settings(*, require_live_enabled: bool = True):
+    if require_live_enabled and os.environ.get("PM_LIVE_ENABLED") != "true":
+        raise ValueError("LIVE 未由服务器显式启用")
+    path = os.environ.get("PM_LIVE_CREDENTIALS_FILE")
+    if not path:
+        raise ValueError("LIVE凭据文件路径未配置")
+    try:
+        # Check the opened inode, not a pathname that can be replaced between
+        # stat() and read(). O_NONBLOCK prevents a FIFO from blocking at open().
+        flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+        with os.fdopen(os.open(path, flags), encoding="utf-8") as stream:
+            info = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_uid not in {10001, os.geteuid()}
+            ):
+                raise ValueError("LIVE凭据文件须为权限0600、由UID10001或运行用户持有的普通文件")
+            try:
+                settings = json.load(stream)
+            except (ValueError, UnicodeError):
+                raise ValueError("LIVE凭据文件JSON无效") from None
+    except OSError:
+        raise ValueError("LIVE凭据文件无法安全读取，请检查路径、属主及文件类型") from None
+    return validate_settings(settings)
 
 
 def live_factory(settings, wallet):

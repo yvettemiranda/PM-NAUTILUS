@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
     <title>PM-NAUTILUS</title>
-    <link rel="stylesheet" href="/styles.css?v=20260922-overview1" />
+    <link rel="stylesheet" href="/styles.css?v=20261006-live-web1" />
   </head>
   <body>
     <main class="app-shell">
@@ -22,9 +22,70 @@
       </header>
       <div id="runtime-status" class="inline-note" hidden></div>
       <p id="connection-warning" class="warning" role="status" hidden></p>
-      <p id="live-lock" class="inline-note" hidden>
-        LIVE 尚未开放；纸面闭环和长期 TEST 验证完成前不能启用。
-      </p>
+      <section id="live-wallet-panel" class="wallet-panel" aria-labelledby="wallet-title" hidden>
+        <div class="wallet-heading"><h2 id="wallet-title">实盘钱包</h2><div class="wallet-heading-actions"><span id="wallet-state" class="wallet-state">读取中</span><button id="wallet-refresh" class="wallet-text-button" type="button">刷新状态</button></div></div>
+        <p id="wallet-message" class="wallet-message" role="status" aria-live="polite"></p>
+        <p id="wallet-transport-warning" class="warning" hidden>请先通过 HTTPS 打开此页面，再输入钱包信息。</p>
+        <div id="wallet-account" class="wallet-account" hidden></div>
+
+        <form id="wallet-import-form" class="wallet-form" autocomplete="off" hidden>
+          <fieldset class="wallet-kind">
+            <legend>输入方式</legend>
+            <label><input type="radio" name="wallet-kind" value="mnemonic" checked />12 个助记词</label>
+            <label><input type="radio" name="wallet-kind" value="private_key" />私钥</label>
+          </fieldset>
+          <div id="wallet-mnemonic-view">
+            <div id="wallet-mnemonic-fields" class="wallet-words" aria-label="按顺序输入 12 个助记词"></div>
+          </div>
+          <label id="wallet-key-view" class="wallet-field" hidden><span>私钥</span><input id="wallet-private-key" type="password" data-wallet-secret autocomplete="new-password" autocapitalize="none" spellcheck="false" placeholder="0x…" /></label>
+          <button id="wallet-reveal" class="wallet-text-button" type="button" aria-pressed="false">显示输入</button>
+          <label class="wallet-field"><span>Polymarket 页面显示的钱包地址</span><input id="wallet-public-address" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="0x…" required /></label>
+          <details id="wallet-advanced" class="wallet-advanced">
+            <summary>高级选项（一般不用填写）</summary>
+            <label class="wallet-field"><span>助记词额外密码</span><input id="wallet-mnemonic-passphrase" type="password" data-wallet-secret autocomplete="new-password" /></label>
+            <label class="wallet-field"><span>钱包账户序号</span><input id="wallet-account-index" type="number" min="0" step="1" value="0" inputmode="numeric" /></label>
+          </details>
+          <label class="wallet-field"><span>设置解锁密码</span><input id="wallet-vault-password" type="password" data-wallet-secret autocomplete="new-password" required /></label>
+          <label class="wallet-field"><span>再输入一次解锁密码</span><input id="wallet-vault-confirm" type="password" data-wallet-secret autocomplete="new-password" required /></label>
+          <button id="wallet-import" class="button primary" type="submit">保存并连接钱包</button>
+          <p class="wallet-help">钱包内容只发送到当前服务器并加密保存。请勿发到聊天或 GitHub。</p>
+        </form>
+
+        <form id="wallet-unlock-form" class="wallet-form" autocomplete="off" hidden>
+          <label class="wallet-field"><span>解锁密码</span><input id="wallet-unlock-password" type="password" data-wallet-secret autocomplete="new-password" required /></label>
+          <button id="wallet-unlock" class="button primary" type="submit">解锁钱包</button>
+        </form>
+
+        <div id="wallet-actions" class="wallet-actions" hidden>
+          <ul id="wallet-checks" class="wallet-checks"></ul>
+          <div class="wallet-action-buttons"><button id="wallet-check" class="button secondary" type="button">检查账户</button></div>
+          <div id="wallet-enable-step" class="wallet-enable-step" hidden>
+            <p id="wallet-rules-summary"></p>
+            <button id="wallet-open-config" class="wallet-text-button" type="button">查看完整交易规则</button>
+            <label class="wallet-rules-confirm"><input id="wallet-confirm-rules" type="checkbox" />我已查看并确认当前 LIVE 交易规则</label>
+            <button id="wallet-enable" class="button primary" type="button">启用实盘（先暂停）</button>
+          </div>
+        </div>
+        <details id="wallet-transfer" class="wallet-transfer">
+          <summary>钱包备份与管理</summary>
+          <form id="wallet-backup-form" class="wallet-form" autocomplete="off" hidden>
+            <p class="wallet-help">下载加密钱包与 LIVE 交易账本。请妥善保存下载文件和解锁密码。</p>
+            <label class="wallet-field"><span>解锁密码</span><input id="wallet-backup-password" type="password" data-wallet-secret autocomplete="new-password" required /></label>
+            <button id="wallet-backup" class="button secondary" type="submit">下载加密备份</button>
+          </form>
+          <form id="wallet-restore-form" class="wallet-form" autocomplete="off" hidden>
+            <p class="wallet-help">只在新服务器的空白 LIVE 账本恢复。恢复后还要解锁、检查并手动启用。</p>
+            <label class="wallet-field"><span>备份文件</span><input id="wallet-restore-file" type="file" accept=".pmnb,application/octet-stream" required /></label>
+            <label class="wallet-field"><span>解锁密码</span><input id="wallet-restore-password" type="password" data-wallet-secret autocomplete="new-password" required /></label>
+            <button id="wallet-restore" class="button secondary" type="submit">恢复加密备份</button>
+          </form>
+          <form id="wallet-remove-form" class="wallet-form" autocomplete="off" hidden>
+            <p class="wallet-help">接错钱包且尚无实盘交易时，可清除本服务器保存的钱包后重新输入。</p>
+            <label class="wallet-field"><span>解锁密码</span><input id="wallet-remove-password" type="password" data-wallet-secret autocomplete="new-password" required /></label>
+            <button id="wallet-remove" class="button danger" type="submit">清除当前钱包</button>
+          </form>
+        </details>
+      </section>
 
       <section id="config-panel" class="config-panel" hidden>
         <form id="config-form">
@@ -260,9 +321,15 @@
       <section class="equity-panel" aria-label="资金概览">
         <div class="equity-label">累计净盈亏</div>
         <div class="equity-head"><strong id="net-pnl">—</strong><span id="net-return"></span></div>
-        <div class="curve-label"><span>净盈亏 · U</span><span id="curve-status">等待采样</span></div>
-        <button id="equity-chart" type="button" aria-label="收益曲线，左右方向键查看采样"><svg id="equity-svg" role="img" aria-label="实际采样净盈亏"></svg></button>
-        <div id="curve-note" class="field-note">自本版本部署起采样，不补造历史。</div>
+        <button id="equity-chart" type="button" aria-label="收益曲线，左右方向键查看数据点"><svg id="equity-svg" role="img" aria-label="累计净盈亏曲线"></svg></button>
+        <div class="curve-footer">
+          <span id="curve-status" role="status" aria-live="polite"></span>
+          <div class="curve-scales" role="group" aria-label="收益曲线时间刻度">
+            <button type="button" data-curve-scale="H" aria-label="每小时一个点" aria-pressed="true">H</button>
+            <button type="button" data-curve-scale="D" aria-label="每天一个点，按 UTC 日期" title="按 UTC 日期分组" aria-pressed="false">D</button>
+          </div>
+        </div>
+        <div id="curve-note" class="field-note" hidden></div>
         <div class="equity-money"><div><span>总资产</span><strong id="total-funds">—</strong></div><div><span>可用现金</span><strong id="available-cash">—</strong></div></div>
         <details id="portfolio-details"><summary>明细</summary>
           <section id="portfolio" class="portfolio" aria-label="资金明细">
@@ -349,6 +416,6 @@
 
       <p id="message" role="status" aria-live="polite"></p>
     </main>
-    <script type="module" src="/app.js?v=20260922-overview1"></script>
+    <script type="module" src="/app.js?v=20261006-live-web1"></script>
   </body>
 </html>

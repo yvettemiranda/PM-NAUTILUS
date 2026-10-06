@@ -1,4 +1,4 @@
-import { displayStatus, curveSegments } from "./ui-state.js";
+import { displayStatus, curveSegments, modeSwitchDecision, walletOriginSecure, liveWalletAccountVerified } from "./ui-state.js?v=20261006-live-web1";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -13,6 +13,14 @@ const ui = {
   performanceLoading: false,
   performanceError: null,
   chartIndex: null,
+  curveGranularity: "H",
+  wallet: null,
+  walletAt: 0,
+  walletLoading: false,
+  walletPending: false,
+  walletError: null,
+  walletEpoch: 0,
+  walletRuleKey: null,
   preferences: null,
   strategyStatus: "STOPPED",
   displayMode: "TEST",
@@ -38,6 +46,10 @@ const ui = {
 };
 
 const POSITION_PREVIEW_LIMIT = 20;
+const WALLET_REFRESH_MS = 15_000;
+const WALLET_ACTION_TIMEOUT_MS = 90_000;
+const BACKUP_ACTION_TIMEOUT_MS = 300_000;
+const MAX_BACKUP_UPLOAD_BYTES = 128 * 1024 * 1024;
 
 const TRADE_RECORD_REFRESH_MS = 3_000;
 const CATEGORY_LABELS_ZH = {
@@ -237,7 +249,14 @@ function currentPositions(positions = []) {
   return positions.filter((position) => Number(position.quantity) > 0);
 }
 
+function liveAccountVisible() {
+  return ui.displayMode !== "LIVE" || liveWalletAccountVerified({
+    dashboard: ui.dashboard, wallet: ui.wallet, walletAt: ui.walletAt, error: ui.walletError,
+  });
+}
+
 function renderPortfolio(portfolio, positions = []) {
+  if (!liveAccountVisible()) { portfolio = null; positions = []; }
   setMoneyValue("#total-funds", portfolio?.totalFunds);
   setMoneyValue("#available-cash", portfolio?.availableCash);
   const pnl = portfolio?.unrealizedPnl == null || portfolio?.realizedPnl == null ? null : Number(portfolio.realizedPnl) + Number(portfolio.unrealizedPnl);
@@ -250,7 +269,7 @@ function renderPortfolio(portfolio, positions = []) {
   setMoneyValue("#position-value", portfolio?.positionValue);
   const positionCount = currentPositions(positions).length;
   const count = $("#portfolio-position-count");
-  count.textContent = `${formatCount(positionCount)}单`;
+  count.textContent = liveAccountVisible() ? `${formatCount(positionCount)}单` : "—";
   count.dataset.tone = "neutral";
 }
 
@@ -265,9 +284,326 @@ function renderModeControl() {
       ? "当前 LIVE 视图，点击切换到 TEST"
       : "当前 TEST 模式，点击切换到 LIVE",
   );
-  $("#live-lock").hidden = !liveView;
-  $("#live-lock").textContent = ui.dashboard?.liveExecutionEnabled ? "LIVE 使用实际账户；START 开始真实交易，PAUSE 后退出与赎回继续。" : "LIVE 尚未在服务器配置并明确启用。";
+  $("#live-wallet-panel").hidden = !liveView;
+  renderLiveWallet();
 }
+
+function liveStartAvailable() {
+  return Boolean(
+    ui.dashboard?.liveExecutionEnabled && liveAccountVisible() &&
+    !["BLOCKED", "LOCKED", "ERROR"].includes(ui.wallet?.status)
+  );
+}
+
+function renderLiveWallet() {
+  if (ui.displayMode !== "LIVE") return;
+  const wallet = ui.wallet;
+  const secure = walletOriginSecure(window.location);
+  const status = wallet?.status || "UNCONFIGURED";
+  const labels = {
+    UNCONFIGURED: "未连接", LOCKED: "已锁定", BLOCKED: "检查未通过",
+    READY: "检查通过", PAUSED: "已暂停", RUNNING: "运行中", ERROR: "异常",
+  };
+  const state = $("#wallet-state");
+  state.textContent = ui.walletLoading && !wallet ? "读取中" : ui.walletError && !wallet ? "读取失败" : labels[status] || "待确认";
+  state.dataset.tone = ["READY", "PAUSED", "RUNNING"].includes(status) ? "positive" : ["BLOCKED", "ERROR"].includes(status) || ui.walletError ? "negative" : "neutral";
+
+  const messages = {
+    UNCONFIGURED: "输入钱包信息，完成后会先检查账户。",
+    LOCKED: "钱包已保存。解锁后继续检查账户。",
+    BLOCKED: "账户检查未通过，请查看下面的提示。",
+    READY: "检查通过。确认交易规则后可以启用实盘。",
+    PAUSED: "实盘已启用，目前暂停。点击右上角 ▶ 开始。",
+    RUNNING: "实盘正在运行。",
+    ERROR: "实盘状态异常，请查看检查结果。",
+  };
+  $("#wallet-message").textContent = ui.walletError || wallet?.error || (ui.walletLoading && !wallet ? "正在读取钱包状态…" : messages[status] || "正在确认钱包状态…");
+  $("#wallet-transport-warning").hidden = secure;
+
+  const account = $("#wallet-account");
+  account.hidden = !wallet?.configured;
+  if (wallet?.configured) {
+    const address = wallet.funder || wallet.publicAddress || "待确认";
+    account.innerHTML = `<strong>Polymarket 账户</strong>${escapeHtml(address)}${wallet.signer && wallet.signer !== address ? `<br>签名钱包：${escapeHtml(wallet.signer)}` : ""}`;
+  } else account.replaceChildren();
+
+  $("#wallet-import-form").hidden = wallet?.configured !== false;
+  $("#wallet-unlock-form").hidden = !wallet?.configured || wallet.unlocked;
+  $("#wallet-actions").hidden = !wallet?.configured || !wallet.unlocked;
+  $("#wallet-enable-step").hidden = !wallet?.configured || !wallet.unlocked || wallet.enabled;
+  $("#wallet-refresh").disabled = ui.walletPending || ui.walletLoading;
+  for (const control of document.querySelectorAll("#wallet-import-form input, #wallet-import-form button, #wallet-unlock-form input, #wallet-unlock-form button")) {
+    control.disabled = !secure || ui.walletPending;
+  }
+
+  const checks = Array.isArray(wallet?.readiness?.checks) ? wallet.readiness.checks : [];
+  $("#wallet-checks").innerHTML = checks.map((check) => {
+    const checkStatus = ["pass", "blocked", "unknown"].includes(check.status) ? check.status : "unknown";
+    return `<li data-status="${checkStatus}">${escapeHtml(check.message || check.id || "待检查")}</li>`;
+  }).join("");
+  $("#wallet-check").disabled = !secure || ui.walletPending || ui.walletLoading;
+  $("#wallet-rules-summary").textContent = ui.preferences
+    ? `每 Event 每轮 ${formatMoney(ui.preferences.orderAmount)} · 主动止损${ui.preferences.stopLossEnabled ? "开启" : "关闭"}`
+    : "正在读取交易规则…";
+  const ready = wallet?.readiness?.ready === true && status === "READY";
+  $("#wallet-confirm-rules").disabled = !secure || !ready || ui.walletPending || ui.configDirty;
+  $("#wallet-enable").disabled = !secure || !ready || !$("#wallet-confirm-rules").checked || ui.walletPending || ui.configDirty;
+  $("#wallet-backup-form").hidden = !wallet?.configured;
+  $("#wallet-restore-form").hidden = wallet?.configured !== false;
+  $("#wallet-remove-form").hidden = !wallet?.replaceable;
+  for (const control of document.querySelectorAll("#wallet-transfer input, #wallet-transfer button")) {
+    control.disabled = !secure || ui.walletPending;
+  }
+}
+
+function refreshWalletDependentViews() {
+  renderLiveWallet();
+  if (ui.dashboard) {
+    renderCashNote();
+    renderPortfolio(ui.dashboard.portfolio, ui.dashboard.positions);
+    renderPositions(ui.dashboard.positions);
+  }
+  renderRunControls();
+}
+
+function renderCashNote() {
+  const account = liveAccountVisible() ? ui.dashboard?.portfolio : null;
+  $("#cash-note").textContent = account
+    ? `可用 ${formatMoney(account.availableCash)} · 待成交订单占用 ${formatMoney(account.reservedCash)} · 待赎回 ${formatMoney(account.pendingRedemption)}`
+    : "账户未核对";
+  $("#redemption-status").textContent = account
+    ? (ui.dashboard?.redemptions || []).map(c => `${c.condition_id.slice(0, 10)}… ${c.state}${c.error ? `：${c.error}` : ""}`).join(" · ")
+    : "";
+  $("#redemption-status").hidden = !$("#redemption-status").textContent;
+}
+
+async function loadLiveWallet() {
+  if (ui.displayMode !== "LIVE" || ui.walletLoading || ui.walletPending) return;
+  ui.walletLoading = true;
+  const epoch = ui.walletEpoch;
+  renderLiveWallet();
+  try {
+    const wallet = await api("/api/live/wallet");
+    if (epoch !== ui.walletEpoch || ui.displayMode !== "LIVE") return;
+    ui.wallet = wallet;
+    ui.walletAt = Date.now();
+    ui.walletError = null;
+  } catch (error) {
+    if (epoch !== ui.walletEpoch || ui.displayMode !== "LIVE") return;
+    ui.walletAt = Date.now();
+    ui.walletError = `钱包状态读取失败：${error.message}`;
+  } finally {
+    ui.walletLoading = false;
+    if (ui.displayMode === "LIVE") refreshWalletDependentViews();
+  }
+}
+
+function clearWalletSecrets() {
+  for (const input of document.querySelectorAll("#live-wallet-panel [data-wallet-secret]")) input.value = "";
+  for (const input of document.querySelectorAll("#wallet-mnemonic-fields input, #wallet-private-key")) input.type = "password";
+  $("#wallet-reveal").setAttribute("aria-pressed", "false");
+  $("#wallet-reveal").textContent = "显示输入";
+}
+
+async function postLiveWallet(action, payload, button, pendingLabel, successMessage) {
+  if (ui.walletPending || ui.displayMode !== "LIVE") return;
+  if (!walletOriginSecure(window.location)) { showMessage("请先通过 HTTPS 打开此页面", true); return; }
+  ui.walletPending = true;
+  ui.walletEpoch += 1;
+  setButtonPending(button, true, pendingLabel);
+  refreshWalletDependentViews();
+  let failed = false;
+  try {
+    const wallet = await api(`/api/live/wallet/${action}`, {
+      method: "POST", body: JSON.stringify(payload), signal: AbortSignal.timeout(WALLET_ACTION_TIMEOUT_MS),
+    });
+    ui.wallet = wallet;
+    ui.walletAt = Date.now();
+    ui.walletError = null;
+    recordMutation();
+    showMessage(successMessage);
+    await loadDashboard();
+  } catch (error) {
+    failed = true;
+    const uncertain = error.name === "TimeoutError" || error.name === "AbortError";
+    ui.walletError = uncertain ? "操作结果暂未确认，请稍后刷新状态" : error.message;
+    showMessage(ui.walletError, true);
+  } finally {
+    clearWalletSecrets();
+    ui.walletPending = false;
+    setButtonPending(button, false);
+    refreshWalletDependentViews();
+    if (failed) void loadLiveWallet();
+  }
+}
+
+function setupMnemonicFields() {
+  $("#wallet-mnemonic-fields").innerHTML = Array.from({length: 12}, (_, index) =>
+    `<label><span>${index + 1}</span><input type="password" data-wallet-word data-wallet-secret aria-label="助记词第 ${index + 1} 个词" autocomplete="off" autocapitalize="none" spellcheck="false" /></label>`
+  ).join("");
+}
+
+function updateWalletKind() {
+  const mnemonic = document.querySelector('input[name="wallet-kind"]:checked')?.value !== "private_key";
+  $("#wallet-mnemonic-view").hidden = !mnemonic;
+  $("#wallet-key-view").hidden = mnemonic;
+  for (const input of document.querySelectorAll("#wallet-mnemonic-fields input, #wallet-private-key")) input.value = "";
+}
+
+setupMnemonicFields();
+for (const radio of document.querySelectorAll('input[name="wallet-kind"]')) radio.addEventListener("change", updateWalletKind);
+$("#wallet-mnemonic-fields").addEventListener("paste", (event) => {
+  const input = event.target.closest("[data-wallet-word]");
+  if (!input) return;
+  const words = event.clipboardData?.getData("text")?.trim().split(/\s+/).filter(Boolean) || [];
+  if (words.length < 2) return;
+  event.preventDefault();
+  const fields = [...document.querySelectorAll("[data-wallet-word]")];
+  const start = fields.indexOf(input);
+  if (words.length > fields.length - start) { showMessage("粘贴的词数超过剩余输入框", true); return; }
+  words.forEach((word, offset) => { fields[start + offset].value = word; });
+  fields[Math.min(fields.length - 1, start + words.length)]?.focus();
+});
+$("#wallet-reveal").addEventListener("click", () => {
+  const reveal = $("#wallet-reveal").getAttribute("aria-pressed") !== "true";
+  for (const input of document.querySelectorAll("#wallet-mnemonic-fields input, #wallet-private-key")) input.type = reveal ? "text" : "password";
+  $("#wallet-reveal").setAttribute("aria-pressed", String(reveal));
+  $("#wallet-reveal").textContent = reveal ? "隐藏输入" : "显示输入";
+});
+$("#wallet-import-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (ui.walletPending) return;
+  const kind = document.querySelector('input[name="wallet-kind"]:checked')?.value || "mnemonic";
+  const words = [...document.querySelectorAll("[data-wallet-word]")].map((input) => input.value.trim());
+  const secret = kind === "mnemonic" ? words.join(" ") : $("#wallet-private-key").value.trim();
+  if (kind === "mnemonic" && words.some((word) => !word || /\s/.test(word))) { showMessage("请按顺序填满 12 个助记词", true); return; }
+  if (!secret) { showMessage("请填写钱包私钥", true); return; }
+  const publicAddress = $("#wallet-public-address").value.trim();
+  if (!/^0x[0-9a-fA-F]{40}$/.test(publicAddress)) { showMessage("请填写 Polymarket 页面显示的 0x 钱包地址", true); return; }
+  const accountIndex = Number($("#wallet-account-index").value);
+  if (!Number.isSafeInteger(accountIndex) || accountIndex < 0) { showMessage("钱包账户序号应为非负整数", true); return; }
+  const vaultPassword = $("#wallet-vault-password").value;
+  if (vaultPassword !== $("#wallet-vault-confirm").value) { showMessage("两次解锁密码不一致", true); return; }
+  void postLiveWallet("import", {
+    kind, secret, mnemonicPassphrase: $("#wallet-mnemonic-passphrase").value,
+    accountIndex, publicAddress, vaultPassword,
+  }, $("#wallet-import"), "连接中", "钱包已保存，请核对检查结果");
+});
+$("#wallet-unlock-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (ui.walletPending) return;
+  void postLiveWallet("unlock", {vaultPassword: $("#wallet-unlock-password").value}, $("#wallet-unlock"), "解锁中", "钱包已解锁");
+});
+$("#wallet-check").addEventListener("click", () => {
+  void postLiveWallet("check", {}, $("#wallet-check"), "检查中", "账户检查已更新");
+});
+$("#wallet-refresh").addEventListener("click", () => { void loadLiveWallet(); });
+$("#wallet-confirm-rules").addEventListener("change", renderLiveWallet);
+$("#wallet-open-config").addEventListener("click", () => {
+  setConfigOpen(true);
+  $("#config-panel").scrollIntoView({behavior: "smooth", block: "start"});
+});
+$("#wallet-enable").addEventListener("click", () => {
+  if (!ui.wallet?.readiness?.ready || !$("#wallet-confirm-rules").checked || ui.walletPending || ui.configDirty) return;
+  const address = ui.wallet.funder || "当前钱包";
+  if (!window.confirm(`确认启用 ${address} 的实盘交易？启用后仍保持暂停，只有你点击右上角 ▶ 才会开始真实交易。`)) return;
+  void postLiveWallet("enable", {confirmation: "ENABLE LIVE"}, $("#wallet-enable"), "启用中", "实盘已启用并保持暂停；核对后点击 ▶ 开始");
+});
+
+$("#wallet-backup-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (ui.walletPending || ui.displayMode !== "LIVE" || !walletOriginSecure(window.location)) return;
+  ui.walletPending = true;
+  const button = $("#wallet-backup");
+  setButtonPending(button, true, "打包中");
+  renderLiveWallet();
+  try {
+    const response = await fetch("/api/live/wallet/backup", {
+      method: "POST",
+      headers: {"content-type": "application/json", "x-pm-csrf": csrfToken},
+      body: JSON.stringify({vaultPassword: $("#wallet-backup-password").value}),
+      signal: AbortSignal.timeout(BACKUP_ACTION_TIMEOUT_MS),
+    });
+    csrfToken = response.headers.get("x-pm-csrf") || csrfToken;
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || `备份失败（${response.status}）`);
+    }
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "pm-nautilus-live.pmnb";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    showMessage("加密备份已下载，请妥善保存");
+  } catch (error) {
+    showMessage(error.message || "备份失败", true);
+  } finally {
+    clearWalletSecrets();
+    ui.walletPending = false;
+    setButtonPending(button, false);
+    renderLiveWallet();
+  }
+});
+
+function backupFileBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("无法读取备份文件"));
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1]);
+    reader.readAsDataURL(file);
+  });
+}
+
+$("#wallet-restore-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (ui.walletPending || ui.displayMode !== "LIVE" || !walletOriginSecure(window.location)) return;
+  const file = $("#wallet-restore-file").files[0];
+  if (!file || file.size > MAX_BACKUP_UPLOAD_BYTES) { showMessage("请选择有效的加密备份文件", true); return; }
+  if (!window.confirm("只会恢复到空白 LIVE 账本。确认从这份备份恢复钱包和真实交易记录？")) return;
+  ui.walletPending = true;
+  const button = $("#wallet-restore");
+  setButtonPending(button, true, "恢复中");
+  renderLiveWallet();
+  let failed = false;
+  try {
+    const bundleBase64 = await backupFileBase64(file);
+    const wallet = await api("/api/live/wallet/restore", {
+      method: "POST",
+      body: JSON.stringify({bundleBase64, vaultPassword: $("#wallet-restore-password").value}),
+      signal: AbortSignal.timeout(BACKUP_ACTION_TIMEOUT_MS),
+    });
+    ui.wallet = wallet;
+    ui.walletAt = Date.now();
+    ui.walletError = null;
+    recordMutation();
+    showMessage("已恢复加密备份。请解锁、检查账户，再决定是否启用实盘");
+    await loadDashboard();
+  } catch (error) {
+    failed = true;
+    ui.walletError = error.name === "TimeoutError" ? "恢复结果暂未确认，请刷新钱包状态" : error.message;
+    showMessage(ui.walletError, true);
+  } finally {
+    clearWalletSecrets();
+    $("#wallet-restore-file").value = "";
+    ui.walletPending = false;
+    setButtonPending(button, false);
+    refreshWalletDependentViews();
+    if (failed) void loadLiveWallet();
+  }
+});
+
+$("#wallet-remove-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (!ui.wallet?.replaceable || ui.walletPending) return;
+  if (!window.confirm("确认清除本服务器保存的空白实盘钱包？之后需要重新输入钱包信息。")) return;
+  void postLiveWallet("remove", {
+    vaultPassword: $("#wallet-remove-password").value,
+    confirmation: "REPLACE EMPTY WALLET",
+  }, $("#wallet-remove"), "清除中", "空白钱包已清除，可以重新输入");
+});
 
 function renderRunControls() {
   const running = ui.strategyStatus === "RUNNING";
@@ -277,12 +613,12 @@ function renderRunControls() {
   if (!runToggle.classList.contains("is-pending")) {
     runToggle.textContent = running ? "Ⅱ" : "▶";
   }
-  runToggle.disabled = !ui.dashboard || !ui.dashboardAt || Boolean(ui.dashboardError) || ui.controlPending || (liveView && !ui.dashboard?.liveExecutionEnabled);
-  runToggle.title = runToggle.disabled && liveView ? "LIVE 尚未由服务器启用" : "";
+  runToggle.disabled = !ui.dashboard || !ui.dashboardAt || Boolean(ui.dashboardError) || ui.controlPending || (liveView && !running && (!liveStartAvailable() || ui.walletPending));
+  runToggle.title = runToggle.disabled && liveView ? "请先在下方连接、检查并启用实盘钱包" : "";
   runToggle.setAttribute(
     "aria-label",
-    liveView && !ui.dashboard?.liveExecutionEnabled
-      ? "LIVE 尚未开放，无法启动"
+    liveView && !running && !liveStartAvailable()
+      ? "请先连接、检查并启用实盘钱包"
       : running
         ? `暂停 ${ui.displayMode} 自动买入`
         : `开始 ${ui.displayMode} 自动交易`,
@@ -306,6 +642,18 @@ function renderRunControls() {
 }
 
 function renderPositions(positions = []) {
+  if (!liveAccountVisible()) {
+    $("#tab-position-count").textContent = "—";
+    $("#position-count").textContent = "未核对";
+    $("#position-list-controls").hidden = true;
+    const message = ui.wallet?.configured ? "钱包未解锁或实盘未就绪，持仓暂未核对" : "实盘钱包尚未连接，持仓暂未核对";
+    const markup = `<p class="empty-state">${message}</p>`;
+    if ($("#positions").dataset.markup !== markup) {
+      $("#positions").innerHTML = markup;
+      $("#positions").dataset.markup = markup;
+    }
+    return;
+  }
   const current = currentPositions(positions);
   if (current.length <= POSITION_PREVIEW_LIMIT) ui.positionsExpanded = false;
   const visible = ui.positionsExpanded
@@ -696,11 +1044,16 @@ function applyDashboard(dashboard) {
   ui.dashboard = dashboard;
   ui.dashboardAt = Date.now();
   ui.dashboardError = null;
-  renderModeControl();
-  $("#cash-note").textContent = `可用 ${formatMoney(dashboard.portfolio.availableCash)} · 待成交订单占用 ${formatMoney(dashboard.portfolio.reservedCash)} · 待赎回 ${formatMoney(dashboard.portfolio.pendingRedemption)}`;
-  $("#redemption-status").textContent = (dashboard.redemptions || []).map(c => `${c.condition_id.slice(0, 10)}… ${c.state}${c.error ? `：${c.error}` : ""}`).join(" · ");
-  $("#redemption-status").hidden = !$("#redemption-status").textContent;
+  if (ui.displayMode === "LIVE") {
+    const ruleKey = JSON.stringify(dashboard.preferences);
+    if (ruleKey !== ui.walletRuleKey) {
+      ui.walletRuleKey = ruleKey;
+      $("#wallet-confirm-rules").checked = false;
+    }
+  }
   ui.preferences = dashboard.preferences;
+  renderModeControl();
+  renderCashNote();
   ui.strategyStatus = dashboard.strategy.status;
   ui.events = dashboard.marketScan.events ?? [];
   ui.candidateCount = dashboard.marketScan.eventCount ?? dashboard.marketScan.candidateCount ?? ui.events.length;
@@ -715,6 +1068,7 @@ function applyDashboard(dashboard) {
   renderStatus();
   if (ui.performance?.generation !== dashboard.generation) { ui.performance = null; ui.performanceAt = 0; drawCurve(); }
   if (Date.now() - ui.performanceAt > 30000) void loadPerformance();
+  if (ui.displayMode === "LIVE" && Date.now() - ui.walletAt > WALLET_REFRESH_MS) void loadLiveWallet();
   if (
     ui.tradeRecordsExpanded &&
     Date.now() - ui.tradeRecordsLoadedAt >= TRADE_RECORD_REFRESH_MS
@@ -874,6 +1228,7 @@ $("#config-close").addEventListener("click", () => {
 $("#config-form").addEventListener("input", () => {
   ui.configDirty = true;
   renderTargetSellFormula();
+  if (ui.displayMode === "LIVE") renderLiveWallet();
 });
 
 $("#stop-loss-enabled").addEventListener("change", renderStopLossControl);
@@ -954,11 +1309,11 @@ $("#config-form").addEventListener("submit", async (event) => {
 });
 
 $("#run-toggle").addEventListener("click", async () => {
-  if (ui.displayMode === "LIVE" && !ui.dashboard?.liveExecutionEnabled) {
-    showMessage("LIVE尚未由服务器启用", true);
+  const wasRunning = ui.strategyStatus === "RUNNING";
+  if (ui.displayMode === "LIVE" && !wasRunning && (!liveStartAvailable() || ui.walletPending)) {
+    showMessage("请先连接、检查并启用实盘钱包", true);
     return;
   }
-  const wasRunning = ui.strategyStatus === "RUNNING";
   const button = $("#run-toggle");
   ui.controlPending = true;
   setButtonPending(button, true, wasRunning ? "暂停中" : "启动中");
@@ -1016,12 +1371,16 @@ $("#reset-test").addEventListener("click", async () => {
 });
 
 $("#mode-toggle").addEventListener("click", () => {
-  if (ui.controlPending || ui.loading || ui.performanceLoading || ui.tradeRecordsLoading) return;
-  if (ui.configDirty) { showMessage("有未保存设置，请先保存；如需放弃草稿，可刷新页面后切换模式", true); return; }
+  if (ui.walletPending) { showMessage("钱包操作正在处理，请稍后切换", true); return; }
+  const decision = modeSwitchDecision(ui);
+  if (decision.error) { showMessage(decision.error, true); return; }
+  clearWalletSecrets();
+  ui.walletEpoch += 1;
+  ui.wallet = null; ui.walletAt = 0; ui.walletError = null; ui.walletRuleKey = null;
   recordMutation();
   ui.tradeRecordsLoaded = false; ui.tradeRecordsLoadedAt = 0; ui.tradeRecords = [];
   ui.visibleCandidateCount = 20;
-  ui.displayMode = ui.displayMode === "TEST" ? "LIVE" : "TEST";
+  ui.displayMode = decision.nextMode;
   ui.dashboard = null; ui.dashboardAt = 0; ui.dashboardError = null; ui.strategyStatus = "STOPPED";
   ui.performance = null; ui.performanceAt = 0; ui.performanceError = null; ui.recordLimit = 20;
   renderPortfolio(null); renderPositions([]); renderTradeRecords(); drawCurve(); renderStatus();
@@ -1034,6 +1393,7 @@ $("#mode-toggle").addEventListener("click", () => {
       : "已切换到TEST",
   );
   void loadDashboard();
+  if (ui.displayMode === "LIVE") void loadLiveWallet();
 });
 
 $("#sort-toggle").addEventListener("click", async () => {
@@ -1093,8 +1453,8 @@ function renderStatus() {
   $("#connection-warning").hidden = !state.warning;
   $(".equity-panel").classList.toggle("is-stale", Boolean(ui.dashboardAt && (ui.dashboardError || Date.now() - ui.dashboardAt > 10000)));
   const s = ui.dashboard?.marketScan || {}, groups = s.diagnostics?.streams?.groups || [];
-  const runText = state.run === "error" ? state.warning : !ui.dashboardAt ? "运行状态未确认" : ui.strategyStatus === "RUNNING" ? "运行中" : "已暂停新买入；已有仓位仍继续退出和赎回。";
-  $("#runtime-status").textContent = `${runText}${s.lastServiceError ? ` 最近故障：${s.lastServiceError} · ${formatDate(s.lastServiceErrorAt)}` : ""}`;
+  const runText = state.run === "error" ? state.warning : !ui.dashboardAt ? "运行状态未确认" : ui.displayMode === "LIVE" && !ui.wallet?.configured ? "实盘钱包未连接" : ui.displayMode === "LIVE" && !ui.wallet?.unlocked ? "实盘钱包已锁定" : ui.displayMode === "LIVE" && !ui.wallet?.enabled ? "实盘尚未启用" : ui.strategyStatus === "RUNNING" ? "运行中" : "已暂停新买入；已有仓位仍继续退出和赎回。";
+  $("#runtime-status").textContent = runText;
   $("#status-toggle").setAttribute("aria-label", `查看运行状态：${runText}`);
   const info = ui.activeTab === "positions" ? ["行情", `${groups.filter(g=>g.state === "READY").length}/${groups.length} 组就绪 · ${groups.reduce((n,g)=>n+g.readyBookCount,0)}/${groups.reduce((n,g)=>n+g.tokenCount,0)} 盘口完整`, ...groups.map((g,i)=>`组${i+1}：${g.state}，心跳 ${formatClock(g.lastPongAt)}${g.error ? `，${g.error}` : ""}`)] : ui.activeTab === "market" ? ["扫描", `最近完成 ${formatDate(s.lastScanAt)} · ${s.scanning ? "扫描中" : "等待下一轮"}`, s.lastError || s.categoryError || `监控 ${formatCount(ui.displayCandidateCount)} 个事件，当前可交易 ${formatCount(ui.candidateCount)} 个`] : ["同步", `最近成功 ${formatClock(ui.tradeRecordsLoadedAt || null)}`, ui.tradeRecordsError || (ui.tradeRecordsLoaded ? "记录已同步；无新成交也属于正常。" : "打开记录后读取")];
   $("#module-status-label").textContent = `${info[0]} · ${ui.activeTab === "records" ? ({ready:"已同步",error:"更新失败",waiting:"读取中",unknown:"未读取"}[records]) : ({ready:"正常",error:"需关注",waiting:"更新中",off:"未连接",unknown:"未确认"}[ui.activeTab === "market" ? state.scan : state.feed])}`;
@@ -1116,13 +1476,15 @@ async function loadPerformance() {
 
 function drawCurve() {
   const svg=$("#equity-svg"), button=$("#equity-chart");
-  const points=ui.performance?.points || [], segments=curveSegments(points), valid=segments.flat();
+  const points=curvePoints(), segments=curveSegments(points), valid=segments.flat();
   const w=Math.max(180,button.getBoundingClientRect().width),h=112,left=30,right=10,top=10,bottom=23;
   svg.setAttribute("viewBox",`0 0 ${w} ${h}`); svg.replaceChildren();
   const add=(tag,attrs,text)=>{const node=document.createElementNS("http://www.w3.org/2000/svg",tag);for(const [k,v] of Object.entries(attrs))node.setAttribute(k,String(v));if(text!==undefined)node.textContent=text;svg.appendChild(node);return node;};
-  $("#curve-status").textContent = ui.performanceError ? "采样或读取异常" : valid.length < 2 ? "等待更多采样" : `最近${points.length}个采样`;
-  $("#curve-note").textContent = ui.performanceError ? `曲线更新失败：${ui.performanceError}` : points.length ? `每分钟采样 · 始于 ${formatDate(points[0].at)} · 未知与中断处留空` : "自本版本部署起采样，不补造历史。";
-  if (!valid.length) {add("text",{x:w/2,y:58,"text-anchor":"middle"},"暂无有效收益采样");return;}
+  const note=$("#curve-note");
+  note.hidden=!ui.performanceError;
+  note.textContent=ui.performanceError ? `曲线更新失败：${ui.performanceError}` : "";
+  $("#curve-status").textContent = valid.length ? "" : ui.performanceError ? "更新失败" : "";
+  if (!valid.length) {add("text",{x:w/2,y:58,"text-anchor":"middle"},"暂无收益数据");return;}
   const values=valid.map(p=>Number(p.pnl)),min=Math.min(0,...values),max=Math.max(0,...values),pad=Math.max((max-min)*.15,.01);
   const from=points[0].at,to=points.at(-1).at;
   const x=t=>left+(to === from ? 0.5 : (t-from)/(to-from))*(w-left-right), y=v=>top+(max+pad-v)/(max-min+2*pad)*(h-top-bottom);
@@ -1133,20 +1495,32 @@ function drawCurve() {
   }
   const selected=ui.chartIndex===null?valid.at(-1):valid[Math.min(valid.length-1,ui.chartIndex)];
   add("circle",{cx:x(selected.at),cy:y(Number(selected.pnl)),r:3,class:"curve-point"});
-  if(ui.chartIndex!==null){add("line",{x1:x(selected.at),x2:x(selected.at),y1:top,y2:h-bottom,class:"curve-guide"});$("#curve-status").textContent=`${formatClock(selected.at)} · ${formatMoney(selected.pnl,true)}`;}
-  const dateLabel=t=>from===to?formatClock(t):new Date(from).toDateString()===new Date(to).toDateString()?formatClock(t).slice(0,5):formatDate(t);
-  add("text",{x:left,y:h-3,"text-anchor":"start"},dateLabel(from));if(to!==from)add("text",{x:w-right,y:h-3,"text-anchor":"end"},dateLabel(to));
+  const utcDay=p=>new Intl.DateTimeFormat("zh-CN",{timeZone:"UTC",month:"2-digit",day:"2-digit"}).format(p.bucket*86400000);
+  if(ui.chartIndex!==null){add("line",{x1:x(selected.at),x2:x(selected.at),y1:top,y2:h-bottom,class:"curve-guide"});$("#curve-status").textContent=`${ui.curveGranularity==="D"?`${utcDay(selected)} UTC`:formatDate(selected.at)} · ${formatMoney(selected.pnl,true)}`;}
+  const dateLabel=p=>ui.curveGranularity==="D"?utcDay(p):from===to?formatClock(p.at):new Date(from).toDateString()===new Date(to).toDateString()?formatClock(p.at).slice(0,5):formatDate(p.at);
+  add("text",{x:left,y:h-3,"text-anchor":"start"},dateLabel(points[0]));if(to!==from)add("text",{x:w-right,y:h-3,"text-anchor":"end"},dateLabel(points.at(-1)));
 }
+
+function curvePoints() {
+  return ui.performance?.series?.[ui.curveGranularity] || ui.performance?.points || [];
+}
+
+for (const scale of document.querySelectorAll("[data-curve-scale]")) scale.addEventListener("click", () => {
+  ui.curveGranularity=scale.dataset.curveScale;
+  ui.chartIndex=null;
+  for (const other of document.querySelectorAll("[data-curve-scale]")) other.setAttribute("aria-pressed",String(other===scale));
+  drawCurve();
+});
 
 $("#equity-chart").addEventListener("pointermove",event=>{
   if(event.pointerType!=="mouse"&&!event.buttons)return;
-  const points=curveSegments(ui.performance?.points || []).flat();if(!points.length)return;
-  const box=event.currentTarget.getBoundingClientRect();const all=ui.performance.points;
+  const all=curvePoints(),points=curveSegments(all).flat();if(!points.length)return;
+  const box=event.currentTarget.getBoundingClientRect();
   const target=all[0].at+Math.max(0,Math.min(1,(event.clientX-box.left-30)/(box.width-40)))*(all.at(-1).at-all[0].at);
   ui.chartIndex=points.reduce((best,p,i)=>Math.abs(p.at-target)<Math.abs(points[best].at-target)?i:best,0);drawCurve();
 });
 $("#equity-chart").addEventListener("pointerleave",()=>{ui.chartIndex=null;drawCurve();});
-$("#equity-chart").addEventListener("keydown",e=>{if(!["ArrowLeft","ArrowRight"].includes(e.key))return;e.preventDefault();const n=curveSegments(ui.performance?.points||[]).flat().length;ui.chartIndex=Math.max(0,Math.min(n-1,(ui.chartIndex??n-1)+(e.key==="ArrowLeft"?-1:1)));drawCurve();});
+$("#equity-chart").addEventListener("keydown",e=>{if(!["ArrowLeft","ArrowRight"].includes(e.key))return;e.preventDefault();const n=curveSegments(curvePoints()).flat().length;if(!n)return;ui.chartIndex=Math.max(0,Math.min(n-1,(ui.chartIndex??n-1)+(e.key==="ArrowLeft"?-1:1)));drawCurve();});
 new ResizeObserver(drawCurve).observe($("#equity-chart"));
 $("#status-toggle").addEventListener("click",()=>{const el=$("#runtime-status");el.hidden=!el.hidden;$("#status-toggle").setAttribute("aria-expanded",String(!el.hidden));});
 for (const tab of document.querySelectorAll('.view-tabs [role="tab"]')) tab.addEventListener("click",()=>{

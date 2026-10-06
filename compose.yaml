@@ -15,6 +15,7 @@ services:
       PM_UI_PASSWORD: ${PM_UI_PASSWORD:?Set a UI password of at least 16 characters}
       PM_ALLOWED_HOSTS: ${PM_ALLOWED_HOSTS:-localhost,127.0.0.1}
       PM_LIVE_ENABLED: "false"
+      PM_TRUST_HTTPS_PROXY: ${PM_TRUST_HTTPS_PROXY:-false}
       PM_DATA_DIR: /data
     volumes:
       - ./runtime/server:/data

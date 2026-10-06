@@ -17,11 +17,35 @@ export function displayStatus(dashboard, { lastSuccess = 0, error = null, now = 
   };
 }
 
+export function modeSwitchDecision({ displayMode, controlPending, configDirty }) {
+  if (controlPending) return { nextMode: null, error: "当前操作正在处理，请稍后再切换" };
+  if (configDirty) return { nextMode: null, error: "有未保存设置，请先保存；如需放弃草稿，可刷新页面后切换模式" };
+  return { nextMode: displayMode === "TEST" ? "LIVE" : "TEST", error: null };
+}
+
+export function walletOriginSecure({ protocol, hostname }) {
+  return protocol === "https:" || (
+    protocol === "http:" && ["localhost", "127.0.0.1", "[::1]", "testserver"].includes(hostname)
+  );
+}
+
+export function liveWalletAccountVerified({ dashboard, wallet, walletAt, error, now = Date.now() }) {
+  return Boolean(
+    dashboard?.liveExecutionEnabled && wallet?.configured && wallet?.unlocked && wallet?.enabled && wallet?.readiness?.ready === true &&
+    !error && now - walletAt < 20_000 && !["BLOCKED", "LOCKED", "ERROR"].includes(wallet?.status)
+  );
+}
+
 export function curveSegments(points) {
   const segments = []; let segment = [], previous = null;
   for (const p of points) {
     const valid = p.pnl !== null && p.pnl !== undefined && Number.isFinite(Number(p.pnl)) && Number.isFinite(p.at);
-    if (!valid || previous && (previous.session !== p.session || p.at <= previous.at || p.at - previous.at > 90000)) {
+    const buckets = previous && Number.isInteger(previous.bucket) && Number.isInteger(p.bucket);
+    const interrupted = previous && (
+      previous.session !== p.session || p.at <= previous.at || p.breakBefore ||
+      (buckets ? p.bucket !== previous.bucket + 1 : p.at - previous.at > 90000)
+    );
+    if (!valid || interrupted) {
       if (segment.length) segments.push(segment);
       segment = [];
     }

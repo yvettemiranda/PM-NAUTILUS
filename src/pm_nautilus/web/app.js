@@ -1227,6 +1227,7 @@ $("#config-toggle").addEventListener("click", () => {
     renderPreferences(ui.preferences, ui.dashboard.strategy);
   }
   setConfigOpen(open);
+  if (open) $("#config-panel").scrollIntoView({behavior: "smooth", block: "start"});
 });
 
 $("#config-close").addEventListener("click", () => {

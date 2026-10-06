@@ -1,6 +1,5 @@
 """Web onboarding must not expose secrets or silently start LIVE."""
 
-import base64
 import importlib
 import stat
 import threading
@@ -198,13 +197,11 @@ def test_web_backup_restores_wallet_and_live_rules_on_fresh_server(tmp_path, mon
 
     destination = tmp_path / "destination"
     with TestClient(create_app(destination, public_data=False)) as client:
+        password = _payload()["vaultPassword"].encode("utf-8")
         response = client.post(
             "/api/live/wallet/restore",
-            json={
-                "bundleBase64": base64.b64encode(bundle).decode("ascii"),
-                "vaultPassword": _payload()["vaultPassword"],
-            },
-            headers=_csrf(client),
+            content=len(password).to_bytes(2, "big") + password + bundle,
+            headers=_csrf(client) | {"content-type": "application/octet-stream"},
         )
         assert response.status_code == 200, response.text
         assert response.json()["status"] == "LOCKED"

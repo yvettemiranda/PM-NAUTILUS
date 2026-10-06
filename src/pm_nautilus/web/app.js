@@ -48,8 +48,8 @@ const ui = {
 const POSITION_PREVIEW_LIMIT = 20;
 const WALLET_REFRESH_MS = 15_000;
 const WALLET_ACTION_TIMEOUT_MS = 90_000;
-const BACKUP_ACTION_TIMEOUT_MS = 300_000;
-const MAX_BACKUP_UPLOAD_BYTES = 128 * 1024 * 1024;
+const BACKUP_ACTION_TIMEOUT_MS = 1_800_000;
+const MAX_BACKUP_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 
 const TRADE_RECORD_REFRESH_MS = 3_000;
 const CATEGORY_LABELS_ZH = {
@@ -518,6 +518,12 @@ $("#wallet-backup-form").addEventListener("submit", async (event) => {
   setButtonPending(button, true, "打包中");
   renderLiveWallet();
   try {
+    const saveHandle = typeof window.showSaveFilePicker === "function"
+      ? await window.showSaveFilePicker({
+        suggestedName: "pm-nautilus-live.pmnb",
+        types: [{description: "加密备份", accept: {"application/octet-stream": [".pmnb"]}}],
+      })
+      : null;
     const response = await fetch("/api/live/wallet/backup", {
       method: "POST",
       headers: {"content-type": "application/json", "x-pm-csrf": csrfToken},
@@ -529,17 +535,22 @@ $("#wallet-backup-form").addEventListener("submit", async (event) => {
       const error = await response.json();
       throw new Error(error.error || `备份失败（${response.status}）`);
     }
-    const url = URL.createObjectURL(await response.blob());
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "pm-nautilus-live.pmnb";
-    document.body.append(link);
-    link.click();
-    link.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    if (saveHandle && response.body) {
+      const writable = await saveHandle.createWritable();
+      await response.body.pipeTo(writable);
+    } else {
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "pm-nautilus-live.pmnb";
+      document.body.append(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    }
     showMessage("加密备份已下载，请妥善保存");
   } catch (error) {
-    showMessage(error.message || "备份失败", true);
+    if (error.name !== "AbortError") showMessage(error.message || "备份失败", true);
   } finally {
     clearWalletSecrets();
     ui.walletPending = false;
@@ -547,15 +558,6 @@ $("#wallet-backup-form").addEventListener("submit", async (event) => {
     renderLiveWallet();
   }
 });
-
-function backupFileBase64(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error("无法读取备份文件"));
-    reader.onload = () => resolve(String(reader.result).split(",", 2)[1]);
-    reader.readAsDataURL(file);
-  });
-}
 
 $("#wallet-restore-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -569,12 +571,18 @@ $("#wallet-restore-form").addEventListener("submit", async (event) => {
   renderLiveWallet();
   let failed = false;
   try {
-    const bundleBase64 = await backupFileBase64(file);
-    const wallet = await api("/api/live/wallet/restore", {
+    const passwordBytes = new TextEncoder().encode($("#wallet-restore-password").value);
+    if (passwordBytes.length < 12 || passwordBytes.length > 16_384) throw new Error("备份密码格式无效");
+    const length = Uint8Array.of(passwordBytes.length >> 8, passwordBytes.length & 255);
+    const response = await fetch("/api/live/wallet/restore", {
       method: "POST",
-      body: JSON.stringify({bundleBase64, vaultPassword: $("#wallet-restore-password").value}),
+      headers: {"content-type": "application/octet-stream", "x-pm-csrf": csrfToken},
+      body: new Blob([length, passwordBytes, file], {type: "application/octet-stream"}),
       signal: AbortSignal.timeout(BACKUP_ACTION_TIMEOUT_MS),
     });
+    csrfToken = response.headers.get("x-pm-csrf") || csrfToken;
+    const wallet = await response.json();
+    if (!response.ok) throw new Error(wallet.error || `恢复失败（${response.status}）`);
     ui.wallet = wallet;
     ui.walletAt = Date.now();
     ui.walletError = null;

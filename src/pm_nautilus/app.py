@@ -2,18 +2,18 @@
 
 import argparse
 import base64
-import binascii
 import fcntl
 import json
 import os
 import secrets
+import tempfile
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import asyncio
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import Preferences
@@ -25,6 +25,16 @@ from .views import dashboard, records
 from .performance import PerformanceSampler
 from .wallet_vault import VaultError, derive_signer, read_public_metadata, read_vault, write_vault
 from .live_readiness import run_readiness
+
+
+class _LiveBundleResponse(FileResponse):
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            from .live_backup import cleanup_live_bundle_file
+
+            cleanup_live_bundle_file(self.path)
 
 
 def create_app(data_dir=None, public_data=True, test_clock=None):
@@ -632,43 +642,82 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         async with wallet_lock:
             if not vault_path.is_file():
                 raise ValueError("尚未配置加密钱包")
-            from .live_backup import export_live_bundle
+            from .live_backup import export_live_bundle_file
 
             store = cold.get("LIVE") or runtimes["LIVE"].store
-            bundle = export_live_bundle(store, vault_path, payload["vaultPassword"])
-            return Response(
-                content=bundle,
+            bundle_path = await asyncio.to_thread(
+                export_live_bundle_file, store, vault_path, payload["vaultPassword"]
+            )
+            return _LiveBundleResponse(
+                path=bundle_path,
                 media_type="application/octet-stream",
-                headers={"Content-Disposition": 'attachment; filename="pm-nautilus-live.pmnb"'},
+                filename="pm-nautilus-live.pmnb",
             )
 
     @app.post("/api/live/wallet/restore")
     async def restore_live_wallet(request: Request):
         require_secure_wallet_request(request)
-        from .live_backup import MAX_BUNDLE, restore_live_bundle
+        from .live_backup import MAX_BUNDLE, restore_live_bundle_file
 
-        maximum = (MAX_BUNDLE * 4 // 3) + 8192
-        raw = bytearray()
-        async for chunk in request.stream():
-            if len(raw) + len(chunk) > maximum:
-                raise ValueError("备份文件超过网页恢复大小限制")
-            raw.extend(chunk)
-        try:
-            payload = json.loads(raw)
-            if not isinstance(payload, dict) or set(payload) != {"bundleBase64", "vaultPassword"}:
-                raise ValueError
-            bundle = base64.b64decode(payload["bundleBase64"], validate=True)
-            password_input = payload["vaultPassword"]
-        except (ValueError, TypeError, UnicodeError, binascii.Error):
-            raise ValueError("备份输入格式无效") from None
-        if not isinstance(password_input, str):
-            raise ValueError("请填写备份密码")
-        async with wallet_lock:
-            if "LIVE" in runtimes or legacy_live_enabled:
-                raise ValueError("LIVE 已启用，不能在运行中恢复账本")
-            restore_live_bundle(bundle, password_input, cold["LIVE"], vault_path)
-            wallet_state.update(settings=None, metadata=None, readiness=None, error=None)
-            return wallet_public()
+        if request.headers.get("content-type", "").split(";", 1)[0] != "application/octet-stream":
+            raise ValueError("备份上传格式无效")
+        with tempfile.NamedTemporaryFile(
+            prefix=".pm-live-upload-", suffix=".pmnb", dir=root / "LIVE", delete=False
+        ) as temporary:
+            upload_path = Path(temporary.name)
+            header = bytearray()
+            password_size = None
+            password_input = None
+            uploaded = 0
+            try:
+                async for chunk in request.stream():
+                    remaining = memoryview(chunk)
+                    while remaining:
+                        if password_size is None:
+                            taken = min(2 - len(header), len(remaining))
+                            header.extend(remaining[:taken])
+                            remaining = remaining[taken:]
+                            if len(header) < 2:
+                                continue
+                            password_size = int.from_bytes(header, "big")
+                            header.clear()
+                            if not 12 <= password_size <= 16_384:
+                                raise ValueError("备份密码格式无效")
+                        if password_input is None:
+                            taken = min(password_size - len(header), len(remaining))
+                            header.extend(remaining[:taken])
+                            remaining = remaining[taken:]
+                            if len(header) < password_size:
+                                continue
+                            try:
+                                password_input = header.decode("utf-8")
+                            except UnicodeError:
+                                raise ValueError("备份密码格式无效") from None
+                            header.clear()
+                        if remaining:
+                            uploaded += len(remaining)
+                            if uploaded > MAX_BUNDLE:
+                                raise ValueError("备份文件超过网页恢复大小限制")
+                            temporary.write(remaining)
+                            break
+                if password_input is None or uploaded == 0:
+                    raise ValueError("备份输入格式无效")
+                temporary.flush()
+                os.fsync(temporary.fileno())
+                async with wallet_lock:
+                    if "LIVE" in runtimes or legacy_live_enabled:
+                        raise ValueError("LIVE 已启用，不能在运行中恢复账本")
+                    await asyncio.to_thread(
+                        restore_live_bundle_file,
+                        upload_path,
+                        password_input,
+                        cold["LIVE"],
+                        vault_path,
+                    )
+                    wallet_state.update(settings=None, metadata=None, readiness=None, error=None)
+                    return wallet_public()
+            finally:
+                upload_path.unlink(missing_ok=True)
 
     @app.get("/api/{mode}/preferences")
     async def get_preferences(mode: str):
@@ -683,15 +732,22 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             payload["selectedCategoryIds"] = payload.pop("selectedCategories")
         if mode == "LIVE" and capital is not None:
             raise ValueError("LIVE资金来自实际账户，不能设置模拟资金")
-        count = 0
-        if mode in runtimes:
-            count = runtimes[mode].update_preferences(payload, capital)
-            if public_data:
-                await services[mode].sync_subscriptions()
-        else:
-            prefs = Preferences(**(cold[mode].get("preferences") | payload))
-            cold[mode].put("preferences", prefs.model_dump(mode="json"))
-        return view(mode) | {"cancelledBuyCount": count}
+
+        async def save():
+            count = 0
+            if mode in runtimes:
+                count = runtimes[mode].update_preferences(payload, capital)
+                if public_data:
+                    await services[mode].sync_subscriptions()
+            else:
+                prefs = Preferences(**(cold[mode].get("preferences") | payload))
+                cold[mode].put("preferences", prefs.model_dump(mode="json"))
+            return view(mode) | {"cancelledBuyCount": count}
+
+        if mode == "LIVE":
+            async with wallet_lock:
+                return await save()
+        return await save()
 
     @app.post("/api/{mode}/start")
     async def start(mode: str):

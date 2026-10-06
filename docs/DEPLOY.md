@@ -139,6 +139,8 @@ cd /opt/pm-nautilus
 
 网页钱包版本的 `runtime/server/wallet/live.vault` 应与 LIVE 账本保持同一份备份；若是旧式手工加密凭据部署，另须备份 `/etc/pm-nautilus/live.json.age`，且不得复制 `/run/pm-nautilus/live.json` 明文。账本快照若用 age 口令模式，须保存对应口令；若用 recipient 公钥模式，须保存对应 identity 私钥。备份及解锁文件不能上传 Git。备份时不要把运行中的单个 `.sqlite` 拷贝而遗漏 WAL。LIVE 账本可能含待广播的已签名交易原文，仍按敏感数据处理。
 
+网页 `.pmnb` 会压缩并加密同一时点的 LIVE 账本，当前接受最多 4 GiB 原始数据库、2 GiB 加密包；旧版小文件 `.pmnb` 仍可恢复。网页下载在支持的浏览器中直接写入用户选择的文件，上传则在服务器数据卷中暂存。下载前服务器需容纳快照和加密包；上传恢复时还需容纳上传包、解密内容和解压后的账本。空间不足或超过上述上限时，请由管理员停旧实例，使用本节的一致性停机备份迁移。
+
 新服务器恢复时，先确保旧实例已停止；克隆并固定目标代码提交，然后在**停止应用**的目录中把最新加密快照通过管道解密并解包，不写出明文压缩包：
 
 ```bash
@@ -170,7 +172,7 @@ sudo chown -R 10001:10001 runtime/server
 
 新版本的日常操作入口是同一个 HTTPS 网页。默认 Compose 仍写着 `PM_LIVE_ENABLED=false`；这表示应用开机后不自动连接真实钱包。用户切到 LIVE 页面只是查看，不会下单。**无需运行 `compose.live.yaml`、`deploy/live-secrets.py` 或进入服务器解锁。**这些旧文件仅供尚未迁移的旧式部署参考，不能与网页钱包方式同时启用。
 
-安装者先按前文部署基础 Compose、Nginx HTTPS、至少 16 字符的 UI 登录密码，并保留服务器本地 `compose.override.yaml`。Nginx 必须覆写 `X-Forwarded-Proto`，应用容器端口仅绑定宿主机回环；仅此可信路径在服务器 `.env` 设置 `PM_TRUST_HTTPS_PROXY=true`。公网钱包操作在后端也强制要求 HTTPS。加密备份恢复可能超过 Nginx 默认的 1 MiB 上传限制，反代应按 `deploy/nginx.conf.example` **只对** `/api/live/wallet/restore` 放宽至 180 MiB 并允许较长上传时间。初次服务器安装、证书和 Docker 仍需管理员完成一次；此后用户在网页完成日常钱包操作。
+安装者先按前文部署基础 Compose、Nginx HTTPS、至少 16 字符的 UI 登录密码，并保留服务器本地 `compose.override.yaml`。Nginx 必须覆写 `X-Forwarded-Proto`，应用容器端口仅绑定宿主机回环；仅此可信路径在服务器 `.env` 设置 `PM_TRUST_HTTPS_PROXY=true`。公网钱包操作在后端也强制要求 HTTPS。加密备份恢复采用流式传输，反代应按 `deploy/nginx.conf.example` **只对** `/api/live/wallet/restore` 放宽上传上限和时间，并关闭代理请求缓冲；`/api/live/wallet/backup` 也应单独延长下载等待时间。服务器需要有足够剩余磁盘容纳临时备份和账本快照。初次服务器安装、证书和 Docker 仍需管理员完成一次；此后用户在网页完成日常钱包操作。
 
 程序目前只支持 Polygon 主网普通钱包（签名地址和资金地址相同）或单签 Safe（签名地址是唯一 owner，阈值 1）。网页会根据私钥或 **12 词 BIP39 助记词**派生签名地址，要求填 Polymarket 显示的公开资金地址，并只读核对两者的归属。它会调用固定版本 SDK 创建或派生 CLOB API 凭据；这一步有账户认证签名，但不签订单或链上交易。其他钱包类型会被拒绝，不能通过修改地址或签名类型强行接入。
 

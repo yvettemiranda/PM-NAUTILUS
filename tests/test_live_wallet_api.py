@@ -194,6 +194,7 @@ def test_web_backup_restores_wallet_and_live_rules_on_fresh_server(tmp_path, mon
         assert response.status_code == 200, response.text[:200]
         bundle = response.content
         assert KEY.encode() not in bundle
+        assert list((source / "LIVE").glob(".pm-live-export-*")) == []
 
     destination = tmp_path / "destination"
     with TestClient(create_app(destination, public_data=False)) as client:

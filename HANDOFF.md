@@ -2,6 +2,12 @@
 
 本页按时间倒序记录；第一节是最新部署状态，后文的“当前”或“待部署”只代表各节记录时的情况。
 
+## LIVE 设置齿轮修复与服务器地区实测（2026-10-06，已部署）
+
+- LIVE 钱包区域较长时，右上角齿轮原先只展开下方的交易设置，页面仍停留在顶部，看起来像没有反应。提交 `7802c181a4966add09b8045cce686a5ccbfbae45` 在展开后滚动到设置区域，并更新前端脚本版本以刷新浏览器缓存；关闭行为和交易规则不变。本地 JS 语法及 7 项前端测试通过，[GitHub Actions run 37467946285](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/37467946285) 成功，提交已在公开仓库 `main`。
+- 腾讯云服务器已取得该提交、构建并启动对应镜像。停机期间以服务器上的 age 接收公钥加密保存 `runtime/server`、`.env` 和本地 Compose 覆盖：`/opt/pm-nautilus/backups/pre-gear-20261006-2116.tgz.age`，103,361,017 字节、权限 `0600`。备份只留在服务器，未提交 GitHub。21:23 CST 本机 `/api/health` 返回 `status=ok`、`mode=TEST`、`strategyStatus=RUNNING`、`liveExecutionEnabled=false`、`liveWalletStatus=UNCONFIGURED`、`revision=7802c181a4966add09b8045cce686a5ccbfbae45`、`backgroundErrors={}`；Compose 显示该镜像 healthy、零重启。在服务器网页强制刷新后切到 LIVE 视图，点击右上角齿轮，页面实测自动滚动到可见的交易设置；后台仍为 TEST/RUNNING。以上不代表真实实盘验收。
+- 服务器直接请求 Polymarket 官方 `https://polymarket.com/api/geoblock` 返回 `blocked=true`、`country=US`、`region=CA`，出口 IP 为 `43.159.133.129`。当前硅谷出口不能通过 LIVE 新开仓地区核对；换服务器后须从新出口重新检查。没有导入真实钱包、启用 LIVE、签单或进行链上写入。
+
 ## 网页 LIVE 接钱包、H/D 曲线与迁移备份（2026-10-06，已部署）
 
 - 用户要求保留现有策略金额、筛选和止损规则，不新增首轮投入、单笔或笔数上限。TEST 不需要钱包；点击 TEST 可进入 LIVE 查看页，但不会启动交易。LIVE 页提供 12 词助记词或私钥导入、公开资金地址、独立解锁密码、只读账户检查和显式启用；启用后仍为 PAUSED，只有用户再点 ▶ 才开始新买。既有 LIVE 仓位在进程重启后的锁定期不受程序维护，页面显示“未核对”，不能误认为零持仓。

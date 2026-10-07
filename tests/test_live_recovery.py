@@ -234,7 +234,7 @@ def test_confirmed_spend_cannot_reuse_stale_cash_for_second_event(tmp_path):
     asyncio.run(run())
 
 
-def test_live_cash_fak_rounds_limit_down_to_tick_without_raising_budget(tmp_path):
+def test_live_cash_fak_uses_preview_depth_limit_without_raising_budget(tmp_path):
     from dataclasses import replace
     from types import SimpleNamespace
     from unittest.mock import Mock
@@ -252,16 +252,20 @@ def test_live_cash_fak_rounds_limit_down_to_tick_without_raising_budget(tmp_path
             await flush()
             oid = next(iter(r.store.intents()))
             order = r.native.cache.order(ClientOrderId(oid))
+            r.client.wallet = SimpleNamespace(buy_preflight=Mock())
             r.client._http_client.create_market_order = Mock(
-                return_value=SimpleNamespace(takerAmount=10_000_000)
+                return_value=SimpleNamespace(makerAmount=1_000_000, takerAmount=10_000_000)
             )
             r.client._expected_venue_order_id = Mock(return_value=VenueOrderId("venue-1"))
             r.client._post_signed_order = AsyncMock()
             r.client._check_buy_account = AsyncMock(return_value=True)
             await r.client._submit_market_order(SimpleNamespace(order=order), None)
             args = r.client._http_client.create_market_order.call_args.args[0]
-            assert args.price == 0.98 and args.amount == 1 and args.order_type == "FAK"
+            assert args.price == 0.1 and args.amount == 1 and args.order_type == "FAK"
             assert r.store.intent(oid)["cash"] == 1_000_000
+            assert r.store.intent(oid)["execution_limit"] == 100_000
+            signed_base = r.client._post_signed_order.await_args.kwargs["base_quantity"]
+            assert str(signed_base.as_decimal()) == "100.0001"
             assert not r.business["cycles"]  # Signing result never becomes a Fill.
 
     asyncio.run(run())

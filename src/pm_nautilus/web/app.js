@@ -1,4 +1,4 @@
-import { displayStatus, curveSegments, modeSwitchDecision, walletOriginSecure, liveWalletAccountVerified } from "./ui-state.js?v=20261006-live-web1";
+import { displayStatus, curveSegments, modeSwitchDecision, walletOriginSecure, liveWalletAccountVerified, liveRunSummary, redemptionApprovalAction } from "./ui-state.js?v=20261007-readiness1";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -37,6 +37,9 @@ const ui = {
   tradeRecordTotalCount: 0,
   tradeRecordsError: null,
   tradeRecordsLoadedAt: 0,
+  tradeRecordsLocked: false,
+  liveStrategyStatus: null,
+  liveStatusAt: 0,
   configDirty: false,
   loading: false,
   reloadRequested: false,
@@ -342,10 +345,17 @@ function renderLiveWallet() {
     return `<li data-status="${checkStatus}">${escapeHtml(check.message || check.id || "待检查")}</li>`;
   }).join("");
   $("#wallet-check").disabled = !secure || ui.walletPending || ui.walletLoading;
+  const approve = $("#wallet-approve-redemption");
+  const approvalAction = redemptionApprovalAction(wallet, {
+    dashboardReady: Boolean(ui.dashboard), secure, pending: ui.walletPending, loading: ui.walletLoading,
+  });
+  approve.hidden = !approvalAction.visible;
+  approve.disabled = approvalAction.disabled;
+  approve.textContent = approvalAction.label;
   $("#wallet-rules-summary").textContent = ui.preferences
     ? `每 Event 每轮 ${formatMoney(ui.preferences.orderAmount)} · 主动止损${ui.preferences.stopLossEnabled ? "开启" : "关闭"}`
     : "正在读取交易规则…";
-  const ready = wallet?.readiness?.ready === true && status === "READY";
+  const ready = wallet?.readiness?.ready === true && status === "READY" && Boolean(ui.dashboard && ui.preferences);
   $("#wallet-confirm-rules").disabled = !secure || !ready || ui.walletPending || ui.configDirty;
   $("#wallet-enable").disabled = !secure || !ready || !$("#wallet-confirm-rules").checked || ui.walletPending || ui.configDirty;
   $("#wallet-backup-form").hidden = !wallet?.configured;
@@ -369,7 +379,7 @@ function refreshWalletDependentViews() {
 function renderCashNote() {
   const account = liveAccountVisible() ? ui.dashboard?.portfolio : null;
   $("#cash-note").textContent = account
-    ? `可用 ${formatMoney(account.availableCash)} · 待成交订单占用 ${formatMoney(account.reservedCash)} · 待赎回 ${formatMoney(account.pendingRedemption)}`
+    ? `可用 ${formatMoney(account.availableCash)} · 待成交订单占用 ${formatMoney(account.reservedCash)} · 待赎回 ${formatMoney(account.pendingRedemption)}${Number(account.failedRedemption) > 0 ? ` · 失败赎回待核对 ${formatMoney(account.failedRedemption)}` : ""}`
     : "账户未核对";
   $("#redemption-status").textContent = account
     ? (ui.dashboard?.redemptions || []).map(c => `${c.condition_id.slice(0, 10)}… ${c.state}${c.error ? `：${c.error}` : ""}`).join(" · ")
@@ -496,6 +506,16 @@ $("#wallet-unlock-form").addEventListener("submit", (event) => {
 });
 $("#wallet-check").addEventListener("click", () => {
   void postLiveWallet("check", {}, $("#wallet-check"), "检查中", "账户检查已更新");
+});
+$("#wallet-approve-redemption").addEventListener("click", async () => {
+  if (redemptionApprovalAction(ui.wallet, {
+    dashboardReady: Boolean(ui.dashboard), secure: walletOriginSecure(window.location),
+    pending: ui.walletPending, loading: ui.walletLoading,
+  }).disabled) return;
+  if (!window.confirm("确认在 Polygon 上签名并支付 gas，授权当前钱包赎回本程序的 CTF 持仓？")) return;
+  await postLiveWallet("approve-redemption", {confirmation: "APPROVE REDEMPTION"},
+    $("#wallet-approve-redemption"), "处理中", "赎回授权状态已更新");
+  void loadLiveWallet();
 });
 $("#wallet-refresh").addEventListener("click", () => { void loadLiveWallet(); });
 $("#wallet-confirm-rules").addEventListener("change", renderLiveWallet);
@@ -647,9 +667,19 @@ function renderRunControls() {
   $("#capital-label").textContent = liveView ? "实际账户余额（只读）" : "总模拟资金";
   $("#settings-mode").textContent = `${ui.displayMode} 设置`;
   reset.title = paused ? "" : "重置前必须先暂停TEST";
+  $("#config-toggle").disabled = !ui.dashboard;
+  $("#save-config").disabled = !ui.dashboard || !ui.preferences || ui.controlPending;
+  $("#sort-toggle").disabled = !ui.dashboard || !ui.preferences || ui.controlPending;
 }
 
 function renderPositions(positions = []) {
+  if (!ui.dashboard) {
+    $("#tab-position-count").textContent = "—";
+    $("#position-count").textContent = "读取中";
+    $("#position-list-controls").hidden = true;
+    $("#positions").innerHTML = '<p class="empty-state">正在读取持仓状态…</p>';
+    return;
+  }
   if (!liveAccountVisible()) {
     $("#tab-position-count").textContent = "—";
     $("#position-count").textContent = "未核对";
@@ -710,7 +740,7 @@ function renderPositions(positions = []) {
             <summary class="position-summary"><div class="market-copy"><span class="position-title">${escapeHtml(position.marketQuestion || position.eventTitle)}</span><span class="position-sub">${escapeHtml(position.direction)} · 买入均价 ${formatCents(position.averageBuyPrice)}</span></div><div class="position-price"><strong>${currentSellPrice}</strong><span>目标 ${targetLabel}</span></div></summary>
             <div class="position-detail">
               <div class="row-heading"><div class="market-copy">${marketTitleMarkup(position)}${eventTitle}</div></div>
-              <div class="cycle-summary"><span>持仓数量 <strong>${formatQuantity(position.quantity)}</strong></span><span>各档目标 <strong>${targets.map(formatCents).join("、") || "—"}</strong></span></div>
+              <div class="cycle-summary"><span>持仓数量 <strong>${formatQuantity(position.quantity)}</strong></span><span>当前买盘可卖 <strong>${formatQuantity(position.executableSellQuantity)} · ${formatMoney(position.executableSellValue)}</strong></span><span>各档目标 <strong>${targets.map(formatCents).join("、") || "—"}</strong></span></div>
             <div class="cycle-summary">
               <span>Event 周期 <strong>${escapeHtml(cycleStatus)}</strong></span>
               <span>冻结预算 <strong>${position.cycleBudget === null ? "—" : formatMoney(position.cycleBudget)}</strong></span>
@@ -744,12 +774,24 @@ function renderTradeRecords() {
     ui.tradeRecordsExpanded ? "收起交易记录" : "展开交易记录",
   );
   content.hidden = !ui.tradeRecordsExpanded;
-  count.textContent = ui.tradeRecordsLoading && !ui.tradeRecordsLoaded
+  const locked = ui.displayMode === "LIVE" && (ui.tradeRecordsLocked || ui.dashboard?.positionsAvailable === false);
+  count.textContent = locked
+    ? "已锁定"
+    : ui.tradeRecordsLoading && !ui.tradeRecordsLoaded
     ? "读取中"
     : ui.tradeRecordsLoaded
       ? `${formatCount(ui.tradeRecordTotalCount)}条`
       : "展开";
   if (!ui.tradeRecordsExpanded) return;
+
+  if (locked) {
+    $("#trade-records").innerHTML = '<p class="empty-state">LIVE 已锁定，交易历史暂不可读</p>';
+    return;
+  }
+  if (!ui.dashboard && !ui.tradeRecordsLoaded) {
+    $("#trade-records").innerHTML = '<p class="empty-state">正在读取交易记录状态…</p>';
+    return;
+  }
 
   if (ui.tradeRecordsLoading && !ui.tradeRecordsLoaded) {
     $("#trade-records").innerHTML = '<p class="empty-state">正在读取交易记录…</p>';
@@ -818,6 +860,7 @@ async function loadTradeRecords({ silent = false } = {}) {
     if (mode !== ui.displayMode || version !== ui.mutationVersion) return;
     ui.tradeRecords = Array.isArray(response.records) ? response.records : [];
     ui.tradeRecordTotalCount = Number(response.totalCount) || 0;
+    ui.tradeRecordsLocked = response.locked === true;
     ui.tradeRecordsLoaded = true;
     ui.tradeRecordsLoadedAt = Date.now();
   } catch (error) {
@@ -1052,6 +1095,10 @@ function applyDashboard(dashboard) {
   ui.dashboard = dashboard;
   ui.dashboardAt = Date.now();
   ui.dashboardError = null;
+  if (typeof dashboard.liveStrategyStatus === "string") {
+    ui.liveStrategyStatus = dashboard.liveStrategyStatus;
+    ui.liveStatusAt = ui.dashboardAt;
+  }
   if (ui.displayMode === "LIVE") {
     const ruleKey = JSON.stringify(dashboard.preferences);
     if (ruleKey !== ui.walletRuleKey) {
@@ -1068,6 +1115,7 @@ function applyDashboard(dashboard) {
   ui.displayCandidateCount = dashboard.marketScan.displayEventCount ?? dashboard.marketScan.displayCandidateCount ?? ui.events.length;
   ui.staleCandidateCount = dashboard.marketScan.pendingEventCount ?? dashboard.marketScan.staleCandidateCount ?? 0;
   renderRunControls();
+  renderTradeRecords();
   renderPortfolio(dashboard.portfolio, dashboard.positions);
   renderPositions(dashboard.positions);
   renderCandidates();
@@ -1387,11 +1435,15 @@ $("#mode-toggle").addEventListener("click", () => {
   ui.walletEpoch += 1;
   ui.wallet = null; ui.walletAt = 0; ui.walletError = null; ui.walletRuleKey = null;
   recordMutation();
-  ui.tradeRecordsLoaded = false; ui.tradeRecordsLoadedAt = 0; ui.tradeRecords = [];
+  ui.tradeRecordsLoaded = false; ui.tradeRecordsLoading = false; ui.tradeRecordsLocked = false; ui.tradeRecordsLoadedAt = 0; ui.tradeRecords = [];
   ui.visibleCandidateCount = 20;
   ui.displayMode = decision.nextMode;
-  ui.dashboard = null; ui.dashboardAt = 0; ui.dashboardError = null; ui.strategyStatus = "STOPPED";
+  ui.dashboard = null; ui.dashboardAt = 0; ui.dashboardError = null; ui.strategyStatus = "STOPPED"; ui.preferences = null;
   ui.performance = null; ui.performanceAt = 0; ui.performanceError = null; ui.recordLimit = 20;
+  setConfigOpen(false);
+  $("#initial-capital").value = "";
+  $("#order-amount").value = "";
+  $("#category-options").replaceChildren();
   renderPortfolio(null); renderPositions([]); renderTradeRecords(); drawCurve(); renderStatus();
   $("#candidates").innerHTML = ""; $("#redemption-status").textContent = "";
   renderModeControl();
@@ -1452,11 +1504,16 @@ $("#load-more").addEventListener("click", async () => {
 });
 
 function renderStatus() {
+  const live = liveRunSummary(ui.liveStrategyStatus, {
+    lastSuccess: ui.liveStatusAt, error: ui.dashboardError,
+  });
+  $("#live-run-indicator").textContent = live.text;
+  $("#live-run-indicator").dataset.tone = live.tone;
   const state = displayStatus(ui.dashboard, { lastSuccess: ui.dashboardAt, error: ui.dashboardError });
-  const records = ui.tradeRecordsError ? "error" : ui.tradeRecordsLoadedAt ? "ready" : ui.tradeRecordsLoading ? "waiting" : "unknown";
+  const records = ui.tradeRecordsLocked || ui.displayMode === "LIVE" && ui.dashboard?.positionsAvailable === false ? "locked" : ui.tradeRecordsError ? "error" : ui.tradeRecordsLoadedAt ? "ready" : ui.tradeRecordsLoading ? "waiting" : "unknown";
   for (const [id, value] of [["run-dot", state.run], ["positions-dot", state.feed], ["market-dot", state.scan], ["records-dot", records]]) {
     const dot = $(`#${id}`); dot.dataset.state = value;
-    dot.setAttribute("role", "img"); dot.setAttribute("aria-label", {ready:"正常", waiting:"更新中", error:"异常", off:"未运行", unknown:"未确认"}[value]);
+    dot.setAttribute("role", "img"); dot.setAttribute("aria-label", {ready:"正常", waiting:"更新中", error:"异常", off:"未运行", locked:"已锁定", unknown:"未确认"}[value]);
   }
   $("#connection-warning").textContent = state.warning;
   $("#connection-warning").hidden = !state.warning;
@@ -1466,7 +1523,7 @@ function renderStatus() {
   $("#runtime-status").textContent = runText;
   $("#status-toggle").setAttribute("aria-label", `查看运行状态：${runText}`);
   const info = ui.activeTab === "positions" ? ["行情", `${groups.filter(g=>g.state === "READY").length}/${groups.length} 组就绪 · ${groups.reduce((n,g)=>n+g.readyBookCount,0)}/${groups.reduce((n,g)=>n+g.tokenCount,0)} 盘口完整`, ...groups.map((g,i)=>`组${i+1}：${g.state}，心跳 ${formatClock(g.lastPongAt)}${g.error ? `，${g.error}` : ""}`)] : ui.activeTab === "market" ? ["扫描", `最近完成 ${formatDate(s.lastScanAt)} · ${s.scanning ? "扫描中" : "等待下一轮"}`, s.lastError || s.categoryError || `监控 ${formatCount(ui.displayCandidateCount)} 个事件，当前可交易 ${formatCount(ui.candidateCount)} 个`] : ["同步", `最近成功 ${formatClock(ui.tradeRecordsLoadedAt || null)}`, ui.tradeRecordsError || (ui.tradeRecordsLoaded ? "记录已同步；无新成交也属于正常。" : "打开记录后读取")];
-  $("#module-status-label").textContent = `${info[0]} · ${ui.activeTab === "records" ? ({ready:"已同步",error:"更新失败",waiting:"读取中",unknown:"未读取"}[records]) : ({ready:"正常",error:"需关注",waiting:"更新中",off:"未连接",unknown:"未确认"}[ui.activeTab === "market" ? state.scan : state.feed])}`;
+  $("#module-status-label").textContent = `${info[0]} · ${ui.activeTab === "records" ? ({ready:"已同步",error:"更新失败",waiting:"读取中",locked:"已锁定",unknown:"未读取"}[records]) : ({ready:"正常",error:"需关注",waiting:"更新中",off:"未连接",unknown:"未确认"}[ui.activeTab === "market" ? state.scan : state.feed])}`;
   $("#module-status-detail").textContent = info.slice(1).join("\n");
 }
 
@@ -1493,7 +1550,7 @@ function drawCurve() {
   note.hidden=!ui.performanceError;
   note.textContent=ui.performanceError ? `曲线更新失败：${ui.performanceError}` : "";
   $("#curve-status").textContent = valid.length ? "" : ui.performanceError ? "更新失败" : "";
-  if (!valid.length) {add("text",{x:w/2,y:58,"text-anchor":"middle"},"暂无收益数据");return;}
+  if (!valid.length) {add("text",{x:w/2,y:58,"text-anchor":"middle"},ui.displayMode === "LIVE" && (ui.performance?.locked || ui.dashboard?.positionsAvailable === false) ? "LIVE 已锁定，历史暂不可读" : !ui.dashboard ? "正在读取收益状态…" : "暂无收益数据");return;}
   const values=valid.map(p=>Number(p.pnl)),min=Math.min(0,...values),max=Math.max(0,...values),pad=Math.max((max-min)*.15,.01);
   const from=points[0].at,to=points.at(-1).at;
   const x=t=>left+(to === from ? 0.5 : (t-from)/(to-from))*(w-left-right), y=v=>top+(max+pad-v)/(max-min+2*pad)*(h-top-bottom);

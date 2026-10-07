@@ -7,6 +7,7 @@ and validates the entire bundle before it changes the destination ledger.
 """
 
 import hashlib
+import fcntl
 import json
 import os
 import shutil
@@ -15,6 +16,7 @@ import tempfile
 import zlib
 from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 
 from Crypto.Cipher import AES
 from eth_account import Account
@@ -180,6 +182,53 @@ def export_live_bundle_file(store, vault_path: Path, password: str) -> Path:
     except Exception:
         shutil.rmtree(scratch)
         raise BackupError("LIVE 备份未完成，请稍后重试") from None
+
+
+def export_final_live_bundle_file(data_dir: Path, password: str, destination: Path) -> str:
+    """Export the final LIVE state while holding the application's process lock.
+
+    The caller must leave the old application stopped after this returns. The
+    exclusive lock prevents a concurrent application start during the export.
+    """
+    root = Path(data_dir)
+    destination = Path(destination)
+    database = root / "LIVE" / "state.sqlite"
+    vault = root / "wallet" / "live.vault"
+    if not database.is_file() or not vault.is_file():
+        raise BackupError("LIVE 账本或加密钱包不存在")
+    if not destination.parent.is_dir() or destination.exists() or destination.is_symlink():
+        raise BackupError("最终备份目标目录不存在或文件已存在")
+    bundle_path = None
+    staged_path = None
+    with (root / "process.lock").open("a+b") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise BackupError("旧应用仍在运行；须停机后再取得最终备份") from None
+        try:
+            source = SimpleNamespace(mode="LIVE", path=database)
+            bundle_path = export_live_bundle_file(source, vault, password)
+            with tempfile.NamedTemporaryFile(
+                prefix=".pm-final-", dir=destination.parent, delete=False
+            ) as staged:
+                staged_path = Path(staged.name)
+                digest = hashlib.sha256()
+                with bundle_path.open("rb") as source_file:
+                    while chunk := source_file.read(CHUNK):
+                        staged.write(chunk)
+                        digest.update(chunk)
+                staged.flush()
+                os.fsync(staged.fileno())
+            os.link(staged_path, destination)
+            return digest.hexdigest()
+        except FileExistsError:
+            raise BackupError("最终备份文件已存在，不能覆盖") from None
+        finally:
+            if staged_path is not None:
+                staged_path.unlink(missing_ok=True)
+            if bundle_path is not None:
+                cleanup_live_bundle_file(bundle_path)
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def _decrypt_v2(bundle_path, password, scratch):

@@ -1,8 +1,7 @@
 """PM FAK simulation extension emitting native Nautilus execution/account events.
 
-The stock sandbox charges quote-currency BUY fees and resets matching-book depth.
-This venue-specific execution client implements PM's net-share and consumption
-semantics; orders, event application, positions and portfolio remain Nautilus.
+Orders, event application, positions and portfolio remain Nautilus. The venue
+simulation shares the LIVE cash-fee budget, signed notional and depth semantics.
 """
 
 from decimal import Decimal
@@ -85,7 +84,7 @@ class TestExecution(ExecutionClient):
             fills = plan_buy(
                 b.ask.available(),
                 intent["cash"],
-                intent["limit"],
+                intent.get("execution_limit", intent["limit"]),
                 t.min_size,
                 t.fees,
                 t.tick,

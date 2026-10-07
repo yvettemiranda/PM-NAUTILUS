@@ -28,6 +28,7 @@ async def prepared_order(runtime):
     client._maintain_active_market = AsyncMock()
     client.buy_valid = Mock(return_value=True)
     client._check_buy_account = AsyncMock(return_value=True)
+    client.wallet = SimpleNamespace(buy_preflight=Mock())
     return oid, order
 
 
@@ -65,7 +66,7 @@ def test_failure_after_submitted_but_before_venue_identity_rejects(tmp_path):
             oid, order = await prepared_order(runtime)
             client = runtime.client
             client._http_client.create_market_order = Mock(
-                return_value=SimpleNamespace(takerAmount=10_000_000)
+                return_value=SimpleNamespace(makerAmount=1_000_000, takerAmount=10_000_000)
             )
             client._expected_venue_order_id = Mock(
                 side_effect=ValueError("controlled identity failure")
@@ -94,7 +95,7 @@ def test_missing_expected_venue_identity_rejects_without_post(tmp_path):
             oid, order = await prepared_order(runtime)
             client = runtime.client
             client._http_client.create_market_order = Mock(
-                return_value=SimpleNamespace(takerAmount=10_000_000)
+                return_value=SimpleNamespace(makerAmount=1_000_000, takerAmount=10_000_000)
             )
             client._expected_venue_order_id = Mock(return_value=None)
             client._http_client.post_order = Mock()
@@ -120,7 +121,7 @@ def test_exception_after_post_boundary_keeps_unknown_outcome(tmp_path):
             oid, order = await prepared_order(runtime)
             client = runtime.client
             client._http_client.create_market_order = Mock(
-                return_value=SimpleNamespace(takerAmount=10_000_000)
+                return_value=SimpleNamespace(makerAmount=1_000_000, takerAmount=10_000_000)
             )
             client._expected_venue_order_id = Mock(return_value=VenueOrderId("venue-unknown"))
             client._http_client.post_order = Mock()
@@ -154,7 +155,7 @@ def test_retry_pool_acquire_failure_releases_unposted_reservation(tmp_path):
             oid, order = await prepared_order(runtime)
             client = runtime.client
             client._http_client.create_market_order = Mock(
-                return_value=SimpleNamespace(takerAmount=10_000_000)
+                return_value=SimpleNamespace(makerAmount=1_000_000, takerAmount=10_000_000)
             )
             client._expected_venue_order_id = Mock(return_value=VenueOrderId("venue-unposted"))
             client._http_client.post_order = Mock()
@@ -187,7 +188,7 @@ def test_cancelled_post_result_does_not_release_order(tmp_path):
             oid, order = await prepared_order(runtime)
             client = runtime.client
             client._http_client.create_market_order = Mock(
-                return_value=SimpleNamespace(takerAmount=10_000_000)
+                return_value=SimpleNamespace(makerAmount=1_000_000, takerAmount=10_000_000)
             )
             client._expected_venue_order_id = Mock(return_value=VenueOrderId("venue-cancelled"))
             # The pinned RetryManager reports cancellation as None with no
@@ -226,7 +227,7 @@ def test_cancel_during_inflight_post_keeps_unknown_reservation(tmp_path):
             oid, order = await prepared_order(runtime)
             client = runtime.client
             client._http_client.create_market_order = Mock(
-                return_value=SimpleNamespace(takerAmount=10_000_000)
+                return_value=SimpleNamespace(makerAmount=1_000_000, takerAmount=10_000_000)
             )
             client._expected_venue_order_id = Mock(return_value=VenueOrderId("venue-inflight"))
             entered = Event()

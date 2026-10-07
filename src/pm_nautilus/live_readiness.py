@@ -23,6 +23,16 @@ def _check(name: str, status: str, message: str) -> dict[str, str]:
     return {"id": name, "status": status, "message": message}
 
 
+def _unknown_approval() -> dict[str, Any]:
+    return {
+        "status": "UNKNOWN",
+        "standardApproved": None,
+        "negRiskApproved": None,
+        "pendingTxHash": None,
+        "networkError": False,
+    }
+
+
 def _get_json(client: Any, url: str, *, params: dict | None = None) -> Any:
     response = client.get(url, params=params, headers={"Accept": "application/json"})
     # A redirect could send the request to a different host. Do not follow it
@@ -32,18 +42,60 @@ def _get_json(client: Any, url: str, *, params: dict | None = None) -> Any:
     return response.json()
 
 
-def _private_check(settings, signer, funder, data_dir, preflight) -> dict[str, str]:
+def _private_check(settings, signer, funder, data_dir, preflight):
     try:
         result = preflight(settings, signer, funder, data_dir)
     except Exception:
-        return _check("account", "unknown", "账户检查失败，请核对钱包、网络与实盘记录。")
+        return _check(
+            "account", "unknown", "账户检查失败，请核对钱包、网络与实盘记录。"
+        ), _unknown_approval()
     if not isinstance(result, dict) or type(result.get("canStartNewBuys")) is not bool:
-        return _check("account", "unknown", "账户检查结果不完整，请稍后重试。")
+        return _check("account", "unknown", "账户检查结果不完整，请稍后重试。"), _unknown_approval()
+    approval = result.get("redemptionApproval")
+    if (
+        not isinstance(approval, dict)
+        or approval.get("status") not in {"MISSING", "PENDING", "FAILED", "APPROVED"}
+        or type(approval.get("standardApproved")) is not bool
+        or type(approval.get("negRiskApproved")) is not bool
+        or (
+            approval.get("pendingTxHash") is not None
+            and (
+                not isinstance(approval["pendingTxHash"], str)
+                or not re.fullmatch(r"0x[0-9a-fA-F]{64}", approval["pendingTxHash"])
+            )
+        )
+    ):
+        return _check("account", "unknown", "赎回授权核对结果不完整。"), _unknown_approval()
+    approval = {
+        "status": approval["status"],
+        "standardApproved": approval["standardApproved"],
+        "negRiskApproved": approval["negRiskApproved"],
+        "pendingTxHash": approval.get("pendingTxHash"),
+        "networkError": False,
+    }
     if not result["canStartNewBuys"]:
         if type(result.get("unknownOpenOrderCount")) is int and result["unknownOpenOrderCount"] > 0:
-            return _check("account", "blocked", "账户存在本程序以外的挂单，请先核对。")
-        return _check("account", "blocked", "账户资金、授权或手续费余额尚未满足实盘要求。")
-    return _check("account", "pass", "钱包和账户检查通过。")
+            return _check("account", "blocked", "账户存在本程序以外的挂单，请先核对。"), approval
+        if result.get("redemptionApprovalComplete") is False:
+            return _check("account", "blocked", "赎回适配器授权尚未确认。"), approval
+        if result.get("collateralBalanceSufficient") is False:
+            return _check("account", "blocked", "pUSD 余额不足以覆盖已保存的每轮金额。"), approval
+        if result.get("collateralAllowancePresent") is False:
+            return _check(
+                "account", "blocked", "pUSD 交易授权额度不足以覆盖已保存的每轮金额。"
+            ), approval
+        if result.get("signerGasAvailable") is False:
+            return _check("account", "blocked", "签名钱包的 Polygon POL 余额不足。"), approval
+        return _check(
+            "account", "blocked", "账户资金、授权或手续费余额尚未满足实盘要求。"
+        ), approval
+    if result.get("redemptionApprovalComplete") is not True:
+        return _check("account", "unknown", "赎回授权核对结果不完整。"), _unknown_approval()
+    if approval["status"] != "APPROVED" or not (
+        approval["standardApproved"] and approval["negRiskApproved"]
+    ):
+        return _check("account", "unknown", "赎回授权核对结果不一致。"), _unknown_approval()
+    return _check("account", "pass", "账户只读核对通过。"), approval
 
 
 def _geoblock_check(client) -> dict[str, str]:
@@ -212,7 +264,9 @@ def run_readiness(
     the ledger must equal the full paginated public wallet inventory.
     """
     preflight = private_check if private_check is not None else run_preflight
-    account = _private_check(settings, expected_signer, expected_funder, data_dir, preflight)
+    account, approval = _private_check(
+        settings, expected_signer, expected_funder, data_dir, preflight
+    )
     if http_client is None:
         # Direct outbound requests from this host, no environment proxy and no
         # redirect; the result must describe this server's real trade origin.
@@ -227,4 +281,5 @@ def run_readiness(
         "scope": "READ_ONLY_NO_ORDER_SIGNATURES_OR_WRITES",
         "ready": all(item["status"] == "pass" for item in checks),
         "checks": checks,
+        "redemptionApproval": approval,
     }

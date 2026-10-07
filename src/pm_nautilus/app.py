@@ -51,7 +51,13 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
     legacy_live_enabled = os.getenv("PM_LIVE_ENABLED") == "true"
     vault_path = root / "wallet" / "live.vault"
     wallet_lock = asyncio.Lock()
-    wallet_state = {"settings": None, "metadata": None, "readiness": None, "error": None}
+    wallet_state = {
+        "settings": None,
+        "metadata": None,
+        "readiness": None,
+        "approval": None,
+        "error": None,
+    }
     unlock_failures = []
 
     async def attach(mode, runtime, wallet=None):
@@ -259,6 +265,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             "signatureType": metadata["signature_type"] if metadata else None,
             "identityVerified": bool(wallet_state["metadata"]),
             "readiness": readiness,
+            "redemptionApproval": wallet_state["approval"],
             "error": wallet_state["error"]
             or ("实盘账户需要重新核对" if status == "ERROR" else None),
         }
@@ -303,6 +310,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         if wallet_state["settings"] is None or wallet_state["metadata"] is None:
             raise ValueError("请先解锁钱包")
         wallet_state["readiness"] = None
+        wallet_state["approval"] = None
         metadata = wallet_state["metadata"]
         settings = wallet_state["settings"]
         try:
@@ -327,6 +335,13 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 ],
             }
         wallet_state["readiness"] = result
+        wallet_state["approval"] = result.get("redemptionApproval") or {
+            "status": "UNKNOWN",
+            "standardApproved": None,
+            "negRiskApproved": None,
+            "pendingTxHash": None,
+            "networkError": False,
+        }
         return result
 
     async def verified_vault_settings(password_input):
@@ -369,8 +384,10 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
 
     def view(mode, limit=20):
         mode = mode_name(mode)
+        live_status = runtimes["LIVE"].status if "LIVE" in runtimes else "LOCKED"
         if mode in runtimes:
             data = dashboard(runtimes[mode], services[mode], limit, "LIVE" in runtimes)
+            data["liveStrategyStatus"] = live_status
             if mode == "LIVE":
                 data["wallet"] = wallet_public()
                 data["liveError"] = bool(runtimes[mode].store.get("live_error"))
@@ -379,6 +396,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         return {
             "version": "0.1.0",
             "executionMode": "LIVE",
+            "liveStrategyStatus": live_status,
             "generation": store.generation,
             "liveExecutionEnabled": False,
             "wallet": wallet_public(),
@@ -396,6 +414,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                     "availableCash",
                     "reservedCash",
                     "pendingRedemption",
+                    "failedRedemption",
                 ]
             ),
             "redemptions": [],
@@ -560,7 +579,9 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 vault_path.unlink()
             except OSError:
                 raise ValueError("钱包文件未移除，请重试或检查服务器存储") from None
-            wallet_state.update(settings=None, metadata=None, readiness=None, error=None)
+            wallet_state.update(
+                settings=None, metadata=None, readiness=None, approval=None, error=None
+            )
             return wallet_public()
 
     @app.post("/api/live/wallet/check")
@@ -570,6 +591,39 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         async with wallet_lock:
             wallet_state["error"] = None
             await refresh_readiness()
+            return wallet_public()
+
+    @app.post("/api/live/wallet/approve-redemption")
+    async def approve_live_redemption(request: Request):
+        require_secure_wallet_request(request)
+        payload = await wallet_body(request, {"confirmation"})
+        if payload.get("confirmation") != "APPROVE REDEMPTION":
+            raise ValueError("请先确认赎回授权")
+        async with wallet_lock:
+            if wallet_state["settings"] is None or wallet_state["metadata"] is None:
+                raise ValueError("请先解锁钱包")
+            if "LIVE" in runtimes or legacy_live_enabled:
+                raise ValueError("LIVE 已启用；请先核对已有赎回交易")
+            ensure_wallet_identity(wallet_state["metadata"])
+            if any(
+                claim.get("state") == "SUBMITTED"
+                for claim in cold["LIVE"].get("business")["claims"].values()
+            ):
+                raise ValueError("已有待确认赎回交易，不能同时发起授权")
+            from .redemption import PolygonWallet, RedemptionApprovalService, RedemptionCheckError
+
+            approval_service = RedemptionApprovalService(
+                PolygonWallet(wallet_state["settings"]), root / "LIVE" / "state.sqlite"
+            )
+            try:
+                approval_result = await asyncio.to_thread(approval_service.start)
+            except RedemptionCheckError as exc:
+                raise ValueError(str(exc)) from None
+            except Exception:
+                raise ValueError("赎回授权未完成，请检查网络后重试") from None
+            await refresh_readiness()
+            if approval_result.get("networkError"):
+                wallet_state["approval"]["networkError"] = True
             return wallet_public()
 
     @app.post("/api/live/wallet/enable")
@@ -714,7 +768,9 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                         cold["LIVE"],
                         vault_path,
                     )
-                    wallet_state.update(settings=None, metadata=None, readiness=None, error=None)
+                    wallet_state.update(
+                        settings=None, metadata=None, readiness=None, approval=None, error=None
+                    )
                     return wallet_public()
             finally:
                 upload_path.unlink(missing_ok=True)
@@ -795,7 +851,9 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         if not 1 <= limit <= 10000:
             raise ValueError("记录limit须为1–10000")
         return (
-            records(runtimes[mode], limit) if mode in runtimes else {"records": [], "totalCount": 0}
+            records(runtimes[mode], limit)
+            if mode in runtimes
+            else {"records": [], "totalCount": 0, "locked": True}
         )
 
     @app.get("/api/{mode}/validation")
@@ -818,6 +876,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 "sampleSeconds": 60,
                 "error": None,
                 "points": [],
+                "locked": True,
             }
         )
 

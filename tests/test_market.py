@@ -76,6 +76,55 @@ def test_metadata_complete_n_and_final_resolution():
     assert resolution(m, t) == {"1": 500_000, "2": 500_000}
 
 
+@pytest.mark.parametrize("version", ["v2", "v3", 2])
+def test_unsupported_protocol_version_never_enters_ctf_discovery(version):
+    e = event()
+    e["markets"][0]["version"] = version
+    assert normalize(e) == []
+    e["markets"][0].pop("version")
+    e["version"] = version
+    assert normalize(e) == []
+
+
+def test_v2_position_ids_are_rejected_even_without_version_metadata():
+    e = event()
+    e["markets"][0]["positionIds"] = ["10", "11"]
+    assert normalize(e) == []
+
+
+@pytest.mark.parametrize("tick", ["0.005", "0.0025", "0.00005"])
+def test_unsupported_sdk_tick_never_enters_discovery(tick):
+    e = event()
+    e["markets"][0]["orderPriceMinTickSize"] = tick
+    assert normalize(e) == []
+
+
+def test_unsupported_tick_change_blocks_new_orders_without_discarding_rights(tmp_path):
+    r, _, t = setup(tmp_path)
+    r.book("1", [(15_000, 100_000_000)], [(20_000, 50_000_000)])
+    r.start()
+    quantity = r.business["cycles"][t.event_id]["quantity"]
+    s = MarketService(r)
+    with pytest.raises(ConnectionError, match="tick 变化"):
+        s.message(
+            {
+                "event_type": "tick_size_change",
+                "asset_id": t.token_id,
+                "market": t.condition_id,
+                "new_tick_size": "0.0025",
+            },
+            {t.token_id},
+        )
+    assert r.status == "PAUSED"
+    assert r.tokens[t.token_id].open is False
+    assert r.business["cycles"][t.event_id]["quantity"] == quantity
+    assert s.unsupported_ticks[t.token_id] == 2500
+    assert r.store.get("unsupported_ticks")[t.token_id] == 2500
+    assert s.scan_status["serviceError"] == "ValueError"
+    asyncio.run(s.close())
+    r.close()
+
+
 def test_full_pagination_without_hidden_limit(tmp_path):
     r, _, _ = setup(tmp_path)
     cursors = []

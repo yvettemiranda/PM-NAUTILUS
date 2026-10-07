@@ -5,6 +5,10 @@ single-owner Safe are supported; no account abstraction or manual positions are 
 """
 
 import asyncio
+import json
+import sqlite3
+from contextlib import closing
+from pathlib import Path
 from web3 import Web3
 from web3.exceptions import TransactionNotFound
 
@@ -18,6 +22,7 @@ ADAPTERS = {
     False: "0xAdA100Db00Ca00073811820692005400218FcE1f",
     True: "0xadA2005600Dec949baf300f4C6120000bDB6eAab",
 }
+APPROVAL_KEY = "redemption_approval"
 ZERO = "0x" + "00" * 20
 
 
@@ -72,7 +77,7 @@ class PolygonWallet:
         self.signer = self.w3.eth.account.from_key(settings["private_key"])
         self.funder = Web3.to_checksum_address(settings["funder"])
         self.signature_type = settings["signature_type"]
-        if self.signature_type not in (0, 2):
+        if type(self.signature_type) is not int or self.signature_type not in (0, 2):
             raise RedemptionCheckError("当前赎回支持 EOA(0) 与单签 Safe(2)，须先核对实际钱包类型")
         if self.signature_type == 0 and self.funder != self.signer.address:
             raise RedemptionCheckError("EOA资金账户必须与签名账户相同")
@@ -85,13 +90,37 @@ class PolygonWallet:
         for address in [CTF, PUSD, *ADAPTERS.values()]:
             if not self.w3.eth.get_code(Web3.to_checksum_address(address)):
                 raise RedemptionCheckError("官方合约地址没有部署代码")
+        if self.w3.eth.get_code(self.signer.address):
+            raise RedemptionCheckError("签名账户含有合约或委托代码，需先单独核对")
         if self.signature_type == 2:
+            if not self.w3.eth.get_code(self.funder):
+                raise RedemptionCheckError("资金地址不是已部署的Safe")
             safe = self.w3.eth.contract(address=self.funder, abi=SAFE_ABI)
+            owners = safe.functions.getOwners().call()
             if (
                 safe.functions.getThreshold().call() != 1
-                or self.signer.address not in safe.functions.getOwners().call()
+                or len(owners) != 1
+                or owners[0].lower() != self.signer.address.lower()
             ):
                 raise RedemptionCheckError("Safe须为本签名账户可执行的单签钱包")
+        elif self.w3.eth.get_code(self.funder):
+            raise RedemptionCheckError("EOA资金地址含有合约代码")
+
+    def adapter_approvals(self):
+        approvals = {
+            neg_risk: self.ctf.functions.isApprovedForAll(
+                self.funder, Web3.to_checksum_address(operator)
+            ).call()
+            for neg_risk, operator in ADAPTERS.items()
+        }
+        if any(type(value) is not bool for value in approvals.values()):
+            raise RedemptionCheckError("赎回授权查询结果无效")
+        return approvals
+
+    def buy_preflight(self):
+        self.preflight()
+        if not all(self.adapter_approvals().values()):
+            raise RedemptionCheckError("赎回适配器授权尚未确认，不能新买入")
 
     def owned_balances(self, claim):
         return self.token_balances(claim["payouts"])
@@ -126,7 +155,27 @@ class PolygonWallet:
         else:
             contract = self.w3.eth.contract(address=target, abi=REDEEM_ABI)
             call = contract.functions.redeemPositions(PUSD, bytes(32), condition, [1, 2])
-        data = call._encode_transaction_data()
+        return self._sign_contract_call(target, call._encode_transaction_data(), operation)
+
+    def prepare_approval(self, neg_risk):
+        if type(neg_risk) is not bool:
+            raise RedemptionCheckError("赎回授权对象无效")
+        self.preflight()
+        target = Web3.to_checksum_address(ADAPTERS[neg_risk])
+        approved = self.ctf.functions.isApprovedForAll(self.funder, target).call()
+        if type(approved) is not bool:
+            raise RedemptionCheckError("赎回授权查询结果无效")
+        if approved:
+            return None
+        call = self.ctf.functions.setApprovalForAll(target, True)
+        return {
+            **self._sign_contract_call(CTF, call._encode_transaction_data(), "APPROVE"),
+            "neg_risk": neg_risk,
+            "operator": target,
+        }
+
+    def _sign_contract_call(self, target, data, operation):
+        target = Web3.to_checksum_address(target)
         if self.signature_type == 2:
             safe = self.w3.eth.contract(address=self.funder, abi=SAFE_ABI)
             # Safe's prevalidated signature is valid only when msg.sender is this
@@ -192,6 +241,185 @@ class PolygonWallet:
         if any(self.owned_balances(claim).values()):
             return {"status": "FAILED", "amount": amount}
         return {"status": "CONFIRMED", "amount": amount}
+
+
+class RedemptionApprovalService:
+    """Explicit, durable authorization of both CTF redemption operators."""
+
+    def __init__(self, wallet, ledger_path):
+        self.wallet = wallet
+        self.ledger_path = Path(ledger_path)
+
+    def _identity(self):
+        return {
+            "signer": self.wallet.signer.address,
+            "funder": self.wallet.funder,
+            "signatureType": self.wallet.signature_type,
+        }
+
+    def _read(self):
+        try:
+            with closing(
+                sqlite3.connect(self.ledger_path.resolve().as_uri() + "?mode=rw", uri=True)
+            ) as db:
+                row = db.execute("SELECT value FROM meta WHERE key=?", (APPROVAL_KEY,)).fetchone()
+            record = json.loads(row[0]) if row else None
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            raise RedemptionCheckError("赎回授权记录无法读取") from exc
+        if record is not None:
+            if (
+                not isinstance(record, dict)
+                or record.get("version") != 1
+                or record.get("status") not in {"ACTIVE", "COMPLETE", "FAILED"}
+                or record.get("identity") != self._identity()
+                or not isinstance(record.get("remaining"), list)
+                or any(type(value) is not bool for value in record["remaining"])
+            ):
+                raise RedemptionCheckError("赎回授权记录与当前钱包不一致")
+            pending = record.get("pending")
+            if pending is not None:
+                if (
+                    not isinstance(pending, dict)
+                    or pending.get("operation") != "APPROVE"
+                    or type(pending.get("neg_risk")) is not bool
+                    or not record["remaining"]
+                    or pending["neg_risk"] != record["remaining"][0]
+                    or pending.get("operator", "").lower() != ADAPTERS[pending["neg_risk"]].lower()
+                    or not isinstance(pending.get("raw_tx"), str)
+                    or not isinstance(pending.get("tx_hash"), str)
+                ):
+                    raise RedemptionCheckError("待确认赎回授权记录无效")
+                try:
+                    if (
+                        Web3.to_hex(Web3.keccak(hexstr=pending["raw_tx"])).lower()
+                        != pending["tx_hash"].lower()
+                    ):
+                        raise ValueError("Transaction hash mismatch")
+                except (ValueError, TypeError):
+                    raise RedemptionCheckError("待确认赎回授权交易无效") from None
+        return record
+
+    def _write(self, record):
+        payload = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+        try:
+            with closing(
+                sqlite3.connect(self.ledger_path.resolve().as_uri() + "?mode=rw", uri=True)
+            ) as db:
+                db.execute("PRAGMA synchronous=FULL")
+                with db:
+                    db.execute(
+                        "INSERT INTO meta(key,value) VALUES(?,?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (APPROVAL_KEY, payload),
+                    )
+        except (OSError, sqlite3.Error) as exc:
+            raise RedemptionCheckError("赎回授权记录无法保存，未广播新交易") from exc
+
+    def _public(self, record, approvals, *, network_error=False):
+        pending = record.get("pending") if record else None
+        if record and record["status"] == "FAILED":
+            status = "FAILED"
+        elif pending:
+            status = "PENDING"
+        elif all(approvals.values()) and (record is None or record["status"] == "COMPLETE"):
+            status = "APPROVED"
+        else:
+            status = "MISSING"
+        return {
+            "status": status,
+            "standardApproved": approvals[False],
+            "negRiskApproved": approvals[True],
+            "pendingTxHash": pending["tx_hash"] if pending else None,
+            "networkError": network_error,
+        }
+
+    def status(self):
+        self.wallet.preflight()
+        record = self._read()
+        approvals = self.wallet.adapter_approvals()
+        return self._public(record, approvals)
+
+    def start(self):
+        """Only call after a separate explicit approval action for both operators."""
+        self.wallet.preflight()
+        record = self._read()
+        if record is not None and record["status"] == "ACTIVE":
+            return self.advance()
+        approvals = self.wallet.adapter_approvals()
+        if all(approvals.values()) and (record is None or record["status"] != "ACTIVE"):
+            record = {
+                "version": 1,
+                "status": "COMPLETE",
+                "identity": self._identity(),
+                "remaining": [],
+                "pending": None,
+            }
+            self._write(record)
+            return self._public(record, approvals)
+        record = {
+            "version": 1,
+            "status": "ACTIVE",
+            "identity": self._identity(),
+            "remaining": [neg_risk for neg_risk in (False, True) if not approvals[neg_risk]],
+            "pending": None,
+        }
+        self._write(record)
+        return self.advance()
+
+    def advance(self):
+        """Resume a previously authorized transaction without replacing its nonce."""
+        self.wallet.preflight()
+        record = self._read()
+        approvals = self.wallet.adapter_approvals()
+        if record is None or record["status"] != "ACTIVE":
+            return self._public(record, approvals)
+        pending = record["pending"]
+        if pending:
+            try:
+                result = self.wallet.receipt(pending)
+            except Exception:
+                return self._public(record, approvals, network_error=True)
+            if result is None:
+                try:
+                    self.wallet.broadcast(pending)
+                except Exception:
+                    return self._public(record, approvals, network_error=True)
+                return self._public(record, approvals)
+            if result.get("status") == "FAILED":
+                record["status"] = "FAILED"
+                self._write(record)
+                return self._public(record, approvals)
+            if result.get("status") != "APPROVED":
+                raise RedemptionCheckError("赎回授权回执无效")
+            record["pending"] = None
+            record["remaining"].pop(0)
+            self._write(record)
+            approvals = self.wallet.adapter_approvals()
+        while record["remaining"]:
+            neg_risk = record["remaining"][0]
+            if approvals[neg_risk]:
+                record["remaining"].pop(0)
+                self._write(record)
+                continue
+            prepared = self.wallet.prepare_approval(neg_risk)
+            if prepared is None:
+                approvals = self.wallet.adapter_approvals()
+                if not approvals[neg_risk]:
+                    raise RedemptionCheckError("赎回授权查询结果不一致")
+                continue
+            record["pending"] = prepared
+            self._write(record)
+            try:
+                self.wallet.broadcast(prepared)
+            except Exception:
+                return self._public(record, approvals, network_error=True)
+            return self._public(record, approvals)
+        approvals = self.wallet.adapter_approvals()
+        if not all(approvals.values()):
+            raise RedemptionCheckError("赎回授权链上结果不完整")
+        record["status"] = "COMPLETE"
+        self._write(record)
+        return self._public(record, approvals)
 
 
 class RedemptionService:

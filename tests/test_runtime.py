@@ -148,12 +148,13 @@ def test_native_buy_target_sell_and_recovery(tmp_path):
     r.close()
 
 
-def test_native_fee_net_position(tmp_path):
+def test_native_fee_is_cash_charge_and_position_is_gross_fill(tmp_path):
     r, clock, t = setup(tmp_path, True)
     r.book("1", [(90000, 100_000_000)], [(100000, 10_000_000)])
     r.start()
-    assert r.business["cycles"]["event"]["quantity"] == 9_640_000
-    assert r.cash() == 99_000_000
+    assert r.business["cycles"]["event"]["quantity"] == 9_600_000
+    assert r.business["cycles"]["event"]["spent"] == 994_560
+    assert r.cash() == 99_005_440
     assert r.validate()["ok"]
     r.close()
 

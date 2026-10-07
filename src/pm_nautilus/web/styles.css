@@ -711,6 +711,8 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 .topbar { position:static; min-height:44px; padding:0; margin-bottom:12px; border:0; background:transparent; box-shadow:none; backdrop-filter:none; }
 .brand { font-size:11px; font-weight:500; letter-spacing:1px; white-space:nowrap; }
 .topbar-actions { gap:0; }
+.live-run-indicator { flex:1 1 auto; min-width:0; padding:0 4px; text-align:right; font-size:11px; line-height:1.2; color:var(--muted); }
+.live-run-indicator[data-tone="negative"] { color:var(--negative); font-weight:700; }
 .mode-toggle, .mode-toggle[data-mode="TEST"], .mode-toggle[data-mode="LIVE"] { min-width:48px; min-height:44px; border:0; background:transparent; color:var(--text); font-size:12px; font-weight:500; }
 .topbar .icon-button { width:40px; height:44px; padding:0; border:0; background:transparent; font-size:20px; }
 .status-button { display:grid; place-items:center; width:28px; height:44px; padding:0; border:0; background:transparent; }

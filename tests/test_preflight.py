@@ -57,3 +57,24 @@ def test_wrong_chain_and_unsupported_wallet_fail_before_account_calls():
             inspect(rpc, OWNER, OWNER, 0)
         with pytest.raises(ValueError, match="supported"):
             inspect(rpc, OWNER, FUNDER, 3)
+
+
+def test_safe_funder_must_have_contract_code():
+    def handler(request):
+        import json
+
+        payload = json.loads(request.content)
+        method = payload["method"]
+        if method == "eth_chainId":
+            result = "0x89"
+        elif method == "eth_blockNumber":
+            result = "0x100"
+        elif method == "eth_getCode":
+            result = "0x" if payload["params"][0] in {OWNER, FUNDER} else "0x1234"
+        else:
+            pytest.fail("Safe ownership calls must not occur without deployed code")
+        return httpx.Response(200, json={"result": result})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ValueError, match="Safe funder has no deployed code"):
+            inspect(PublicRPC(client, "https://example.invalid"), OWNER, FUNDER, 2)

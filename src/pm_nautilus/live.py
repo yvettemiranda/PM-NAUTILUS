@@ -41,7 +41,16 @@ from .config import SCALE, micros
 from .execution import TestExecution
 from .live_account_guard import audit_open_orders, condition_inventory_matches
 from .native import price, quantity
-from .rules import cost, ceil_div, static_reason, Fees, preview, arbitrate
+from .rules import (
+    SUPPORTED_CLOB_TICKS,
+    cost,
+    ceil_div,
+    static_reason,
+    Fees,
+    preview,
+    arbitrate,
+    signed_buy_notional,
+)
 
 
 def validate_settings(settings):
@@ -287,8 +296,11 @@ class LiveExecution(PolymarketExecutionClient):
                 r.business["recovery_error"] = "实际成交突破订单限价，已暂停新买，仍记录真实回报"
             fees = Fees(**i["fees"])
             fee = fees.fee(gross, p) if msg.liquidity_side() == LiquiditySide.TAKER else 0
-            net = gross - ceil_div(fee * SCALE, p) if o.side == OrderSide.BUY else gross
-            amount = cost(p, gross) if o.side == OrderSide.BUY else cost(p, gross) - fee
+            # CLOB V2 fees are charged in pUSD on top of the BUY notional. The
+            # reported matched shares are the shares received; do not infer a
+            # smaller position by converting a cash fee into shares.
+            net = gross
+            amount = cost(p, gross) + fee if o.side == OrderSide.BUY else cost(p, gross) - fee
             # Real venue trade identity is stable across REST/WS/status transitions.
             trade_id = TradeId(sha256(f"{msg.id}:{venue}".encode()).hexdigest()[:32])
             self.generate_order_filled(
@@ -334,6 +346,13 @@ class LiveExecution(PolymarketExecutionClient):
         oid = str(o.client_order_id)
         self._submitting[oid] = False
         try:
+            tick = r.tokens[i["token_id"]].tick
+            if tick not in SUPPORTED_CLOB_TICKS:
+                r.store.put("status", "PAUSED")
+                r.business["recovery_error"] = "市场价格档位超出锁定SDK支持范围；持仓仍待处理"
+                r.store.put("business", r.business)
+                self.deny(o, "市场价格档位超出锁定SDK支持范围")
+                return
             if not self.ready:
                 self.deny(o, "LIVE核对未完成")
                 return
@@ -437,13 +456,30 @@ class LiveExecution(PolymarketExecutionClient):
             self.deny(o, "仅使用有现金上限的BUY市价FAK")
             return
         tick = r.tokens[i["token_id"]].tick
-        executable_limit = min(i["limit"] // tick * tick, SCALE - tick)
+        if tick not in SUPPORTED_CLOB_TICKS:
+            self.deny(o, "锁定SDK不支持此市场价格档位")
+            return
+        executable_limit = min(i.get("execution_limit", i["limit"]) // tick * tick, SCALE - tick)
         if executable_limit <= 0:
             self.deny(o, "当前价格上限内没有合法 tick")
             return
+        if self.wallet is None:
+            self.deny(o, "LIVE钱包未连接，无法核对赎回授权")
+            return
+        try:
+            await asyncio.to_thread(self.wallet.buy_preflight)
+        except Exception as exc:
+            r.store.put("status", "PAUSED")
+            r.store.put("live_error", f"买入前钱包/赎回授权核对失败：{type(exc).__name__}")
+            self.deny(o, "买入前钱包/赎回授权核对失败")
+            return
+        notional = signed_buy_notional(i["cash"], Fees(**i["fees"]), tick, executable_limit)
+        if notional <= 0 or notional * SCALE // executable_limit < r.tokens[i["token_id"]].min_size:
+            self.deny(o, "含费预算不足以满足交易所最小订单份额")
+            return
         args = MarketOrderArgsV2(
             token_id=i["token_id"],
-            amount=float(Decimal(i["cash"]) / SCALE),
+            amount=float(Decimal(notional) / SCALE),
             side="BUY",
             price=float(Decimal(executable_limit) / SCALE),
             order_type="FAK",
@@ -454,6 +490,18 @@ class LiveExecution(PolymarketExecutionClient):
             args,
             options=PartialCreateOrderOptions(neg_risk=r.tokens[i["token_id"]].neg_risk),
         )
+        # The pinned SDK has no maxSpend option and rounds the maker amount to
+        # cents. Inspect the signed facts before allowing any POST boundary.
+        maker = int(signed.makerAmount)
+        taker = int(signed.takerAmount)
+        if (
+            maker <= 0
+            or maker > notional
+            or taker < r.tokens[i["token_id"]].min_size
+            or maker * SCALE > taker * executable_limit
+        ):
+            self.deny(o, "签名订单金额/价格/最小份额未通过含费预算核对")
+            return
         if not self.buy_valid(o, i):
             self.deny(o, "签名期间控制/资格发生变化")
             return
@@ -469,7 +517,10 @@ class LiveExecution(PolymarketExecutionClient):
             o,
             signed,
             order_type_override="FAK",
-            base_quantity=quantity(int(signed.takerAmount)),
+            # At a better execution price the venue may deliver more than the
+            # signed minimum takerAmount. Nautilus needs a durable upper bound
+            # until the FAK's final trades and cancellation are reconciled.
+            base_quantity=quantity(ceil_div((maker + 1) * SCALE, tick)),
             expected_venue_order_id=venue,
         )
 

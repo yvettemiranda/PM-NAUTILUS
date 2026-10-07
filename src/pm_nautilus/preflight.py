@@ -45,7 +45,7 @@ class PublicRPC:
 
 def inspect(rpc, signer, funder, signature_type):
     signer, funder = map(Web3.to_checksum_address, (signer, funder))
-    if signature_type not in (0, 2):
+    if type(signature_type) is not int or signature_type not in (0, 2):
         raise ValueError("Only EOA(0) and single-owner Safe(2) are supported")
     if int(rpc.query("eth_chainId", []), 16) != 137:
         raise ValueError("RPC is not Polygon mainnet")
@@ -59,10 +59,15 @@ def inspect(rpc, signer, funder, signature_type):
     signer_code = rpc.query("eth_getCode", [signer, rpc.block])
     if signer_code != "0x":
         raise ValueError("Signer has contract/delegation code; requires separate review")
+    funder_code = rpc.query("eth_getCode", [funder, rpc.block])
     if signature_type == 0:
         if signer != funder:
             raise ValueError("EOA signer and funder must match")
+        if funder_code != "0x":
+            raise ValueError("EOA funder must have no contract code")
     else:
+        if funder_code == "0x":
+            raise ValueError("Safe funder has no deployed code")
         owners = rpc.call(funder, "getOwners()", outputs=("address[]",))
         threshold = rpc.call(funder, "getThreshold()")
         if threshold != 1 or len(owners) != 1 or owners[0].lower() != signer.lower():
@@ -85,6 +90,8 @@ def inspect(rpc, signer, funder, signature_type):
         )
         for spender in (*EXCHANGES, *ADAPTERS.values())
     }
+    if any(type(value) is not bool for value in approvals.values()):
+        raise ValueError("Invalid CTF approval response")
     return {
         "scope": "PUBLIC_READ_ONLY_NOT_LIVE_ACCEPTANCE",
         "block": int(rpc.block, 16),

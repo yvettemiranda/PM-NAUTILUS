@@ -2,6 +2,14 @@
 
 本页按时间倒序记录；第一节是最新部署状态，后文的“当前”或“待部署”只代表各节记录时的情况。
 
+## 实盘准入修复与服务器升级（2026-10-07 22:55 CST）
+
+- [PR #1](https://github.com/yvettemiranda/PM-NAUTILUS/pull/1) 的 4 项 GitHub Actions 检查通过并合并到 `main`，固定提交 `273c80e7711221b7f532633710d6be381f1f4e42`。修复包含 BUY 含费预算和真实成交/份额记账、CTF 赎回授权与已签交易恢复、停机最终导出、跨 TEST/LIVE 页面状态及不兼容市场过滤；`config/strategy-profile.json` 未改。本地 246 项 Python 测试、9 项前端测试、Ruff、JS 语法通过。测试仍使用模拟钱包及交易所响应，没有完成真实资金闭环。
+- 升级前服务器 `TEST/RUNNING`、83 个模拟持仓、现金 `117.346484U`、完整账本验证 `ok=true`、SQLite `quick_check=ok`。暂停 TEST 新买入、停止旧容器后，以单独保管的 age 接收公钥制作 `0600` 加密备份：`/opt/pm-nautilus/backups/pre-live-readiness-20261007-2244.tgz.age`，106,752,900 字节，SHA-256 `16acfd2d011ff64eb1696f41746c45497a70bc334d070455487bf3d4b9a37ab3`。归档及加密命令成功；本轮未从另一设备解密并演练恢复。
+- 服务器源码、`.env` 镜像标签及运行容器均为 `273c80e7711221b7f532633710d6be381f1f4e42`。Compose 使用原有 HTTPS 覆盖，容器 healthy、零重启，公网 HTTPS 页面可读。升级后 `/api/health` 为 `status=ok`、`TEST/RUNNING`、`liveExecutionEnabled=false`、后台错误为空；TEST 完整 validation `ok=true`、`errors=[]`（单次约 9.24 秒）、SQLite `quick_check=ok`。原 83 个模拟持仓、现金及 TEST/LIVE 各 15 项策略设置保留并与公开规则文件一致；网页 TEST 持仓、记录、市场和资金已现场读回。
+- 服务器有一份 17:19 CST 创建的 `0600` 加密钱包文件，已随停机备份保存；本轮没有读取密钥、解锁或使用钱包。LIVE 当前 `LOCKED`、未启用，原生事件和订单意图均为 0；网页 LIVE 资金与持仓显示未核对，交易记录锁定，START 禁用。较早章节的“钱包未配置”是当时的时间点事实，现已过时。
+- 服务器 22:47 CST 从自身出口查询 Polymarket 地区接口返回 `blocked=true`、`US/CA`。这台硅谷服务器不能用于 API 新开仓；修复部署不改变地区资格。只有取得官方允许的新服务器出口并完成真实钱包的资金、授权、挂单和份额检查后，才能由用户决定是否签链上授权及启动实盘。真实 BUY/SELL、费用、确认、赎回和故障恢复仍未在正式钱包验收。
+
 ## 全流程审计与新对话入口（2026-10-07，只读检查）
 
 - 新对话先读 [逐环节审计与交接](docs/END_TO_END_HANDOFF_2026-10-07.md)，再读本页的历史部署记录。2026-10-07 审计起点 GitHub `main` 为 `0637d3e8e31da61e3420e8a886d14157e327a513`，[Actions run 37470838966](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/37470838966) 通过；本节与新文档发布后，GitHub 文档 SHA 会更新，运行镜像不因纯文档提交自动变化。

@@ -64,7 +64,7 @@
 ## 4. 网站、接口和链接分别做什么
 
 | 地址或文件 | 用途 | 本轮核对 |
-|---|---|
+|---|---|---|
 | [GitHub 仓库](https://github.com/yvettemiranda/PM-NAUTILUS) | 程序、公开规则、说明和版本历史；没有钱包秘密或真实账本。 | 起点 SHA 与 CI 已核对。换电脑/服务器时从此克隆。 |
 | [当前服务器网页](https://43.159.133.129/) | 用户操作 TEST/LIVE 的 HTTPS 页面，经服务器认证；不是交易所页面。 | 健康接口本轮可达；本轮浏览器交互未完成。迁移后旧 IP 不再适用。 |
 | [Gamma API](https://docs.polymarket.com/api-reference/events/list-events) `gamma-api.polymarket.com` | 查 Event、市场、类别及结算元数据。 | [market.py](../src/pm_nautilus/market.py)和公开短测；不提供真实账户资金。 |

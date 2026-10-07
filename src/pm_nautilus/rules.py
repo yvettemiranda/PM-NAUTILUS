@@ -2,11 +2,16 @@
 
 from dataclasses import dataclass
 from fractions import Fraction
+from functools import lru_cache
 from typing import Literal
 
 from .config import SCALE, Preferences
 
 Level = tuple[int, int]
+
+# The pinned py-clob-client-v2==1.0.1 order builder has rounding configurations
+# for exactly these price increments. Values are price micro-units.
+SUPPORTED_CLOB_TICKS = frozenset({100_000, 10_000, 1_000, 100})
 
 
 def ceil_div(n: int, d: int) -> int:
@@ -45,11 +50,54 @@ class Fees:
     def fee(self, qty: int, price: int) -> int:
         if not self.enabled or not qty or not 0 < price < SCALE:
             return 0
-        centered = price * (SCALE - price) // SCALE
-        curve = SCALE
-        for _ in range(self.exponent):
-            curve = curve * centered // SCALE
-        return ceil_div(qty * self.rate * curve, SCALE * SCALE)
+        # The exchange quotes fees to five USDC decimals (10 micro-units).
+        # Keep all intermediate terms exact before truncating to that precision.
+        curve = (price * (SCALE - price)) ** self.exponent
+        denominator = SCALE * (SCALE * SCALE) ** self.exponent
+        return (qty * self.rate * curve // (denominator * 10)) * 10
+
+
+@lru_cache(maxsize=256)
+def _worst_buy_fee_ratio(fees: Fees, tick: int, limit: int) -> Fraction:
+    """Upper bound for fee / pre-fee cash at any permitted execution tick."""
+    if not fees.enabled or not fees.rate:
+        return Fraction(0)
+    if tick not in SUPPORTED_CLOB_TICKS or limit < tick:
+        raise ValueError("无法按当前价格档位保证买入含费预算")
+    worst = Fraction(0)
+    for p in range(tick, min(limit, SCALE - tick) + 1, tick):
+        if fees.exponent:
+            ratio = Fraction(
+                fees.rate * p ** (fees.exponent - 1) * (SCALE - p) ** fees.exponent,
+                SCALE ** (2 * fees.exponent),
+            )
+        else:
+            ratio = Fraction(fees.rate, p)
+        worst = max(worst, ratio)
+    return worst
+
+
+def signed_buy_notional(budget: int, fees: Fees, tick: int, limit: int) -> int:
+    """Largest cent-precision CLOB maker amount whose all-in cost fits budget.
+
+    The pinned SDK rounds market BUY makerAmount down to two decimals. A fee
+    bound over *all* executable prices protects partial fills at different
+    levels, rather than relying on the preview's best Ask or the limit price.
+    """
+    if budget <= 0:
+        return 0
+    ratio = _worst_buy_fee_ratio(fees, tick, limit)
+    cents = budget // 10_000
+    low, high = 0, cents
+    while low < high:
+        mid = (low + high + 1) // 2
+        notional = mid * 10_000
+        worst_fee = ceil_div(notional * ratio.numerator, ratio.denominator)
+        if notional + worst_fee <= budget:
+            low = mid
+        else:
+            high = mid - 1
+    return low * 10_000
 
 
 @dataclass(frozen=True)
@@ -144,21 +192,33 @@ def plan_buy(
     fees: Fees,
     tick: int,
     config: Preferences,
+    quote_budget: int | None = None,
 ) -> list[Fill]:
+    if quote_budget is None:
+        quote_budget = signed_buy_notional(budget, fees, tick, limit)
     levels = sorted((p, q) for p, q in asks if 0 < p <= limit and q > 0)
-    if not levels or affordable(budget, levels[0][0]) < minimum:
+    if not levels or affordable(quote_budget, levels[0][0]) < minimum:
         return []
     fills = []
     for p, depth in levels:
-        q = min(depth, affordable(budget, p))
+        q = min(depth, affordable(quote_budget, p))
+        lo, hi = 0, q
+        while lo < hi:
+            candidate = (lo + hi + 1) // 2
+            if cost(p, candidate) + fees.fee(candidate, p) <= budget:
+                lo = candidate
+            else:
+                hi = candidate - 1
+        q = lo
         amount = cost(p, q)
         fee = fees.fee(q, p)
-        net = q - ceil_div(fee * SCALE, p)
-        if amount <= 0 or net <= 0:
+        total = amount + fee
+        if amount <= 0 or q <= 0:
             continue
-        fills.append(Fill(p, q, net, amount, fee, target_price(p, tick, config)))
-        budget -= amount
-        if budget == 0:
+        fills.append(Fill(p, q, q, total, fee, target_price(p, tick, config)))
+        budget -= total
+        quote_budget -= amount
+        if budget <= 0 or quote_budget <= 0:
             break
     return fills
 
@@ -255,8 +315,20 @@ def preview(
 ) -> Preview | None:
     if quote_reason(t, c, bids, asks, available):
         return None
-    fills = plan_buy(asks, available, c.max_price, t.min_size, t.fees, t.tick, c)
+    if t.tick not in SUPPORTED_CLOB_TICKS:
+        return None
+    preliminary_quote = signed_buy_notional(available, t.fees, t.tick, c.max_price)
+    preliminary = plan_buy(
+        asks, available, c.max_price, t.min_size, t.fees, t.tick, c, preliminary_quote
+    )
+    if not preliminary:
+        return None
+    signed_limit = max(f.price for f in preliminary)
+    quote_budget = signed_buy_notional(available, t.fees, t.tick, signed_limit)
+    fills = plan_buy(asks, available, signed_limit, t.min_size, t.fees, t.tick, c, quote_budget)
     if not fills:
+        return None
+    if affordable(quote_budget, signed_limit) < t.min_size:
         return None
     targets = [Target(str(i), f.target, f.net, i) for i, f in enumerate(fills)]
     batches = sell_batches(bids, targets, t.min_size, t.fees)

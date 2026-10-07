@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sqlite3
 from pathlib import Path
 
@@ -13,9 +14,11 @@ from py_clob_client_v2.client import ClobClient
 from py_clob_client_v2.clob_types import ApiCreds, AssetType, BalanceAllowanceParams
 from web3 import Web3
 
+from .config import Preferences
 from .live import load_settings
 from .live_account_guard import audit_open_orders
-from .preflight import PublicRPC, inspect
+from .preflight import EXCHANGES, PublicRPC, inspect
+from .redemption import ADAPTERS, APPROVAL_KEY
 
 
 def ledger_intents(data_dir):
@@ -34,7 +37,18 @@ def ledger_intents(data_dir):
                 raise ValueError("LIVE intent is invalid")
             if row.get("terminal") is False:
                 intents[order_id] = row
-        return intents, bool(rows)
+        approval_row = db.execute("SELECT value FROM meta WHERE key=?", (APPROVAL_KEY,)).fetchone()
+        approval = json.loads(approval_row[0]) if approval_row else None
+        if approval is not None and (
+            not isinstance(approval, dict)
+            or approval.get("status") not in {"ACTIVE", "COMPLETE", "FAILED"}
+        ):
+            raise ValueError("LIVE redemption approval state is invalid")
+        preferences_row = db.execute("SELECT value FROM meta WHERE key='preferences'").fetchone()
+        if preferences_row is None:
+            raise ValueError("LIVE preferences are missing")
+        budget = Preferences(**json.loads(preferences_row[0])).budget
+        return intents, bool(rows), approval, budget
 
 
 def _nonnegative_int(value):
@@ -51,15 +65,18 @@ def collateral_summary(raw):
     if not isinstance(raw, dict):
         raise ValueError("Invalid collateral response")
     balance = _nonnegative_int(raw["balance"])
-    allowances = raw.get("allowances", raw.get("allowance"))
-    if isinstance(allowances, dict):
-        values = allowances.values()
-    elif allowances is not None:
-        values = (allowances,)
-    else:
-        raise ValueError("Collateral allowance is missing")
-    parsed = [_nonnegative_int(value) for value in values]
-    return {"balanceMicros": balance, "anyPositiveAllowance": any(x > 0 for x in parsed)}
+    allowances = raw.get("allowances")
+    if not isinstance(allowances, dict):
+        raise ValueError("Collateral allowances are missing")
+    parsed = {}
+    for address, value in allowances.items():
+        if not isinstance(address, str) or not Web3.is_address(address):
+            raise ValueError("Invalid collateral allowance address")
+        normalized = address.lower()
+        if normalized in parsed:
+            raise ValueError("Duplicate collateral allowance address")
+        parsed[normalized] = _nonnegative_int(value)
+    return {"balanceMicros": balance, "allowancesMicros": parsed}
 
 
 def run_preflight(settings, expected_signer, expected_funder, data_dir):
@@ -69,7 +86,17 @@ def run_preflight(settings, expected_signer, expected_funder, data_dir):
         raise ValueError("Signing key does not match expected address")
     if funder.lower() != Web3.to_checksum_address(expected_funder).lower():
         raise ValueError("Funder does not match expected address")
-    intents, has_history = ledger_intents(data_dir)
+    intents, has_history, approval_state, budget = ledger_intents(data_dir)
+    if approval_state is not None and (
+        approval_state.get("version") != 1
+        or approval_state.get("identity")
+        != {"signer": signer, "funder": funder, "signatureType": settings["signature_type"]}
+        or (
+            approval_state.get("status") == "COMPLETE"
+            and (approval_state.get("pending") is not None or approval_state.get("remaining") != [])
+        )
+    ):
+        raise ValueError("Redemption approval record does not match wallet")
     with httpx.Client(timeout=20, follow_redirects=False) as transport:
         public = inspect(
             PublicRPC(transport, settings["rpc_url"]),
@@ -91,11 +118,38 @@ def run_preflight(settings, expected_signer, expected_funder, data_dir):
     open_orders = asyncio.run(audit_open_orders(clob, intents))
     if open_orders.error:
         raise ValueError(open_orders.error)
-    funded = collateral["balanceMicros"] > 0 and public["pusdBalanceMicros"] > 0
+    funded = collateral["balanceMicros"] >= budget and public["pusdBalanceMicros"] >= budget
     gas_available = public["signerPOLWei"] > 0
-    allowance = collateral["anyPositiveAllowance"] and any(
-        amount > 0 for amount in public["exchangeAllowancesMicros"].values()
+    # The saved per-Event budget already includes the maximum cash trading fee.
+    # Both exchange paths must be funded because the next eligible token may be
+    # either standard or negative-risk. An unidentified positive allowance is
+    # not sufficient evidence for either path.
+    allowance = all(
+        collateral["allowancesMicros"].get(exchange.lower(), 0) >= budget
+        and public["exchangeAllowancesMicros"].get(exchange, 0) >= budget
+        for exchange in EXCHANGES
     )
+    approvals = public.get("ctfApprovals")
+    if not isinstance(approvals, dict) or any(
+        type(approvals.get(target)) is not bool for target in ADAPTERS.values()
+    ):
+        raise ValueError("CTF redemption approval inspection is incomplete")
+    redemption_approved = all(approvals[target] for target in ADAPTERS.values())
+    approval_settled = approval_state is None or approval_state["status"] == "COMPLETE"
+    pending = approval_state.get("pending") if approval_state else None
+    if approval_state is not None and approval_state["status"] == "FAILED":
+        approval_status = "FAILED"
+    elif approval_state is not None and approval_state["status"] == "ACTIVE" and pending:
+        approval_status = "PENDING"
+    elif redemption_approved and approval_settled:
+        approval_status = "APPROVED"
+    else:
+        approval_status = "MISSING"
+    pending_hash = pending.get("tx_hash") if isinstance(pending, dict) else None
+    if pending_hash is not None and (
+        not isinstance(pending_hash, str) or not re.fullmatch(r"0x[0-9a-fA-F]{64}", pending_hash)
+    ):
+        raise ValueError("Redemption approval transaction identity is invalid")
     return {
         "scope": "PRIVATE_READ_ONLY_NO_ORDER_SIGNATURES_OR_WRITES",
         "signer": signer,
@@ -108,10 +162,27 @@ def run_preflight(settings, expected_signer, expected_funder, data_dir):
         "unknownOpenOrderCount": open_orders.unknown_count,
         "onchainCollateralMicros": public["pusdBalanceMicros"],
         "clobCollateralMicros": collateral["balanceMicros"],
+        "nextOrderAmountMicros": budget,
+        "collateralBalanceSufficient": funded,
         "signerPOLWei": public["signerPOLWei"],
         "signerGasAvailable": gas_available,
         "collateralAllowancePresent": allowance,
-        "canStartNewBuys": open_orders.ok and funded and allowance and gas_available,
+        "redemptionApprovalComplete": redemption_approved and approval_settled,
+        "redemptionApproval": {
+            "status": approval_status,
+            "standardApproved": approvals[ADAPTERS[False]],
+            "negRiskApproved": approvals[ADAPTERS[True]],
+            "pendingTxHash": pending_hash,
+            "networkError": False,
+        },
+        "canStartNewBuys": (
+            open_orders.ok
+            and funded
+            and allowance
+            and gas_available
+            and redemption_approved
+            and approval_settled
+        ),
     }
 
 

@@ -8,6 +8,7 @@ from pm_nautilus.rules import (
     StopLoss,
     plan_buy,
     sell_batches,
+    signed_buy_notional,
     target_price,
     static_reason,
 )
@@ -59,7 +60,7 @@ def test_target_tick_cap_and_actual_fill():
     ] == [30000, 45000]
 
 
-def test_buy_fee_is_shares_and_no_budget_increase():
+def test_buy_fee_is_cash_and_all_in_budget_is_not_exceeded():
     fills = plan_buy(
         [(100_000, 100_000_000)],
         1_000_000,
@@ -70,13 +71,49 @@ def test_buy_fee_is_shares_and_no_budget_increase():
         Preferences(),
     )
     f = fills[0]
-    assert (f.gross, f.amount, f.fee, f.net) == (10_000_000, 1_000_000, 36000, 9_640_000)
+    assert (f.gross, f.amount, f.fee, f.net) == (9_600_000, 994_560, 34_560, 9_600_000)
+    assert signed_buy_notional(1_000_000, Fees(True, 40_000, 1), 1000, 100_000) == 960_000
     assert (
         plan_buy(
             [(900000, 10_000_000)], 1_000_000, 990000, 5_000_000, Fees(False), 1000, Preferences()
         )
         == []
     )
+
+
+def test_fee_precision_and_price_independent_signed_budget():
+    fees = Fees(True, 40_000, 1)
+    assert fees.fee(47_619_000, 21_000) == 39_150
+    maker = signed_buy_notional(1_000_000, fees, 1_000, 30_000)
+    assert maker == 960_000
+    for p in (1_000, 20_000, 21_000, 30_000):
+        # Even a partial fill at a better price may return more shares than
+        # maker / signed limit. The cash fee still fits the 1U cycle cap.
+        shares = maker * 1_000_000 // p
+        assert maker + fees.fee(shares, p) <= 1_000_000
+
+
+def test_pinned_sdk_market_buy_signing_and_preview_share_the_cash_cap():
+    from py_clob_client_v2.order_builder.builder import OrderBuilder, ROUNDING_CONFIG
+
+    fees = Fees(True, 40_000, 1)
+    quote = signed_buy_notional(1_000_000, fees, 10_000, 30_000)
+    side, maker, minimum_shares = OrderBuilder(None).get_market_order_amounts(
+        "BUY", quote / 1_000_000, 0.03, ROUNDING_CONFIG["0.01"]
+    )
+    fills = plan_buy(
+        [(20_000, 50_000_000)],
+        1_000_000,
+        30_000,
+        5_000_000,
+        fees,
+        10_000,
+        Preferences(),
+    )
+    assert side == 0 and maker == 960_000 and minimum_shares == 32_000_000
+    assert sum(f.gross for f in fills) == 48_000_000
+    assert sum(f.amount for f in fills) == 997_630
+    assert sum(f.amount - f.fee for f in fills) == maker
 
 
 def test_shared_depth_and_small_target_group():

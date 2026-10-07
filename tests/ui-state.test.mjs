@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {displayStatus,curveSegments,modeSwitchDecision,walletOriginSecure,liveWalletAccountVerified} from '../src/pm_nautilus/web/ui-state.js';
+import {displayStatus,curveSegments,modeSwitchDecision,walletOriginSecure,liveWalletAccountVerified,liveRunSummary,redemptionApprovalAction} from '../src/pm_nautilus/web/ui-state.js';
 const base=()=>({executionMode:'TEST',strategy:{status:'RUNNING'},positions:[{currentSellPriceStatus:'NO_BID'}],marketScan:{lastScanAt:'2026-09-22',diagnostics:{streams:{groups:[{taskRunning:true,state:'READY',readyBookCount:2,tokenCount:2}]}}}});
 const opts={lastSuccess:1000,now:2000};
 test('quiet/no-bid is healthy; stale UI cannot imply running',()=>{
@@ -26,6 +26,23 @@ test('mode switch remains available during background polling and never starts t
  assert.deepEqual(modeSwitchDecision({...state,displayMode:'LIVE'}),{nextMode:'TEST',error:null});
  assert.equal(modeSwitchDecision({...state,controlPending:true}).nextMode,null);
  assert.equal(modeSwitchDecision({...state,configDirty:true}).nextMode,null);
+});
+test('LIVE run state remains visible across mode views and does not imply pause when stale',()=>{
+ assert.deepEqual(liveRunSummary('RUNNING',{lastSuccess:1000,now:2000}),{text:'LIVE 运行中',tone:'negative'});
+ assert.deepEqual(liveRunSummary('RUNNING',{lastSuccess:1000,now:12000}),{text:'LIVE 上次为运行中 · 待核对',tone:'negative'});
+ assert.deepEqual(liveRunSummary('PAUSED',{lastSuccess:1000,now:12000}),{text:'LIVE 状态未确认',tone:'neutral'});
+ assert.equal(liveRunSummary('LOCKED',{lastSuccess:1000,now:2000}).text,'LIVE 已锁定');
+});
+test('redemption approval is offered only for an unlocked, stopped wallet needing action',()=>{
+ const wallet={configured:true,unlocked:true,enabled:false,status:'BLOCKED',redemptionApproval:{status:'MISSING'}};
+ const ready={dashboardReady:true,secure:true};
+ assert.deepEqual(redemptionApprovalAction(wallet,ready),{visible:true,disabled:false,label:'授权赎回'});
+ assert.equal(redemptionApprovalAction({...wallet,status:'RUNNING'},ready).visible,false);
+ assert.equal(redemptionApprovalAction({...wallet,enabled:true,status:'PAUSED'},ready).visible,false);
+ assert.equal(redemptionApprovalAction({...wallet,unlocked:false},ready).visible,false);
+ assert.equal(redemptionApprovalAction({...wallet,redemptionApproval:{status:'APPROVED'}},ready).visible,false);
+ assert.equal(redemptionApprovalAction({...wallet,redemptionApproval:{status:'PENDING'}},ready).label,'继续核对赎回授权');
+ assert.equal(redemptionApprovalAction(wallet,{...ready,secure:false}).disabled,true);
 });
 test('hour and day points do not connect across an interrupted bucket',()=>{
  const p=(bucket,breakBefore=false,session='a')=>({at:bucket*3600000+3599000,bucket,breakBefore,session,pnl:'1'});

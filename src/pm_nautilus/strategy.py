@@ -116,7 +116,7 @@ class Runtime:
 
     def held_cash(self):
         reserved = sum(
-            i["cash"] - i.get("spent", 0)
+            max(0, i["cash"] - i.get("spent", 0))
             for i in self.store.intents(active_only=True).values()
             if i["side"] == "BUY" and not i.get("terminal", False)
         )
@@ -351,7 +351,11 @@ class Runtime:
             cycle["cost"] += amount
             intent["spent"] = intent.get("spent", 0) + amount
             if cycle["spent"] > cycle["budget"]:
-                raise ValueError("实际成交超过冻结预算")
+                # Preserve the confirmed venue fill even if external fee terms
+                # changed after signing. The breached budget must stop new buys,
+                # not make the business projection permanently unreplayable.
+                self.business["recovery_error"] = "实际含费支出超过冻结预算，需核对账户后处理"
+                self.store.put("status", "PAUSED")
             stop = StopLoss(**cycle["stop"])
             stop.add(p, gross)
             cycle["stop"] = asdict(stop)
@@ -515,6 +519,7 @@ class Runtime:
                 sum(f.gross for f in winner.fills),
                 self.preferences.max_price,
                 cash=min(cash, remaining),
+                execution_limit=max(f.price for f in winner.fills),
             )
 
     def drain(self):
@@ -546,7 +551,9 @@ class Runtime:
         for eid in exits:
             self.evaluate(eid)
 
-    def submit(self, t, side, qty, limit, cash=0, kind="TARGET", targets=None):
+    def submit(
+        self, t, side, qty, limit, cash=0, kind="TARGET", targets=None, execution_limit=None
+    ):
         self.native.ensure_instrument(t)
         if self.mode == "TEST" and kind != "SETTLEMENT":
             # Write the pre-fill depth BEFORE any intent/native fill can commit.
@@ -563,6 +570,7 @@ class Runtime:
             "spent": 0,
             "quantity": qty,
             "limit": limit,
+            "execution_limit": execution_limit if side == "BUY" and execution_limit else limit,
             "kind": kind,
             "targets": targets or [],
             "generation": self.store.generation,

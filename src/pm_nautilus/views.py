@@ -50,12 +50,24 @@ def portfolio_view(r):
         t = r.tokens[c["token_id"]]
         v = token_view(r, t)
         stop = StopLoss(**c["stop"])
-        bid = micros(v["bestBid"]) if v["bestBid"] is not None else None
-        value = (
-            None
-            if not r.books[t.token_id].ready
-            else max(0, cost(bid or 0, c["quantity"]) - t.fees.fee(c["quantity"], bid or 0))
-        )
+        book = r.books[t.token_id]
+        value = None
+        sellable = None
+        if book.ready:
+            remaining = c["quantity"]
+            value = 0
+            for price, quantity in sorted(
+                book.bid.available() if r.mode == "TEST" else book.bid.external.items(),
+                reverse=True,
+            ):
+                filled = min(remaining, quantity)
+                if filled <= 0:
+                    continue
+                value += max(0, cost(price, filled) - t.fees.fee(filled, price))
+                remaining -= filled
+                if remaining == 0:
+                    break
+            sellable = c["quantity"] - remaining
         targets = sorted(
             {x["price"] for x in r.business["targets"].values() if x["event_id"] == eid}
         )
@@ -68,6 +80,8 @@ def portfolio_view(r):
             targetSellPrices=list(map(units, targets)),
             stopLossThreshold=units(stop.threshold) if stop.enabled else None,
             stopLossMultiplier=units(stop.multiplier),
+            executableSellValue=units(value),
+            executableSellQuantity=units(sellable),
             cycleStatus="STOP_EXITING"
             if stop.state == "EXITING"
             else "STOP_ARMED"
@@ -79,20 +93,27 @@ def portfolio_view(r):
         positions.append(v)
         values.append(value)
         costs += c["cost"]
-    pending = [c for c in r.business["claims"].values() if c["state"] != "CREDITED"]
+    claims = list(r.business["claims"].values())
+    pending = [c for c in claims if c["state"] not in {"CREDITED", "FAILED"}]
+    failed = [c for c in claims if c["state"] == "FAILED"]
     receivable = sum(c["amount"] for c in pending if not c.get("cash_included"))
     claim_value = sum(c["amount"] for c in pending)
     claim_cost = sum(c["cost"] for c in pending)
     value = None if None in values else sum(values)
-    total = None if value is None else r.cash() + value + receivable
+    # A failed redemption still represents unresolved rights. Neither assume it
+    # will pay nor book it as a loss while the actual chain/account result is unknown.
+    total = None if value is None or failed else r.cash() + value + receivable
     portfolio = {
         "totalFunds": units(total),
         "realizedPnl": units(r.business["realized"]),
-        "unrealizedPnl": units(None if value is None else value + claim_value - costs - claim_cost),
+        "unrealizedPnl": units(
+            None if value is None or failed else value + claim_value - costs - claim_cost
+        ),
         "positionValue": units(value),
         "availableCash": units(r.cash() - r.held_cash()),
         "reservedCash": units(r.held_cash()),
         "pendingRedemption": units(receivable),
+        "failedRedemption": units(sum(c["amount"] for c in failed)),
     }
     return positions, portfolio
 

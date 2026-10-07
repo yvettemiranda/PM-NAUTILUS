@@ -145,6 +145,17 @@ cd /opt/pm-nautilus
 
 **有真实 LIVE 记录的迁移必须以停止旧实例后制作的最终一致性备份为准。**网页 `.pmnb` 虽是内部一致的时间点快照，但网页备份时服务仍运行；PAUSE 只停止新买，卖出和赎回仍可写入账本。先下载 `.pmnb` 再停旧服务，可能漏掉这段时间已完成的交易，甚至在没有未结仓位时被误认为迁移成功。当前版本的最终迁移应由管理员确认在途订单、停旧实例、制作并验证包含 `runtime/server` 和加密钱包的停机备份，然后在新服务器恢复并核对。**上方升级备份命令结尾的 `docker compose ... start` 在换服时不得执行；还要确认旧服的自动启动单元不会将它重新拉起。**日常网页 `.pmnb` 可另存作恢复参考，不能单独替代最终停机备份。
 
+停旧实例后，也可用镜像内的 `pm-nautilus-final-export` 生成最终 `.pmnb`。它独占应用的 `process.lock`，若旧实例仍在运行便拒绝导出；目标文件只创建一次，不覆盖已有备份，并返回 SHA-256。示例中的文件位于持久化数据目录，导出后应连同校验值转存到受保护的位置，且保持旧实例停止，直到新服恢复和核对完成：
+
+```bash
+docker compose --env-file .env -f compose.yaml -f compose.override.yaml stop
+docker compose --env-file .env -f compose.yaml -f compose.override.yaml run --rm --no-deps -it \
+  --entrypoint /app/.venv/bin/pm-nautilus-final-export app \
+  --data-dir /data --output "/data/LIVE/final-live-$(date +%Y%m%d-%H%M%S).pmnb"
+```
+
+该工具保证导出期间本机应用不能写入账本；它不能代替停机前对在途订单、链上交易及旧服自动重启的核对。若账本超过网页包上限，仍使用前述停机加密归档。首次实盘之前没有 LIVE 历史时，不需要迁移旧 TEST 模拟账本。
+
 新服务器恢复时，先确保旧实例已停止；克隆并固定目标代码提交，然后在**停止应用**的目录中把最新加密快照通过管道解密并解包，不写出明文压缩包：
 
 ```bash

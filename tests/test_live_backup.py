@@ -1,4 +1,6 @@
 import os
+import fcntl
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -13,6 +15,7 @@ from pm_nautilus.live_backup import (
     cleanup_live_bundle_file,
     export_live_bundle,
     export_live_bundle_file,
+    export_final_live_bundle_file,
     restore_live_bundle,
     restore_live_bundle_file,
 )
@@ -188,3 +191,41 @@ def test_failed_large_export_removes_private_scratch(tmp_path, monkeypatch):
         export_live_bundle_file(source, vault, PASSWORD)
     assert list(source.path.parent.glob(".pm-live-export-*")) == []
     source.close()
+
+
+def test_final_export_requires_stopped_instance_and_restores_latest_ledger(tmp_path):
+    root = tmp_path / "old"
+    source = Store(root / "LIVE" / "state.sqlite", "LIVE")
+    vault = root / "wallet" / "live.vault"
+    identity = write_vault(vault, _settings(), PASSWORD)
+    source.put("live_wallet_identity", identity)
+    source.save_intent(
+        "latest", {"event_id": "event", "token_id": "1", "side": "BUY", "terminal": True}
+    )
+    source.close()
+    output_dir = tmp_path / "backups"
+    output_dir.mkdir()
+    output = output_dir / "final.pmnb"
+
+    lock_path = root / "process.lock"
+    with lock_path.open("a+b") as running_lock:
+        fcntl.flock(running_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(BackupError, match="仍在运行"):
+            export_final_live_bundle_file(root, PASSWORD, output)
+        assert not output.exists()
+
+    digest = export_final_live_bundle_file(root, PASSWORD, output)
+    assert digest == hashlib.sha256(output.read_bytes()).hexdigest()
+    assert os.stat(output).st_mode & 0o777 == 0o600
+    with pytest.raises(BackupError, match="已存在"):
+        export_final_live_bundle_file(root, PASSWORD, output)
+
+    destination = Store(tmp_path / "new" / "LIVE" / "state.sqlite", "LIVE")
+    assert (
+        restore_live_bundle_file(
+            output, PASSWORD, destination, tmp_path / "new" / "wallet" / "live.vault"
+        )
+        == identity
+    )
+    assert destination.intent("latest")["token_id"] == "1"
+    destination.close()

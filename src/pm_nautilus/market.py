@@ -13,7 +13,7 @@ from websockets.asyncio.client import connect, process_exception
 from websockets.exceptions import ConnectionClosed
 
 from .config import micros
-from .rules import Token, Fees
+from .rules import Token, Fees, SUPPORTED_CLOB_TICKS
 
 GAMMA = "https://gamma-api.polymarket.com"
 WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
@@ -52,6 +52,10 @@ def normalize(event):
         return []
     out = []
     for m in markets:
+        # CTF outcomes use clobTokenIds and the CTF redemption path. V2 uses
+        # positionIds and a different exchange/settlement path.
+        if m.get("version", event.get("version")) not in {None, "v1"} or m.get("positionIds"):
+            continue
         if any(
             m.get(k) is not v
             for k, v in (
@@ -85,7 +89,7 @@ def normalize(event):
             if opened is None or ends is None or ends <= opened:
                 continue
             tick, minimum = micros(m["orderPriceMinTickSize"]), micros(m["orderMinSize"])
-            if tick <= 0 or minimum <= 0:
+            if tick not in SUPPORTED_CLOB_TICKS or minimum <= 0:
                 continue
             tags = {
                 str(t["id"]): t.get("label") or t.get("slug") or str(t["id"])
@@ -147,6 +151,7 @@ class MarketService:
         self.loop_task = None
         self.on_resolution = None
         self.subscription_lock = asyncio.Lock()
+        self.unsupported_ticks = runtime.store.get("unsupported_ticks", {})
 
     def stream_state(self, group, state, error=None):
         entry = self.streams.setdefault(group, {})
@@ -253,7 +258,8 @@ class MarketService:
                 seen.update(new)
                 for event in page:
                     for t in normalize(event):
-                        tokens[t.token_id] = t
+                        if t.token_id not in self.unsupported_ticks:
+                            tokens[t.token_id] = t
                 self.scan_status["eventCountScanned"] = len(seen)
                 cursor = payload.get("next_cursor")
                 if cursor is None:
@@ -354,6 +360,15 @@ class MarketService:
                 t = replace(r.tokens[tid], tick=micros(msg["new_tick_size"]))
                 if t.tick <= 0:
                     raise ValueError("无效 tick 变更")
+                if t.tick not in SUPPORTED_CLOB_TICKS:
+                    self.unsupported_ticks[tid] = t.tick
+                    r.store.put("unsupported_ticks", self.unsupported_ticks)
+                    t = replace(t, open=False)
+                    self.remember_error("serviceError", ValueError("市场 tick 不受当前 SDK 支持"))
+                    r.pause()
+                elif tid in self.unsupported_ticks:
+                    self.unsupported_ticks.pop(tid)
+                    r.store.put("unsupported_ticks", self.unsupported_ticks)
                 r.add_tokens([t])
                 r.disconnect([tid])
                 raise ConnectionError("tick 变化，需要新完整盘口")

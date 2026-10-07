@@ -37,7 +37,16 @@ class Client:
 def private_pass(settings, signer, funder, data_dir):
     assert settings is SETTINGS
     assert (signer, funder, data_dir) == (SIGNER, FUNDER, "/unused")
-    return {"canStartNewBuys": True}
+    return {
+        "canStartNewBuys": True,
+        "redemptionApprovalComplete": True,
+        "redemptionApproval": {
+            "status": "APPROVED",
+            "standardApproved": True,
+            "negRiskApproved": True,
+            "pendingTxHash": None,
+        },
+    }
 
 
 def page(rows, *, has_more=False, next_cursor=None):
@@ -70,6 +79,7 @@ def test_all_checks_pass_with_official_get_endpoints_and_no_secret_output():
     result = check(client)
 
     assert result["ready"] is True
+    assert result["redemptionApproval"]["status"] == "APPROVED"
     assert statuses(result) == {"account": "pass", "region": "pass", "positions": "pass"}
     assert client.calls == [
         (readiness.GEOBLOCK_URL, None, {"Accept": "application/json"}),
@@ -234,7 +244,10 @@ def test_private_preflight_failure_and_unready_are_not_green():
         raise RuntimeError(SECRET)
 
     def unready(*_):
-        return {"canStartNewBuys": False, "unknownOpenOrderCount": 1}
+        return private_pass(SETTINGS, SIGNER, FUNDER, "/unused") | {
+            "canStartNewBuys": False,
+            "unknownOpenOrderCount": 1,
+        }
 
     failed_result = check(
         Client(Response({"blocked": False}), Response(page([]))), private_check=failed
@@ -246,3 +259,45 @@ def test_private_preflight_failure_and_unready_are_not_green():
     assert statuses(unready_result)["account"] == "blocked"
     assert failed_result["ready"] is False and unready_result["ready"] is False
     assert SECRET not in json.dumps(failed_result)
+
+
+def test_missing_or_pending_redemption_approval_cannot_be_ready():
+    missing = check(
+        Client(Response({"blocked": False}), Response(page([]))),
+        private_check=lambda *_: {
+            "canStartNewBuys": False,
+            "redemptionApprovalComplete": False,
+            "redemptionApproval": {
+                "status": "MISSING",
+                "standardApproved": False,
+                "negRiskApproved": True,
+                "pendingTxHash": None,
+            },
+        },
+    )
+    incomplete = check(
+        Client(Response({"blocked": False}), Response(page([]))),
+        private_check=lambda *_: {"canStartNewBuys": True},
+    )
+    assert statuses(missing)["account"] == "blocked"
+    assert statuses(incomplete)["account"] == "unknown"
+    assert missing["ready"] is False and incomplete["ready"] is False
+
+
+@pytest.mark.parametrize(
+    "field,message",
+    [
+        ("collateralBalanceSufficient", "pUSD 余额不足"),
+        ("collateralAllowancePresent", "pUSD 交易授权额度不足"),
+        ("signerGasAvailable", "Polygon POL 余额不足"),
+    ],
+)
+def test_unready_account_names_the_blocking_resource(field, message):
+    result = check(
+        Client(Response({"blocked": False}), Response(page([]))),
+        private_check=lambda *_: private_pass(SETTINGS, SIGNER, FUNDER, "/unused")
+        | {"canStartNewBuys": False, field: False},
+    )
+    account = next(item for item in result["checks"] if item["id"] == "account")
+    assert account["status"] == "blocked"
+    assert message in account["message"]

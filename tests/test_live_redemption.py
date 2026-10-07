@@ -105,7 +105,13 @@ def assert_rights_preserved(runtime, t, claim):
     positions = runtime.native.cache.positions_open(instrument_id=instrument_id(t))
     assert sum(p.quantity.as_decimal() for p in positions) == 10
     assert runtime.cash() == 0
-    assert dashboard(runtime)["portfolio"]["pendingRedemption"] == str(claim["amount"] // 1_000_000)
+    portfolio = dashboard(runtime)["portfolio"]
+    if claim["state"] == "FAILED":
+        assert portfolio["pendingRedemption"] == "0"
+        assert portfolio["failedRedemption"] == str(claim["amount"] // 1_000_000)
+        assert portfolio["totalFunds"] is None
+    else:
+        assert portfolio["pendingRedemption"] == str(claim["amount"] // 1_000_000)
 
 
 def settlement_fills(runtime):

@@ -13,6 +13,7 @@
 
       <header class="topbar">
         <span class="brand">PM / NAUTILUS</span>
+        <span id="live-run-indicator" class="live-run-indicator" role="status" aria-live="polite">LIVE 状态未确认</span>
         <div class="topbar-actions">
           <button id="mode-toggle" class="mode-toggle" type="button">TEST</button>
           <button id="status-toggle" class="status-button" type="button" aria-label="查看运行状态" aria-expanded="false" aria-controls="runtime-status"><span id="run-dot" class="status-dot"></span></button>
@@ -58,7 +59,7 @@
 
         <div id="wallet-actions" class="wallet-actions" hidden>
           <ul id="wallet-checks" class="wallet-checks"></ul>
-          <div class="wallet-action-buttons"><button id="wallet-check" class="button secondary" type="button">检查账户</button></div>
+          <div class="wallet-action-buttons"><button id="wallet-check" class="button secondary" type="button">检查账户</button><button id="wallet-approve-redemption" class="button secondary" type="button" hidden>授权赎回</button></div>
           <div id="wallet-enable-step" class="wallet-enable-step" hidden>
             <p id="wallet-rules-summary"></p>
             <button id="wallet-open-config" class="wallet-text-button" type="button">查看完整交易规则</button>
@@ -319,9 +320,9 @@
       </section>
 
       <section class="equity-panel" aria-label="资金概览">
-        <div class="equity-label">累计净盈亏</div>
+        <div class="equity-label">累计盈亏估算</div>
         <div class="equity-head"><strong id="net-pnl">—</strong><span id="net-return"></span></div>
-        <button id="equity-chart" type="button" aria-label="收益曲线，左右方向键查看数据点"><svg id="equity-svg" role="img" aria-label="累计净盈亏曲线"></svg></button>
+        <button id="equity-chart" type="button" aria-label="盈亏估算曲线，左右方向键查看数据点"><svg id="equity-svg" role="img" aria-label="累计盈亏估算曲线"></svg></button>
         <div class="curve-footer">
           <span id="curve-status" role="status" aria-live="polite"></span>
           <div class="curve-scales" role="group" aria-label="收益曲线时间刻度">
@@ -330,12 +331,12 @@
           </div>
         </div>
         <div id="curve-note" class="field-note" hidden></div>
-        <div class="equity-money"><div><span>总资产</span><strong id="total-funds">—</strong></div><div><span>可用现金</span><strong id="available-cash">—</strong></div></div>
+        <div class="equity-money"><div><span>资产估算（含待赎回）</span><strong id="total-funds">—</strong></div><div><span>可用现金</span><strong id="available-cash">—</strong></div></div>
         <details id="portfolio-details"><summary>明细</summary>
           <section id="portfolio" class="portfolio" aria-label="资金明细">
             <article><span>已实现</span><strong id="realized-pnl">—</strong></article>
-            <article><span>未实现</span><strong id="unrealized-pnl">—</strong></article>
-            <article><span>持仓估值</span><strong id="position-value">—</strong></article>
+            <article><span>未实现估算</span><strong id="unrealized-pnl">—</strong></article>
+            <article><span>当前买盘可卖估值</span><strong id="position-value">—</strong></article>
             <article><span>持仓数</span><strong id="portfolio-position-count">—</strong></article>
           </section>
           <p id="cash-note" class="field-note"></p><p class="field-note">净盈亏含持仓浮动盈亏；估值按最佳买价扣费，不代表全部仓位可按此价卖出。</p>

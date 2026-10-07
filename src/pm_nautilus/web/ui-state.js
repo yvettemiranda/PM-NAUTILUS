@@ -23,6 +23,32 @@ export function modeSwitchDecision({ displayMode, controlPending, configDirty })
   return { nextMode: displayMode === "TEST" ? "LIVE" : "TEST", error: null };
 }
 
+export function liveRunSummary(status, { lastSuccess = 0, error = null, now = Date.now() } = {}) {
+  const stale = !lastSuccess || Boolean(error) || now - lastSuccess > 10000;
+  if (stale) return status === "RUNNING"
+    ? { text: "LIVE 上次为运行中 · 待核对", tone: "negative" }
+    : { text: "LIVE 状态未确认", tone: "neutral" };
+  return {
+    RUNNING: { text: "LIVE 运行中", tone: "negative" },
+    PAUSED: { text: "LIVE 已暂停", tone: "neutral" },
+    LOCKED: { text: "LIVE 已锁定", tone: "neutral" },
+    ERROR: { text: "LIVE 状态异常", tone: "negative" },
+  }[status] || { text: "LIVE 状态未确认", tone: "neutral" };
+}
+
+export function redemptionApprovalAction(wallet, {
+  dashboardReady = false, secure = false, pending = false, loading = false,
+} = {}) {
+  const status = wallet?.redemptionApproval?.status;
+  const visible = Boolean(wallet?.configured && wallet?.unlocked && wallet?.enabled === false && wallet?.status !== "RUNNING" &&
+    ["MISSING", "PENDING", "FAILED"].includes(status));
+  return {
+    visible,
+    disabled: !visible || !dashboardReady || !secure || pending || loading,
+    label: status === "PENDING" ? "继续核对赎回授权" : status === "FAILED" ? "重试赎回授权" : "授权赎回",
+  };
+}
+
 export function walletOriginSecure({ protocol, hostname }) {
   return protocol === "https:" || (
     protocol === "http:" && ["localhost", "127.0.0.1", "[::1]", "testserver"].includes(hostname)

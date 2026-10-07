@@ -24,6 +24,7 @@ dev = ["pytest==8.4.2", "ruff==0.13.0"]
 
 [project.scripts]
 pm-nautilus = "pm_nautilus.app:main"
+pm-nautilus-final-export = "pm_nautilus.final_export:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pm_nautilus"]

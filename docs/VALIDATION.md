@@ -2,6 +2,13 @@
 
 本页按日期保留当时的实测记录。旧章节中的“当前”“最近 1440 个样本”等表述只描述对应日期的版本；新版本的行为和部署状态以本页最新章节及 [HANDOFF.md](../HANDOFF.md) 为准。
 
+## 2026-10-07 实盘准入修复与部署后验收
+
+- 本地固定依赖执行 246 项 Python 测试、9 项前端测试、Ruff 检查及格式、JavaScript 语法，均通过；`pm-nautilus-final-export --help` 可运行。离线本机应用的健康、TEST/LIVE 面板、钱包状态、TEST 验证和锁定的 LIVE 记录接口均返回 200。测试没有使用真实钱包或提交真实交易。
+- [PR #1](https://github.com/yvettemiranda/PM-NAUTILUS/pull/1) 的 Ubuntu x86_64/ARM64 四项 CI 检查均通过并合并；服务器运行同一代码提交 `273c80e7711221b7f532633710d6be381f1f4e42`。
+- 停机加密备份后升级，服务器 TEST 完整 `/api/TEST/validation` 返回 `ok=true`、`errors=[]`，SQLite `quick_check=ok`。升级前后 83 个模拟持仓、现金 `117.346484U` 及 TEST/LIVE 各 15 项交易设置一致。升级后恢复原 TEST/RUNNING；LIVE 钱包文件已保存但锁定、未启用、无订单意图或原生事件。公网 HTTPS 浏览器读回 TEST 资金/持仓/记录/市场；LIVE 视图不显示 TEST 资金，锁定的记录不可读且 START 禁用。
+- 同一服务器出口的 Polymarket 地区检查返回 `blocked=true`、`US/CA`。真实账户余额、赎回授权、CLOB 订单、链上份额、真实成交费用、卖出和赎回没有进行正式钱包验收；这些结果不能从离线测试或 TEST 账本推断。停机备份成功生成，但本轮没有独立设备上的解密恢复演练。
+
 ## 2026-10-07 全流程审计（只读、未验收真实交易）
 
 完整结论与下一轮交接见 [END_TO_END_HANDOFF_2026-10-07.md](END_TO_END_HANDOFF_2026-10-07.md)。本轮本地锁定依赖下 207 项 Python 测试、Ruff 检查/格式、JS 语法、7 项前端测试通过；独立公开行情短测用临时开发规则取得 10 个模拟 Fill，并在同库重启后验证通过。服务器 10:54 CST 只读巡检为 TEST/RUNNING、LIVE 钱包未配置、容器 healthy、SQLite `quick_check=ok`；`/api/TEST/validation` 在本轮巡检客户端 20 秒内超时，因此**没有本轮完整 TEST validation 的成功结果**。没有真实签名、真实订单或链上操作。发现实盘买单含费预算、成交份额/费用入账、首次钱包赎回授权和运行中网页备份用于迁移等缺口；此前章节的模拟测试和网页就绪不能替代修复及真实实盘验收。

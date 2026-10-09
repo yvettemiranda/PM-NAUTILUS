@@ -337,3 +337,41 @@ def test_canceling_waiting_validation_does_not_leave_new_posts_stuck():
         assert gate.posts == 0
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("holder", ["post", "validation"])
+def test_repeated_cancellation_finishes_gate_release_before_task_exits(holder):
+    async def run():
+        gate = _LedgerGate()
+        entered = asyncio.Event()
+
+        async def hold():
+            async with getattr(gate, holder)():
+                entered.set()
+                await asyncio.Event().wait()
+
+        task = asyncio.create_task(hold())
+        await asyncio.wait_for(entered.wait(), 1)
+        await gate.condition.acquire()
+        try:
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+        finally:
+            gate.condition.release()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 1)
+        assert not gate.checking and gate.posts == 0 and gate.waiting_checks == 0
+
+        # Neither a later complete check nor a later order can remain stuck.
+        async def proceed():
+            async with gate.validation():
+                pass
+            async with gate.post():
+                pass
+
+        await asyncio.wait_for(proceed(), 1)
+
+    asyncio.run(run())

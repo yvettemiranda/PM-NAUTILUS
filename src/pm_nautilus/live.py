@@ -180,9 +180,7 @@ class _LedgerGate:
         try:
             yield
         finally:
-            async with self.condition:
-                self.checking = False
-                self.condition.notify_all()
+            await self._release(check=True)
 
     @asynccontextmanager
     async def post(self):
@@ -192,9 +190,29 @@ class _LedgerGate:
         try:
             yield
         finally:
+            await self._release(check=False)
+
+    async def _release(self, *, check):
+        async def cleanup():
             async with self.condition:
-                self.posts -= 1
+                if check:
+                    self.checking = False
+                else:
+                    self.posts -= 1
                 self.condition.notify_all()
+
+        # Shutdown can cancel a task again while it waits for this lock. Finish
+        # releasing ownership before propagating cancellation to its caller.
+        task = asyncio.create_task(cleanup())
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+        task.result()
+        if cancelled:
+            raise asyncio.CancelledError
 
 
 class _TrackedRetryManager:

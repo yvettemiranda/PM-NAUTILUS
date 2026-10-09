@@ -22,8 +22,10 @@ def test_live_health_recovers_only_after_complete_validation(monkeypatch, valid)
     values = {}
     owner = SimpleNamespace(
         status="RUNNING",
-        store=SimpleNamespace(put=lambda key, value: values.update({key: value})),
-        validate=Mock(return_value={"ok": valid, "errors": [] if valid else ["mismatch"]}),
+        store=SimpleNamespace(_closed=False, put=lambda key, value: values.update({key: value})),
+        validate_async=AsyncMock(
+            return_value={"ok": valid, "errors": [] if valid else ["mismatch"]}
+        ),
         drain=Mock(),
     )
 
@@ -38,7 +40,11 @@ def test_live_health_recovers_only_after_complete_validation(monkeypatch, valid)
         sync_owned=AsyncMock(side_effect=[ConnectionError("temporary outage"), None]),
         generate_position_status_reports=AsyncMock(),
         _reconcile_requested=asyncio.Event(),
+        _ledger_gate=asyncio.Lock(),
+        _ledger_validation=None,
     )
+    client._validate_ledger = LiveExecution._validate_ledger.__get__(client)
+    client._invalidate_ledger = LiveExecution._invalidate_ledger.__get__(client)
 
     async def check_open_orders():
         client.open_orders_clear = True
@@ -51,7 +57,7 @@ def test_live_health_recovers_only_after_complete_validation(monkeypatch, valid)
         rounds.append((client.ready, owner.status, values.get("live_error")))
         if len(rounds) == 1:
             # A transport failure must not claim that custody or the journal was checked.
-            owner.validate.assert_not_called()
+            owner.validate_async.assert_not_awaited()
             client.generate_position_status_reports.assert_not_awaited()
         else:
             raise asyncio.CancelledError
@@ -64,11 +70,11 @@ def test_live_health_recovers_only_after_complete_validation(monkeypatch, valid)
     assert rounds[1] == (valid, "PAUSED", None if valid else "ValueError")
     assert client.sync_owned.await_count == 2
     client.generate_position_status_reports.assert_awaited_once_with(None)
-    owner.validate.assert_called_once_with()
+    owner.validate_async.assert_awaited_once_with()
     assert owner.drain.call_count == int(valid)
 
 
-def test_dashboard_filters_history_before_loading_event_intents(tmp_path, monkeypatch):
+def test_dashboard_filters_history_and_batches_active_event_locks(tmp_path, monkeypatch):
     """Closed history must not be decoded once per Event on each 500ms refresh."""
     store = Store(tmp_path / "history.sqlite")
     try:
@@ -124,12 +130,11 @@ def test_dashboard_filters_history_before_loading_event_intents(tmp_path, monkey
             store.save_intent("pending", intent("event-0", False))
 
         original = store.intents
-        filtered_events = set()
+        filtered_calls = []
 
         def active_only(*args, **kwargs):
             assert kwargs.get("active_only") is True, "Dashboard loaded unfiltered history"
-            if kwargs.get("event_id") is not None:
-                filtered_events.add(kwargs["event_id"])
+            filtered_calls.append(kwargs.get("event_id"))
             result = original(*args, **kwargs)
             assert all(not i["terminal"] for i in result.values())
             return result
@@ -140,7 +145,8 @@ def test_dashboard_filters_history_before_loading_event_intents(tmp_path, monkey
         result = dashboard(r, limit=200)
         store.db.set_trace_callback(None)
 
-        assert filtered_events == set(r.events)
+        # Reservation and lock projections each load the active set once.
+        assert filtered_calls == [None, None]
         locked = [event["eventId"] for event in result["marketScan"]["events"] if event["locked"]]
         assert locked == ["event-0"]
         assert result["portfolio"]["reservedCash"] == "0.6"
@@ -148,10 +154,15 @@ def test_dashboard_filters_history_before_loading_event_intents(tmp_path, monkey
         event_queries = [
             query for query in queries if "FROM intents" in query and "event_id=" in query
         ]
-        assert event_queries
-        for query in set(event_queries):
+        assert not event_queries
+        batch_queries = [
+            query for query in queries if "SELECT order_id,payload FROM intents" in query
+        ]
+        assert len(batch_queries) == 2
+        for query in set(batch_queries):
             assert "WHERE" in query.upper()
+            assert "json_extract(payload,'$.terminal')=0" in query
             plan = store.db.execute("EXPLAIN QUERY PLAN " + query).fetchall()
-            assert any("SEARCH intents USING INDEX" in row[3] for row in plan), plan
+            assert any("USING INDEX intents_open" in row[3] for row in plan), plan
     finally:
         store.close()

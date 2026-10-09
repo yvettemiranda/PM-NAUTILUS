@@ -1,10 +1,13 @@
 """Read-only projections for the retained PM-SMALL UI."""
 
 from datetime import datetime, timezone
-from nautilus_trader.model.events import OrderFilled
+from collections import deque
+from itertools import islice
 from nautilus_trader.model.enums import OrderSide
 from .config import SCALE, units, micros
 from .rules import StopLoss, cost
+
+RECORD_CACHE_ORDERS = 10_000  # The API's largest history page.
 
 
 def iso(ns):
@@ -44,6 +47,9 @@ def portfolio_view(r):
     positions = []
     values = []
     costs = 0
+    targets_by_event = {}
+    for target in r.business["targets"].values():
+        targets_by_event.setdefault(target["event_id"], set()).add(target["price"])
     for eid, c in r.business["cycles"].items():
         if c["quantity"] <= 0 or r.tokens[c["token_id"]].condition_id in r.business["settled"]:
             continue
@@ -68,9 +74,7 @@ def portfolio_view(r):
                 if remaining == 0:
                     break
             sellable = c["quantity"] - remaining
-        targets = sorted(
-            {x["price"] for x in r.business["targets"].values() if x["event_id"] == eid}
-        )
+        targets = sorted(targets_by_event.get(eid, ()))
         v.update(
             quantity=units(c["quantity"]),
             averageBuyPrice=units(c["cost"] * SCALE // c["quantity"]),
@@ -103,6 +107,7 @@ def portfolio_view(r):
     # A failed redemption still represents unresolved rights. Neither assume it
     # will pay nor book it as a loss while the actual chain/account result is unknown.
     total = None if value is None or failed else r.cash() + value + receivable
+    held_cash = r.held_cash()
     portfolio = {
         "totalFunds": units(total),
         "realizedPnl": units(r.business["realized"]),
@@ -110,8 +115,8 @@ def portfolio_view(r):
             None if value is None or failed else value + claim_value - costs - claim_cost
         ),
         "positionValue": units(value),
-        "availableCash": units(r.cash() - r.held_cash()),
-        "reservedCash": units(r.held_cash()),
+        "availableCash": units(r.cash() - held_cash),
+        "reservedCash": units(held_cash),
         "pendingRedemption": units(receivable),
         "failedRedemption": units(sum(c["amount"] for c in failed)),
     }
@@ -120,16 +125,44 @@ def portfolio_view(r):
 
 def dashboard(r, service=None, limit=20, live_enabled=False):
     positions, portfolio = portfolio_view(r)
-    events = []
+    # Rank and diagnose every monitored event, but only build depth-backed token
+    # projections for the visible page. The page size never changes eligibility.
+    summaries = []
     for eid, ids in r.events.items():
         if not ids:
             continue
         status, winner = r.evaluations.get(eid, ("INCOMPLETE", None))
         tid = winner.token.token_id if winner else min(ids)
+        missing = sorted(x for x in ids if not r.books[x].ready)
+        summaries.append(
+            {
+                "eventId": eid,
+                "status": status,
+                "winner": winner,
+                "tokenId": tid,
+                "ids": ids,
+                "progressPercent": float(r.tokens[tid].progress(r.now)),
+                "pendingReason": ("AWAITING_FULL_BOOKS" if missing else "AWAITING_EVALUATION")
+                if status == "INCOMPLETE"
+                else None,
+                "missingBookTokenIds": missing,
+            }
+        )
+    direction = 1 if r.preferences.candidateSortDirection == "ASC" else -1
+    summaries.sort(
+        key=lambda e: (e["status"] != "READY", e["progressPercent"] * direction, e["eventId"])
+    )
+    active_events = {i["event_id"] for i in r.store.intents(active_only=True).values()}
+    events = []
+    for summary in summaries[:limit]:
+        eid, ids = summary["eventId"], summary["ids"]
+        status, winner = summary["status"], summary["winner"]
+        tid = summary["tokenId"]
         t = r.tokens[tid]
         v = token_view(r, t)
         outcomes = [
-            token_view(r, r.tokens[x]) | {"isWinner": bool(winner and x == tid)}
+            (v if x == tid else token_view(r, r.tokens[x]))
+            | {"isWinner": bool(winner and x == tid)}
             for x in sorted(ids)
         ]
         events.append(
@@ -145,30 +178,20 @@ def dashboard(r, service=None, limit=20, live_enabled=False):
                 "eligibleTokenCount": len(ids),
                 "marketCount": len({r.tokens[x].market_id for x in ids}),
                 "status": status,
-                "pendingReason": (
-                    "AWAITING_FULL_BOOKS"
-                    if any(not r.books[x].ready for x in ids)
-                    else "AWAITING_EVALUATION"
-                )
-                if status == "INCOMPLETE"
-                else None,
-                "missingBookTokenIds": sorted(x for x in ids if not r.books[x].ready),
-                "locked": eid in r.business["cycles"] or bool(r.active_intents(eid)),
+                "pendingReason": summary["pendingReason"],
+                "missingBookTokenIds": summary["missingBookTokenIds"],
+                "locked": eid in r.business["cycles"] or eid in active_events,
                 "winner": v if winner else None,
                 "representative": v,
                 "outcomes": outcomes,
             }
         )
-    direction = 1 if r.preferences.candidateSortDirection == "ASC" else -1
-    events.sort(
-        key=lambda e: (e["status"] != "READY", e["progressPercent"] * direction, e["eventId"])
-    )
     scan = dict(service.scan_status) if service else r.store.get("scan", {})
     scan.update(
-        events=events[:limit],
-        eventCount=sum(e["status"] == "READY" for e in events),
-        displayEventCount=len(events),
-        pendingEventCount=sum(e["status"] == "INCOMPLETE" for e in events),
+        events=events,
+        eventCount=sum(e["status"] == "READY" for e in summaries),
+        displayEventCount=len(summaries),
+        pendingEventCount=sum(e["status"] == "INCOMPLETE" for e in summaries),
         tokenCount=len(r.monitored),
         diagnostics={
             "availableCategories": service.categories if service else r.store.get("categories", []),
@@ -176,7 +199,7 @@ def dashboard(r, service=None, limit=20, live_enabled=False):
             "streams": service.stream_diagnostics() if service else None,
             "pendingEvents": [
                 {k: e[k] for k in ("eventId", "pendingReason", "missingBookTokenIds")}
-                for e in events
+                for e in summaries
                 if e["status"] == "INCOMPLETE"
             ],
         },
@@ -208,43 +231,95 @@ def dashboard(r, service=None, limit=20, live_enabled=False):
     }
 
 
-def records(r, limit):
-    out = []
-    groups = {}
-    qty = {}
-    basis = {}
-    for _, e in r.store.events():
-        if not isinstance(e, OrderFilled):
-            continue
-        i = r.store.intent(e.client_order_id)
-        if not i:
-            continue
-        t = r.tokens[i["token_id"]]
-        key = t.token_id
+class _RecordProjection:
+    """Incremental read-only journal projection, discarded on generation change."""
+
+    def __init__(self, generation, capacity):
+        self.generation = generation
+        self.capacity = capacity
+        self.cursor = 0
+        self.groups = {}
+        self.order_ids = deque()
+        self.total_count = 0
+        self.qty = {}
+        self.basis = {}
+        self.incomplete = False
+
+    def update(self, r):
+        head = r.store.db.execute("SELECT max(seq) FROM native_events").fetchone()[0] or 0
+        if head == self.cursor:
+            return
+        # Scan only the appended rowid range. The kind index would rescan every
+        # historical fill and create a sort even for an unchanged UI refresh.
+        for seq, payload in r.store.db.execute(
+            "SELECT seq,payload FROM native_events NOT INDEXED "
+            "WHERE seq>? AND seq<=? AND kind='OrderFilled' ORDER BY seq",
+            (self.cursor, head),
+        ):
+            e = r.store.serializer.deserialize(payload)
+            order_id = str(e.client_order_id)
+            group = self.groups.get(order_id)
+            intent = group["intent"] if group else r.store.intent(e.client_order_id)
+            if intent:
+                # Once the window is full, a missing group can also be a late
+                # fill of an evicted order. Distinguish it by its indexed journal
+                # identity without retaining every historical order ID in RAM.
+                retired = (
+                    group is None
+                    and self.total_count >= self.capacity
+                    and bool(
+                        r.store.db.execute(
+                            "SELECT 1 FROM native_events WHERE kind='OrderFilled' "
+                            "AND json_extract(CAST(payload AS TEXT),'$.client_order_id')=? "
+                            "AND seq<? LIMIT 1",
+                            (order_id, seq),
+                        ).fetchone()
+                    )
+                )
+                self.apply(e, intent, retired)
+            else:
+                # A missing identity cannot be silently cached forever. Rebuild
+                # next time so a subsequently repaired journal remains readable.
+                self.incomplete = True
+        self.cursor = head
+
+    def apply(self, e, intent, retired=False):
+        key = intent["token_id"]
         q = micros(e.last_qty.as_decimal())
         amount = e.info["pm_amount"]
-        before = qty.get(key, 0)
+        before = self.qty.get(key, 0)
         pnl = None
         if e.order_side == OrderSide.BUY:
             kind = "OPEN" if before == 0 else "ADD"
-            qty[key] = before + q
-            basis[key] = basis.get(key, 0) + amount
+            self.qty[key] = before + q
+            self.basis[key] = self.basis.get(key, 0) + amount
         else:
             kind = (
                 "SETTLEMENT"
-                if i["kind"] == "SETTLEMENT"
+                if intent["kind"] == "SETTLEMENT"
                 else "CLOSE"
                 if q == before
                 else "PARTIAL_CLOSE"
             )
-            used = basis.get(key, 0) if q == before else basis.get(key, 0) * q // max(before, 1)
+            used = (
+                self.basis.get(key, 0)
+                if q == before
+                else self.basis.get(key, 0) * q // max(before, 1)
+            )
             pnl = amount - used
-            qty[key] = before - q
-            basis[key] = basis.get(key, 0) - used
+            self.qty[key] = before - q
+            self.basis[key] = self.basis.get(key, 0) - used
+        if self.qty[key] == 0:
+            self.qty.pop(key)
+            self.basis.pop(key, None)
+        if retired:
+            # Preserve the original first-fill ordering and total count while
+            # still applying the new fill to future cost-basis calculations.
+            return
         group_key = str(e.client_order_id)
         gross = e.info.get("pm_gross", q)
-        if group_key in groups:
-            group = groups[group_key]
+        if group_key in self.groups:
+            group = self.groups[group_key]
             group["quantity_micros"] += q
             group["amount_micros"] += amount
             group["gross"] += gross
@@ -259,14 +334,10 @@ def records(r, limit):
             )
             if e.order_side == OrderSide.SELL:
                 row["type"] = kind
-            continue
+            return
         row = {
             "id": group_key,
             "type": kind,
-            "eventTitle": t.event_title,
-            "marketQuestion": t.question,
-            "marketUrl": f"https://polymarket.com/event/{t.slug}" if t.slug else None,
-            "direction": t.direction,
             "price": str(e.last_px),
             "quantity": units(q),
             "amount": units(amount),
@@ -274,13 +345,54 @@ def records(r, limit):
             "occurredAt": iso(e.ts_event),
             "winningOutcome": None,
         }
-        groups[group_key] = {
+        if len(self.order_ids) == self.capacity:
+            self.groups.pop(self.order_ids.popleft())
+        self.groups[group_key] = {
             "row": row,
+            "intent": {"token_id": key, "kind": intent.get("kind")},
             "quantity_micros": q,
             "amount_micros": amount,
             "gross": gross,
             "weighted": micros(e.last_px.as_decimal()) * gross,
             "pnl": pnl or 0,
         }
-        out.append(row)
-    return {"records": list(reversed(out))[:limit], "totalCount": len(out)}
+        self.order_ids.append(group_key)
+        self.total_count += 1
+
+    def view(self, r, limit):
+        out = []
+        for order_id in islice(reversed(self.order_ids), limit):
+            group = self.groups[order_id]
+            t = r.tokens[group["intent"]["token_id"]]
+            # Discovery metadata can change without another fill. Refresh it for
+            # each visible row and never expose a mutable cached record.
+            out.append(
+                group["row"]
+                | {
+                    "eventTitle": t.event_title,
+                    "marketQuestion": t.question,
+                    "marketUrl": f"https://polymarket.com/event/{t.slug}" if t.slug else None,
+                    "direction": t.direction,
+                }
+            )
+        return {"records": out, "totalCount": self.total_count}
+
+
+def records(r, limit):
+    generation = r.store.generation
+    projection = getattr(r, "_record_projection", None)
+    if (
+        projection is None
+        or projection.generation != generation
+        or projection.incomplete
+        or projection.capacity < limit
+    ):
+        projection = _RecordProjection(generation, max(RECORD_CACHE_ORDERS, limit))
+        r._record_projection = projection
+    try:
+        projection.update(r)
+        return projection.view(r, limit)
+    except Exception:
+        # An interrupted projection must not retain partially applied fill state.
+        r._record_projection = None
+        raise

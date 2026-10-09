@@ -859,11 +859,11 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
     @app.get("/api/{mode}/validation")
     async def validate(mode: str):
         mode = mode_name(mode)
-        return (
-            runtimes[mode].validate()
-            if mode in runtimes
-            else {"ok": False, "errors": ["LIVE未连接"]}
-        )
+        if mode not in runtimes:
+            return {"ok": False, "errors": ["LIVE未连接"]}
+        if mode == "LIVE":
+            return await runtimes[mode].client._validate_ledger()
+        return await runtimes[mode].validate_async()
 
     @app.get("/api/{mode}/performance")
     async def performance(mode: str):

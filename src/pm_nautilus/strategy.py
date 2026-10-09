@@ -3,6 +3,7 @@
 from dataclasses import asdict
 from copy import deepcopy
 from pathlib import Path
+import sqlite3
 from uuid import uuid4
 
 from nautilus_trader.config import StrategyConfig
@@ -675,12 +676,27 @@ class Runtime:
         return count
 
     def validate(self):
+        return self._validate(self.store.db.execute("PRAGMA integrity_check").fetchone()[0] == "ok")
+
+    async def validate_async(self):
+        generation = self.store.generation
+        try:
+            integrity = await self.store.integrity_check_async()
+        except sqlite3.Error:
+            integrity = False
+        if self.store._closed or generation != self.store.generation:
+            raise ValueError("账本校验期间状态已更改，请重新核对")
+        # Re-read current quantities, budgets, targets and cash after the worker
+        # finishes. No native cache or mutable business object crosses threads.
+        return self._validate(integrity)
+
+    def _validate(self, integrity):
         errors = []
         if self.faulted:
             errors.append(self.faulted)
         if self.business.get("recovery_error"):
             errors.append(self.business["recovery_error"])
-        if self.store.db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+        if not integrity:
             errors.append("SQLite integrity")
         for eid, c in self.business["cycles"].items():
             t = self.tokens[c["token_id"]]

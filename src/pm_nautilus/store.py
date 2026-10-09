@@ -1,17 +1,23 @@
 """Durable native event journal and replayable PM business projection, per mode."""
 
+import asyncio
 import json
 import msgspec
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
+from threading import Event
 from uuid import uuid4
 
 from nautilus_trader.serialization.serializer import MsgSpecSerializer
 from .books import Book, Side
 from .config import Preferences
 from .rules import Token, Fees
+
+
+_INTEGRITY_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pm-integrity")
 
 
 class BookCache(dict):
@@ -41,6 +47,9 @@ class BookCache(dict):
 class Store:
     def __init__(self, path: str | Path, mode="TEST"):
         self.path = Path(path)
+        self._closed = False
+        self._integrity_lock = asyncio.Lock()
+        self._integrity_stops = set()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.path, isolation_level=None)
         self.db.row_factory = sqlite3.Row
@@ -217,6 +226,45 @@ class Store:
     def has_history(self):
         return self.db.execute("SELECT 1 FROM intents LIMIT 1").fetchone() is not None
 
+    @staticmethod
+    def _read_integrity(path, stop):
+        # Keep the writable connection and all native objects on their owning
+        # event loop. A separate read-only WAL snapshot checks the entire database.
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as db:
+            db.set_progress_handler(lambda: int(stop.is_set()), 1000)
+            if stop.is_set():
+                raise sqlite3.OperationalError("Integrity check cancelled")
+            return db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+    async def integrity_check_async(self):
+        # Serialize full checks, without caching results or skipping any request.
+        async with self._integrity_lock:
+            if self._closed:
+                raise ValueError("账本已关闭，请重新核对")
+            stop = Event()
+            self._integrity_stops.add(stop)
+            worker = asyncio.get_running_loop().run_in_executor(
+                _INTEGRITY_POOL, self._read_integrity, self.path.resolve(), stop
+            )
+            try:
+                return await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                stop.set()
+                # Cancellation must finish the reader before releasing this lock.
+                # The worker owns its connection and closes it even on interrupt.
+                while not worker.done():
+                    try:
+                        await asyncio.shield(worker)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if not worker.cancelled():
+                    worker.exception()
+                raise
+            finally:
+                self._integrity_stops.discard(stop)
+
     def reset(self):
         if self.mode != "TEST" or self.get("status") != "PAUSED":
             raise ValueError("只能在PAUSED下重置TEST")
@@ -229,4 +277,7 @@ class Store:
             self.put("business", self.empty_business())
 
     def close(self):
+        self._closed = True
+        for stop in self._integrity_stops:
+            stop.set()
         self.db.close()

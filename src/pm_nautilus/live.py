@@ -10,6 +10,7 @@ import os
 import re
 import stat
 from collections import OrderedDict
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from decimal import Decimal
 from hashlib import sha256
@@ -157,6 +158,63 @@ def live_factory(settings, wallet):
     return create
 
 
+class _LedgerGate:
+    """Full checks are exclusive; independent venue submissions remain concurrent."""
+
+    def __init__(self):
+        self.condition = asyncio.Condition()
+        self.checking = False
+        self.waiting_checks = 0
+        self.posts = 0
+
+    @asynccontextmanager
+    async def validation(self):
+        async with self.condition:
+            self.waiting_checks += 1
+            try:
+                await self.condition.wait_for(lambda: not self.checking and not self.posts)
+                self.checking = True
+            finally:
+                self.waiting_checks -= 1
+                self.condition.notify_all()
+        try:
+            yield
+        finally:
+            await self._release(check=True)
+
+    @asynccontextmanager
+    async def post(self):
+        async with self.condition:
+            await self.condition.wait_for(lambda: not self.checking and not self.waiting_checks)
+            self.posts += 1
+        try:
+            yield
+        finally:
+            await self._release(check=False)
+
+    async def _release(self, *, check):
+        async def cleanup():
+            async with self.condition:
+                if check:
+                    self.checking = False
+                else:
+                    self.posts -= 1
+                self.condition.notify_all()
+
+        # Shutdown can cancel a task again while it waits for this lock. Finish
+        # releasing ownership before propagating cancellation to its caller.
+        task = asyncio.create_task(cleanup())
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+        task.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
+
 class _TrackedRetryManager:
     """Mark the boundary where a submitted order may reach the venue."""
 
@@ -166,9 +224,15 @@ class _TrackedRetryManager:
 
     async def run(self, name, details, *args, **kwargs):
         if name == "submit_order" and details:
-            # RetryManager may schedule post_order in a worker thread. From this
-            # point, cancellation cannot prove that no request reached the venue.
-            self.execution._post_possible.add(str(details[0]))
+            # SDK pool acquisition can yield after the signed identity is saved.
+            # Share this final boundary with full ledger validation so a new
+            # check cannot be crossed by a POST queued behind the pool.
+            async with self.execution._ledger_gate.post():
+                self.execution._check_post_ready(details[0])
+                # RetryManager may schedule post_order in a worker thread. From
+                # here cancellation cannot prove that no request reached the venue.
+                self.execution._post_possible.add(str(details[0]))
+                return await self.inner.run(name, details, *args, **kwargs)
         return await self.inner.run(name, details, *args, **kwargs)
 
     def __getattr__(self, name):
@@ -202,6 +266,9 @@ class LiveExecution(PolymarketExecutionClient):
         self.ready = False
         self.open_orders_clear = False
         self.reconciliation_task = None
+        self._ledger_gate = _LedgerGate()
+        self._ledger_validation = None
+        self._ledger_ok = False
         self._reconcile_requested = asyncio.Event()
         self._ws_order_states = OrderedDict()
         self._submit_timings = {}
@@ -379,6 +446,7 @@ class LiveExecution(PolymarketExecutionClient):
         self._submit_timings[oid] = [started, started, {}]
         self._submitting[oid] = False
         try:
+            await self._await_ledger_validation()
             tick = r.tokens[i["token_id"]].tick
             if tick not in SUPPORTED_CLOB_TICKS:
                 r.store.put("status", "PAUSED")
@@ -572,6 +640,11 @@ class LiveExecution(PolymarketExecutionClient):
         )
 
     async def _post_signed_order(self, order, signed_order, **kwargs):
+        # A complete ledger check used to block the event loop here. Keep its
+        # pre-POST gate while letting current quotes and confirmed fills arrive.
+        await self._await_ledger_validation()
+        if not self.ready:
+            raise ValueError("LIVE账本/账户核对未完成，不能提交订单")
         r = self.owner
         i = r.store.intent(order.client_order_id)
         venue = kwargs.get("expected_venue_order_id")
@@ -593,6 +666,23 @@ class LiveExecution(PolymarketExecutionClient):
             await super()._post_signed_order(order, signed_order, **kwargs)
         finally:
             self._mark_submit_stage(order, "post_ms")
+
+    def _check_post_ready(self, client_order_id):
+        r = self.owner
+        i = r.store.intent(client_order_id)
+        o = self._cache.order(ClientOrderId(str(client_order_id)))
+        if (
+            not self.ready
+            or not i
+            or i["generation"] != r.store.generation
+            or i.get("terminal")
+            or not o
+            or o.is_closed
+            or o.is_pending_cancel
+        ):
+            raise ValueError("LIVE账本/订单状态已变化，不能提交订单")
+        if o.side == OrderSide.BUY and (not self.open_orders_clear or not self.buy_valid(o, i)):
+            raise ValueError("提交前资格/资金/暂停状态已变化")
 
     def _is_unknown_submit_result(self, exc):
         # The pinned retry manager also returns None after a cancelled POST,
@@ -731,6 +821,11 @@ class LiveExecution(PolymarketExecutionClient):
                         r.now,
                     )
                 continue
+            if oid in self._submitting and oid not in self._post_possible:
+                # This process knows the durable identity has not reached POST
+                # yet (for example while awaiting the SDK pool or ledger gate).
+                # A reboot loses this proof and still treats the result as unknown.
+                continue
             result = await asyncio.to_thread(self._http_client.get_order, venue)
             if not result:
                 raise ValueError("订单结果不明，保留额度与Event锁")
@@ -837,11 +932,44 @@ class LiveExecution(PolymarketExecutionClient):
         await self._connect()
         self._set_connected(True)
         ok = await self.owner.native.execution.reconcile_execution_state(timeout_secs=60)
-        if not ok or not self.owner.validate()["ok"]:
+        if not ok or not (await self._validate_ledger())["ok"]:
             raise ValueError("LIVE原生执行核对失败")
         self.ready = True
         await self._check_open_orders()
+        if not self._ledger_ok:
+            raise ValueError("LIVE账本校验未通过")
         self.reconciliation_task = asyncio.create_task(self.maintain())
+
+    async def _validate_ledger(self):
+        async with self._ledger_gate.validation():
+            task = asyncio.create_task(self.owner.validate_async())
+            self._ledger_validation = task
+            try:
+                result = await task
+                if not result["ok"]:
+                    self._invalidate_ledger()
+                else:
+                    self._ledger_ok = True
+                return result
+            except (Exception, asyncio.CancelledError):
+                self._invalidate_ledger()
+                raise
+            finally:
+                if self._ledger_validation is task:
+                    self._ledger_validation = None
+
+    def _invalidate_ledger(self):
+        self._ledger_ok = False
+        self.ready = False
+        self.open_orders_clear = False
+        if not self.owner.store._closed:
+            # Stop new intentions without canceling unrelated venue orders.
+            self.owner.store.put("status", "PAUSED")
+
+    async def _await_ledger_validation(self):
+        task = self._ledger_validation
+        if task is not None and not (await asyncio.shield(task))["ok"]:
+            raise ValueError("LIVE账本校验未通过，不能提交订单")
 
     async def maintain(self):
         while True:
@@ -852,9 +980,13 @@ class LiveExecution(PolymarketExecutionClient):
             try:
                 await self.sync_owned()
                 await self.generate_position_status_reports(None)
-                if not self.owner.validate()["ok"]:
+                if not (await self._validate_ledger())["ok"]:
                     raise ValueError("LIVE账本校验未通过")
                 await self._check_open_orders()
+                # A concurrent API validation can fail during this network await.
+                # Its failed result must not be overwritten by this older round.
+                if not self._ledger_ok:
+                    raise ValueError("LIVE账本校验未通过")
                 self.ready = True
                 if self.open_orders_clear:
                     self.owner.store.put("live_error", None)

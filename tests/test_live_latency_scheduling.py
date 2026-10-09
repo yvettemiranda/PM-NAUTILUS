@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from nautilus_trader.model.identifiers import VenueOrderId
 
-from pm_nautilus.live import LiveExecution
+from pm_nautilus.live import LiveExecution, _LedgerGate
 
 from test_live_recovery import controlled_runtime, flush
 from test_live_submit_cleanup import prepared_order
@@ -100,7 +100,7 @@ def test_reconciliation_wakes_during_round_and_coalesces_bursts():
         order = []
         owner = SimpleNamespace(
             store=SimpleNamespace(put=Mock()),
-            validate=Mock(side_effect=lambda: order.append("validate") or {"ok": True}),
+            validate_async=AsyncMock(side_effect=lambda: order.append("validate") or {"ok": True}),
             pause=Mock(),
         )
         client = SimpleNamespace(
@@ -108,7 +108,10 @@ def test_reconciliation_wakes_during_round_and_coalesces_bursts():
             ready=False,
             open_orders_clear=False,
             _reconcile_requested=asyncio.Event(),
+            _ledger_gate=_LedgerGate(),
+            _ledger_validation=None,
         )
+        client._validate_ledger = LiveExecution._validate_ledger.__get__(client)
 
         async def sync():
             nonlocal rounds, in_sync
@@ -162,7 +165,7 @@ def test_reconciliation_keeps_periodic_fallback_without_messages(monkeypatch):
     async def run():
         owner = SimpleNamespace(
             store=SimpleNamespace(put=Mock()),
-            validate=Mock(return_value={"ok": True}),
+            validate_async=AsyncMock(return_value={"ok": True}),
             drain=Mock(),
             pause=Mock(),
         )
@@ -174,7 +177,10 @@ def test_reconciliation_keeps_periodic_fallback_without_messages(monkeypatch):
             sync_owned=AsyncMock(),
             generate_position_status_reports=AsyncMock(),
             _check_open_orders=AsyncMock(),
+            _ledger_gate=_LedgerGate(),
+            _ledger_validation=None,
         )
+        client._validate_ledger = LiveExecution._validate_ledger.__get__(client)
         waits = 0
 
         async def timer(wait, timeout):

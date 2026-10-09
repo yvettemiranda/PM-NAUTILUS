@@ -9,9 +9,11 @@ import json
 import os
 import re
 import stat
+from collections import OrderedDict
 from dataclasses import asdict
 from decimal import Decimal
 from hashlib import sha256
+from time import perf_counter_ns
 from urllib.parse import urlsplit
 
 import msgspec
@@ -200,6 +202,9 @@ class LiveExecution(PolymarketExecutionClient):
         self.ready = False
         self.open_orders_clear = False
         self.reconciliation_task = None
+        self._reconcile_requested = asyncio.Event()
+        self._ws_order_states = OrderedDict()
+        self._submit_timings = {}
         self._release_verified = False
         self._pending_native = set()
         self._pending_conversions = set()
@@ -224,8 +229,11 @@ class LiveExecution(PolymarketExecutionClient):
             and i["kind"] != "SETTLEMENT"
             and not self._release_verified
         ):
+            first_terminal = not i.get("venue_terminal")
             i["venue_terminal"] = True
             r.store.save_intent(event.client_order_id, i)
+            if first_terminal:
+                self._reconcile_requested.set()
             return  # Await all associated trades; cancellation is not settlement.
         if isinstance(event, OrderFilled):
             key = f"fill:{event.client_order_id}:{event.trade_id}"
@@ -248,15 +256,26 @@ class LiveExecution(PolymarketExecutionClient):
 
     def _handle_ws_order_msg(self, msg, wait_for_ack):
         oid = self._cache.client_order_id(VenueOrderId(msg.id))
-        if oid and self.owner.store.intent(oid):
+        i = self.owner.store.intent(oid) if oid else None
+        if i:
             super()._handle_ws_order_msg(msg, wait_for_ack)
+            if i["generation"] == self.owner.store.generation and not i.get("terminal"):
+                state = (str(msg.type), str(msg.status), str(msg.size_matched))
+                if self._ws_order_states.get(str(oid)) != state:
+                    self._ws_order_states[str(oid)] = state
+                    self._ws_order_states.move_to_end(str(oid))
+                    while len(self._ws_order_states) > 2048:
+                        self._ws_order_states.popitem(last=False)
+                    self._reconcile_requested.set()
 
     def _handle_ws_trade_msg(self, msg, wait_for_ack):
-        self.ingest_trade(msg)
+        if self.ingest_trade(msg):
+            self._reconcile_requested.set()
 
     def ingest_trade(self, msg):
         status = getattr(msg.status, "value", msg.status)
         r = self.owner
+        changed = False
         for venue in msg.get_filled_user_order_ids(self._wallet_address, self._api_key):
             oid = self._cache.client_order_id(VenueOrderId(venue))
             if oid is None:
@@ -265,12 +284,16 @@ class LiveExecution(PolymarketExecutionClient):
             if not i or i["generation"] != r.store.generation:
                 continue
             pending = set(i.get("pending_trades", []))
+            before_pending = pending.copy()
             if status not in {"CONFIRMED", "FAILED"}:
                 pending.add(msg.id)
             else:
                 pending.discard(msg.id)
             if status == "FAILED":
-                i.setdefault("failed_trades", {})[msg.id] = micros(msg.last_qty(venue))
+                failed_qty = micros(msg.last_qty(venue))
+                changed |= i.get("failed_trades", {}).get(msg.id) != failed_qty
+                i.setdefault("failed_trades", {})[msg.id] = failed_qty
+            changed |= pending != before_pending
             i["pending_trades"] = sorted(pending)
             r.store.save_intent(oid, i)
             if status != "CONFIRMED":
@@ -303,6 +326,13 @@ class LiveExecution(PolymarketExecutionClient):
             amount = cost(p, gross) + fee if o.side == OrderSide.BUY else cost(p, gross) - fee
             # Real venue trade identity is stable across REST/WS/status transitions.
             trade_id = TradeId(sha256(f"{msg.id}:{venue}".encode()).hexdigest()[:32])
+            fill_key = f"fill:{oid}:{trade_id}"
+            changed |= (
+                fill_key not in self._pending_native
+                and not r.store.db.execute(
+                    "SELECT 1 FROM native_events WHERE event_id=?", (fill_key,)
+                ).fetchone()
+            )
             self.generate_order_filled(
                 strategy_id=o.strategy_id,
                 instrument_id=o.instrument_id,
@@ -330,6 +360,7 @@ class LiveExecution(PolymarketExecutionClient):
                     "confirmation": "CONFIRMED",
                 },
             )
+        return changed
 
     async def _submit_order(self, command):
         r = self.owner
@@ -344,6 +375,8 @@ class LiveExecution(PolymarketExecutionClient):
             TestExecution.submit_order(self, command)
             return
         oid = str(o.client_order_id)
+        started = perf_counter_ns()
+        self._submit_timings[oid] = [started, started, {}]
         self._submitting[oid] = False
         try:
             tick = r.tokens[i["token_id"]].tick
@@ -365,8 +398,19 @@ class LiveExecution(PolymarketExecutionClient):
             if isinstance(exc, asyncio.CancelledError):
                 raise
         finally:
+            timing = self._submit_timings.pop(oid, None)
+            if timing is not None:
+                timing[2]["total_ms"] = round((perf_counter_ns() - timing[0]) / 1_000_000, 3)
+                self._log.info(f"PM submit latency {o.side.name}: {json.dumps(timing[2])}")
             self._submitting.pop(oid, None)
             self._post_possible.discard(oid)
+
+    def _mark_submit_stage(self, order, stage):
+        timing = self._submit_timings.get(str(order.client_order_id))
+        if timing is not None:
+            now = perf_counter_ns()
+            timing[2][stage] = round((now - timing[1]) / 1_000_000, 3)
+            timing[1] = now
 
     def _finish_failed_submit(self, order, exc, *, submitted=None):
         """Release only when the retry manager never reached the POST boundary."""
@@ -468,6 +512,7 @@ class LiveExecution(PolymarketExecutionClient):
             return
         try:
             await asyncio.to_thread(self.wallet.buy_preflight)
+            self._mark_submit_stage(o, "wallet_check_ms")
         except Exception as exc:
             r.store.put("status", "PAUSED")
             r.store.put("live_error", f"买入前钱包/赎回授权核对失败：{type(exc).__name__}")
@@ -490,6 +535,7 @@ class LiveExecution(PolymarketExecutionClient):
             args,
             options=PartialCreateOrderOptions(neg_risk=r.tokens[i["token_id"]].neg_risk),
         )
+        self._mark_submit_stage(o, "sign_ms")
         # The pinned SDK has no maxSpend option and rounds the maker amount to
         # cents. Inspect the signed facts before allowing any POST boundary.
         maker = int(signed.makerAmount)
@@ -508,6 +554,7 @@ class LiveExecution(PolymarketExecutionClient):
         if not await self._check_buy_account(r.tokens[i["token_id"]]):
             self.deny(o, "账户开放挂单或同Condition份额核对未通过")
             return
+        self._mark_submit_stage(o, "account_check_ms")
         if not self.buy_valid(o, i):
             self.deny(o, "核对期间控制/资格发生变化")
             return
@@ -541,7 +588,11 @@ class LiveExecution(PolymarketExecutionClient):
             i["base_quantity"] = micros(kwargs["base_quantity"].as_decimal())
         r.store.save_intent(order.client_order_id, i)
         self._cache.add_venue_order_id(order.client_order_id, venue)
-        await super()._post_signed_order(order, signed_order, **kwargs)
+        self._mark_submit_stage(order, "prepare_post_ms")
+        try:
+            await super()._post_signed_order(order, signed_order, **kwargs)
+        finally:
+            self._mark_submit_stage(order, "post_ms")
 
     def _is_unknown_submit_result(self, exc):
         # The pinned retry manager also returns None after a cancelled POST,
@@ -604,23 +655,37 @@ class LiveExecution(PolymarketExecutionClient):
         return audit.ok
 
     async def _check_buy_account(self, token):
-        if not await self._check_open_orders():
-            return False
         condition_ids = tuple(
             t.token_id for t in self.owner.tokens.values() if t.condition_id == token.condition_id
         )
+        if self.wallet is None or len(condition_ids) != 2:
+            self.ready = False
+            self.open_orders_clear = False
+            self.owner.pause()
+            self.owner.store.put("live_error", "同Condition实际份额与程序持仓不一致")
+            return False
+        # Independent fresh reads overlap; both gates must still pass. Load
+        # our quantities after the awaits, since confirmed fills may arrive
+        # while the RPC and paginated account-wide CLOB lookup are in flight.
+        clear, actual = await asyncio.gather(
+            self._check_open_orders(),
+            asyncio.to_thread(self.wallet.token_balances, condition_ids),
+            return_exceptions=True,
+        )
+        if isinstance(actual, BaseException):
+            actual = {}
+        if isinstance(clear, BaseException):
+            raise clear  # The submit failure handler invalidates both readiness gates.
+        if clear is not True:
+            return False
         own = {}
         for cycle in self.owner.business["cycles"].values():
             held = self.owner.tokens.get(cycle["token_id"])
             if held and held.condition_id == token.condition_id:
                 own[held.token_id] = own.get(held.token_id, 0) + cycle["quantity"]
-        try:
-            if self.wallet is None or len(condition_ids) != 2:
-                raise ValueError("Incomplete inventory context")
-            actual = await asyncio.to_thread(self.wallet.token_balances, condition_ids)
-        except Exception:
-            actual = {}
         if not condition_inventory_matches(condition_ids, actual, own):
+            self.ready = False
+            self.open_orders_clear = False
             self.owner.pause()
             self.owner.store.put("live_error", "同Condition实际份额与程序持仓不一致")
             return False
@@ -780,6 +845,10 @@ class LiveExecution(PolymarketExecutionClient):
 
     async def maintain(self):
         while True:
+            # A signal arriving during reconciliation remains set for the next
+            # round. One consumer coalesces bursts without concurrent REST syncs.
+            self._reconcile_requested.clear()
+            failed = False
             try:
                 await self.sync_owned()
                 await self.generate_position_status_reports(None)
@@ -791,11 +860,19 @@ class LiveExecution(PolymarketExecutionClient):
                     self.owner.store.put("live_error", None)
                 self.owner.drain()
             except Exception as exc:
+                failed = True
                 self.ready = False
                 self.open_orders_clear = False
                 self.owner.pause()
                 self.owner.store.put("live_error", type(exc).__name__)
-            await asyncio.sleep(5)
+            if failed:
+                await asyncio.sleep(5)
+            else:
+                try:
+                    await asyncio.wait_for(self._reconcile_requested.wait(), timeout=5)
+                    await asyncio.sleep(0.05)
+                except TimeoutError:
+                    pass
 
     async def shutdown(self):
         self.ready = False

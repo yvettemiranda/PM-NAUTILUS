@@ -8,7 +8,7 @@ import pytest
 
 from pm_nautilus.books import Book
 from pm_nautilus.config import Preferences
-from pm_nautilus.live import LiveExecution
+from pm_nautilus.live import LiveExecution, _LedgerGate
 from pm_nautilus.rules import Fees, Token
 from pm_nautilus.store import Store
 from pm_nautilus.strategy import Runtime
@@ -40,7 +40,7 @@ def test_live_health_recovers_only_after_complete_validation(monkeypatch, valid)
         sync_owned=AsyncMock(side_effect=[ConnectionError("temporary outage"), None]),
         generate_position_status_reports=AsyncMock(),
         _reconcile_requested=asyncio.Event(),
-        _ledger_gate=asyncio.Lock(),
+        _ledger_gate=_LedgerGate(),
         _ledger_validation=None,
     )
     client._validate_ledger = LiveExecution._validate_ledger.__get__(client)

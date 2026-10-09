@@ -10,6 +10,7 @@ import os
 import re
 import stat
 from collections import OrderedDict
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from decimal import Decimal
 from hashlib import sha256
@@ -157,6 +158,45 @@ def live_factory(settings, wallet):
     return create
 
 
+class _LedgerGate:
+    """Full checks are exclusive; independent venue submissions remain concurrent."""
+
+    def __init__(self):
+        self.condition = asyncio.Condition()
+        self.checking = False
+        self.waiting_checks = 0
+        self.posts = 0
+
+    @asynccontextmanager
+    async def validation(self):
+        async with self.condition:
+            self.waiting_checks += 1
+            try:
+                await self.condition.wait_for(lambda: not self.checking and not self.posts)
+                self.checking = True
+            finally:
+                self.waiting_checks -= 1
+                self.condition.notify_all()
+        try:
+            yield
+        finally:
+            async with self.condition:
+                self.checking = False
+                self.condition.notify_all()
+
+    @asynccontextmanager
+    async def post(self):
+        async with self.condition:
+            await self.condition.wait_for(lambda: not self.checking and not self.waiting_checks)
+            self.posts += 1
+        try:
+            yield
+        finally:
+            async with self.condition:
+                self.posts -= 1
+                self.condition.notify_all()
+
+
 class _TrackedRetryManager:
     """Mark the boundary where a submitted order may reach the venue."""
 
@@ -169,7 +209,7 @@ class _TrackedRetryManager:
             # SDK pool acquisition can yield after the signed identity is saved.
             # Share this final boundary with full ledger validation so a new
             # check cannot be crossed by a POST queued behind the pool.
-            async with self.execution._ledger_gate:
+            async with self.execution._ledger_gate.post():
                 self.execution._check_post_ready(details[0])
                 # RetryManager may schedule post_order in a worker thread. From
                 # here cancellation cannot prove that no request reached the venue.
@@ -208,7 +248,7 @@ class LiveExecution(PolymarketExecutionClient):
         self.ready = False
         self.open_orders_clear = False
         self.reconciliation_task = None
-        self._ledger_gate = asyncio.Lock()
+        self._ledger_gate = _LedgerGate()
         self._ledger_validation = None
         self._ledger_ok = False
         self._reconcile_requested = asyncio.Event()
@@ -883,7 +923,7 @@ class LiveExecution(PolymarketExecutionClient):
         self.reconciliation_task = asyncio.create_task(self.maintain())
 
     async def _validate_ledger(self):
-        async with self._ledger_gate:
+        async with self._ledger_gate.validation():
             task = asyncio.create_task(self.owner.validate_async())
             self._ledger_validation = task
             try:

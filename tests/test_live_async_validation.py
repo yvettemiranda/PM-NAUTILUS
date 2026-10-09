@@ -9,7 +9,7 @@ import pytest
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.identifiers import ClientOrderId, VenueOrderId
 
-from pm_nautilus.live import LiveExecution, _TrackedRetryManager
+from pm_nautilus.live import LiveExecution, _LedgerGate, _TrackedRetryManager
 from pm_nautilus.store import Store
 
 from test_live_recovery import controlled_runtime, flush
@@ -195,7 +195,7 @@ def test_paused_sell_can_exit_with_external_open_order_but_validation_blocks_it(
             owner=owner,
             _cache=SimpleNamespace(order=Mock(return_value=order)),
             buy_valid=Mock(side_effect=AssertionError("SELL is not a BUY")),
-            _ledger_gate=asyncio.Lock(),
+            _ledger_gate=_LedgerGate(),
             _post_possible=set(),
         )
         client._check_post_ready = LiveExecution._check_post_ready.__get__(client)
@@ -248,5 +248,92 @@ def test_failed_api_validation_is_not_overwritten_by_older_maintenance_round(tmp
                 release.set()
                 maintain.cancel()
                 await asyncio.gather(maintain, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_independent_posts_overlap_and_pending_full_check_blocks_only_new_posts():
+    async def run():
+        gate = _LedgerGate()
+        client = SimpleNamespace(_ledger_gate=gate, _check_post_ready=Mock(), _post_possible=set())
+        entered = [asyncio.Event() for _ in range(3)]
+        release = [asyncio.Event() for _ in range(3)]
+        check_entered, release_check = asyncio.Event(), asyncio.Event()
+
+        async def post(_name, details):
+            index = details[0]
+            entered[index].set()
+            await release[index].wait()
+            return {"success": True}
+
+        manager = _TrackedRetryManager(SimpleNamespace(run=post), client)
+
+        async def check():
+            async with gate.validation():
+                check_entered.set()
+                await release_check.wait()
+
+        first = asyncio.create_task(manager.run("submit_order", [0]))
+        second = asyncio.create_task(manager.run("submit_order", [1]))
+        validation = third = None
+        try:
+            await asyncio.wait_for(asyncio.gather(entered[0].wait(), entered[1].wait()), 1)
+            assert gate.posts == 2  # An exclusive POST lock would time out here.
+            validation = asyncio.create_task(check())
+            await asyncio.sleep(0)
+            assert gate.waiting_checks == 1
+            third = asyncio.create_task(manager.run("submit_order", [2]))
+            release[0].set()
+            await first
+            assert not check_entered.is_set() and not entered[2].is_set()
+            release[1].set()
+            await asyncio.wait_for(check_entered.wait(), 1)
+            assert gate.posts == 0 and gate.checking
+            assert not entered[2].is_set()
+            release_check.set()
+            await asyncio.wait_for(entered[2].wait(), 1)
+            release[2].set()
+            await asyncio.gather(first, second, validation, third)
+            assert gate.posts == 0 and not gate.checking and gate.waiting_checks == 0
+        finally:
+            for event in release:
+                event.set()
+            release_check.set()
+            await asyncio.gather(
+                first, second, *(x for x in (validation, third) if x), return_exceptions=True
+            )
+
+    asyncio.run(run())
+
+
+def test_canceling_waiting_validation_does_not_leave_new_posts_stuck():
+    async def run():
+        gate = _LedgerGate()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def submit():
+            async with gate.post():
+                entered.set()
+                await release.wait()
+
+        async def check():
+            async with gate.validation():
+                raise AssertionError("A POST is still active")
+
+        async with gate.post():
+            validation = asyncio.create_task(check())
+            await asyncio.sleep(0)
+            post = asyncio.create_task(submit())
+            await asyncio.sleep(0)
+            assert not entered.is_set()
+            validation.cancel()
+            await asyncio.gather(validation, return_exceptions=True)
+            try:
+                await asyncio.wait_for(entered.wait(), 1)
+                assert gate.posts == 2 and gate.waiting_checks == 0
+            finally:
+                release.set()
+                await post
+        assert gate.posts == 0
 
     asyncio.run(run())

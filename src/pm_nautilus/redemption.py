@@ -7,7 +7,9 @@ single-owner Safe are supported; no account abstraction or manual positions are 
 import asyncio
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import closing
+from functools import partial
 from pathlib import Path
 from web3 import Web3
 from web3.exceptions import TransactionNotFound
@@ -24,6 +26,8 @@ ADAPTERS = {
 }
 APPROVAL_KEY = "redemption_approval"
 ZERO = "0x" + "00" * 20
+# Stable workers let Web3's per-thread HTTP sessions reuse their connections.
+_RPC_READ_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pm-polygon-read")
 
 
 class RedemptionCheckError(ValueError):
@@ -84,34 +88,66 @@ class PolygonWallet:
         self.auto_approve = settings.get("auto_approve_redemption") is True
         self.ctf = self.w3.eth.contract(address=CTF, abi=TOKEN_ABI)
 
+    @staticmethod
+    def _parallel_reads(calls):
+        """Read independent RPC facts concurrently, with no cache or write calls."""
+        if not calls:
+            return []
+        # Web3's HTTPProvider keeps a separate requests session per worker thread.
+        # Bound concurrency avoids a large burst against a rate-limited Polygon RPC.
+        futures = [_RPC_READ_POOL.submit(call) for call in calls]
+        wait(futures)
+        return [future.result() for future in futures]
+
     def preflight(self):
         if self.w3.eth.chain_id != 137:
             raise RedemptionCheckError("RPC不是Polygon主网")
-        for address in [CTF, PUSD, *ADAPTERS.values()]:
-            if not self.w3.eth.get_code(Web3.to_checksum_address(address)):
-                raise RedemptionCheckError("官方合约地址没有部署代码")
-        if self.w3.eth.get_code(self.signer.address):
+        contracts = [
+            Web3.to_checksum_address(address) for address in (CTF, PUSD, *ADAPTERS.values())
+        ]
+        # EOA signer and funder are the same address; one fresh read covers both.
+        addresses = list(dict.fromkeys([*contracts, self.signer.address, self.funder]))
+        codes = dict(
+            zip(
+                addresses,
+                self._parallel_reads(
+                    [partial(self.w3.eth.get_code, address) for address in addresses]
+                ),
+                strict=True,
+            )
+        )
+        if any(not codes[address] for address in contracts):
+            raise RedemptionCheckError("官方合约地址没有部署代码")
+        if codes[self.signer.address]:
             raise RedemptionCheckError("签名账户含有合约或委托代码，需先单独核对")
         if self.signature_type == 2:
-            if not self.w3.eth.get_code(self.funder):
+            if not codes[self.funder]:
                 raise RedemptionCheckError("资金地址不是已部署的Safe")
             safe = self.w3.eth.contract(address=self.funder, abi=SAFE_ABI)
-            owners = safe.functions.getOwners().call()
+            owners, threshold = self._parallel_reads(
+                [safe.functions.getOwners().call, safe.functions.getThreshold().call]
+            )
             if (
-                safe.functions.getThreshold().call() != 1
+                threshold != 1
                 or len(owners) != 1
                 or owners[0].lower() != self.signer.address.lower()
             ):
                 raise RedemptionCheckError("Safe须为本签名账户可执行的单签钱包")
-        elif self.w3.eth.get_code(self.funder):
+        elif codes[self.funder]:
             raise RedemptionCheckError("EOA资金地址含有合约代码")
 
     def adapter_approvals(self):
+        operators = tuple(ADAPTERS.items())
+        values = self._parallel_reads(
+            [
+                self.ctf.functions.isApprovedForAll(
+                    self.funder, Web3.to_checksum_address(operator)
+                ).call
+                for _, operator in operators
+            ]
+        )
         approvals = {
-            neg_risk: self.ctf.functions.isApprovedForAll(
-                self.funder, Web3.to_checksum_address(operator)
-            ).call()
-            for neg_risk, operator in ADAPTERS.items()
+            neg_risk: value for (neg_risk, _), value in zip(operators, values, strict=True)
         }
         if any(type(value) is not bool for value in approvals.values()):
             raise RedemptionCheckError("赎回授权查询结果无效")
@@ -127,9 +163,11 @@ class PolygonWallet:
 
     def token_balances(self, token_ids):
         """Read both outcomes from the CTF contract before a new LIVE buy."""
-        return {
-            tid: self.ctf.functions.balanceOf(self.funder, int(tid)).call() for tid in token_ids
-        }
+        ids = tuple(token_ids)
+        balances = self._parallel_reads(
+            [self.ctf.functions.balanceOf(self.funder, int(tid)).call for tid in ids]
+        )
+        return dict(zip(ids, balances, strict=True))
 
     def prepare(self, claim):
         self.preflight()

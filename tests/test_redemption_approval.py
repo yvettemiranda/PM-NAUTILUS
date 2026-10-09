@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from threading import Barrier
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -12,6 +13,7 @@ from pm_nautilus.redemption import (
     ADAPTERS,
     APPROVAL_KEY,
     CTF,
+    PUSD,
     PolygonWallet,
     RedemptionApprovalService,
     RedemptionCheckError,
@@ -242,3 +244,99 @@ def test_safe_ownership_requires_exactly_one_owner():
     wallet.w3 = SimpleNamespace(eth=eth)
     with pytest.raises(RedemptionCheckError, match="单签"):
         wallet.preflight()
+
+
+def test_eoa_preflight_reads_independent_code_in_parallel_without_reusing_old_facts():
+    wallet = PolygonWallet.__new__(PolygonWallet)
+    wallet.funder = SIGNER
+    wallet.signature_type = 0
+    wallet.signer = SimpleNamespace(address=SIGNER)
+    code_barrier = Barrier(2)
+    first_two = {Web3.to_checksum_address(CTF), Web3.to_checksum_address(PUSD)}
+
+    def get_code(address):
+        if address in first_two:
+            code_barrier.wait(timeout=3)
+        return b"" if address == SIGNER else b"\x01"
+
+    eth = SimpleNamespace(chain_id=137, get_code=Mock(side_effect=get_code))
+    wallet.w3 = SimpleNamespace(eth=eth)
+    wallet.preflight()
+    addresses = [call.args[0] for call in eth.get_code.call_args_list]
+    assert len(addresses) == 5  # Four contracts plus the shared EOA signer/funder.
+    assert addresses.count(SIGNER) == 1
+    eth.chain_id = 1
+    with pytest.raises(RedemptionCheckError, match="Polygon主网"):
+        wallet.preflight()
+    assert eth.get_code.call_count == 5
+    eth.chain_id = 137
+    eth.get_code.side_effect = lambda address: b"" if address in {SIGNER, CTF} else b"\x01"
+    with pytest.raises(RedemptionCheckError, match="官方合约地址"):
+        wallet.preflight()
+
+
+def test_safe_preflight_reads_owner_and_threshold_in_parallel():
+    wallet = PolygonWallet.__new__(PolygonWallet)
+    wallet.funder = FUNDER
+    wallet.signature_type = 2
+    wallet.signer = SimpleNamespace(address=SIGNER)
+    authority_barrier = Barrier(2)
+
+    def authority(value):
+        authority_barrier.wait(timeout=3)
+        return value
+
+    safe = SimpleNamespace(
+        functions=SimpleNamespace(
+            getOwners=lambda: SimpleNamespace(call=lambda: authority([SIGNER])),
+            getThreshold=lambda: SimpleNamespace(call=lambda: authority(1)),
+        )
+    )
+    eth = SimpleNamespace(
+        chain_id=137,
+        get_code=Mock(side_effect=lambda address: b"" if address == SIGNER else b"\x01"),
+        contract=Mock(return_value=safe),
+    )
+    wallet.w3 = SimpleNamespace(eth=eth)
+    wallet.preflight()
+    assert eth.get_code.call_count == 6
+
+
+def test_approval_and_outcome_balances_are_fresh_parallel_reads_that_fail_closed():
+    wallet = PolygonWallet.__new__(PolygonWallet)
+    wallet.funder = FUNDER
+    wallet.preflight = Mock()
+    approval_barrier = Barrier(2)
+    balance_barrier = Barrier(2)
+    approval_values = {Web3.to_checksum_address(address): True for address in ADAPTERS.values()}
+
+    def approval(operator):
+        approval_barrier.wait(timeout=3)
+        return approval_values[operator]
+
+    balances = {1: 5_000_000, 2: 0}
+
+    def balance(token_id):
+        balance_barrier.wait(timeout=3)
+        return balances[token_id]
+
+    wallet.ctf = SimpleNamespace(
+        functions=SimpleNamespace(
+            isApprovedForAll=lambda _funder, operator: SimpleNamespace(
+                call=lambda: approval(operator)
+            ),
+            balanceOf=lambda _funder, token_id: SimpleNamespace(call=lambda: balance(token_id)),
+        )
+    )
+    wallet.buy_preflight()
+    assert wallet.token_balances(("1", "2")) == {"1": 5_000_000, "2": 0}
+    approval_values[Web3.to_checksum_address(ADAPTERS[True])] = False
+    with pytest.raises(RedemptionCheckError, match="授权尚未确认"):
+        wallet.buy_preflight()
+    approval_values[Web3.to_checksum_address(ADAPTERS[True])] = True
+    approval_values.pop(Web3.to_checksum_address(ADAPTERS[False]))
+    with pytest.raises(KeyError):
+        wallet.buy_preflight()
+    balances.pop(2)
+    with pytest.raises(KeyError):
+        wallet.token_balances(("1", "2"))

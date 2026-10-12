@@ -66,6 +66,48 @@ from .rules import (
 )
 
 
+def checked_owned_order_result(result, venue: str, token_id: str) -> tuple[set[str], int, str]:
+    """Only complete venue facts may release an owned order's reservation."""
+    if (
+        not isinstance(result, dict)
+        or result.get("id") != venue
+        or result.get("asset_id") != token_id
+    ):
+        raise ValueError("订单查询身份不一致")
+    try:
+        trades = result["associate_trades"]
+        value = result["size_matched"]
+        status = result["status"]
+        # The official schema permits explicit null for no associated trades;
+        # an absent field is never evidence that there were no fills.
+        if trades is not None and (
+            not isinstance(trades, list)
+            or any(not isinstance(trade, str) or not trade for trade in trades)
+        ):
+            raise ValueError
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError
+        matched = micros(value)
+        if matched < 0 or Decimal(value) * SCALE != matched:
+            raise ValueError
+        if not isinstance(status, str) or status not in {
+            "INVALID",
+            "LIVE",
+            "DELAYED",
+            "MATCHED",
+            "UNMATCHED",
+            "CANCELED",
+            "CANCELED_MARKET_RESOLVED",
+            "CANCELLED",
+            "FILLED",
+            "EXPIRED",
+        }:
+            raise ValueError
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        raise ValueError("订单查询成交事实不完整，保留额度与Event锁") from None
+    return set(trades or []), matched, status
+
+
 def validate_settings(settings):
     """Validate credentials loaded from either the legacy file or a locked web vault."""
     if not isinstance(settings, dict):
@@ -655,7 +697,9 @@ class LiveExecution(PolymarketExecutionClient):
             OrderArgsV2(
                 token_id=token.token_id,
                 price=float(Decimal(terms.limit) / SCALE),
-                size=float(Decimal(terms.quantity) / SCALE),
+                # The pinned SDK floors size * 100. A binary float such as
+                # 5.02 falls below 502 there; Decimal preserves owned hundredths.
+                size=Decimal(terms.quantity) / SCALE,
                 side="SELL",
                 expiration=0,
                 builder_code=POLYMARKET_NAUTILUS_BUILDER_CODE,
@@ -1050,24 +1094,27 @@ class LiveExecution(PolymarketExecutionClient):
             o = self._cache.order(ClientOrderId(oid))
             if not result:
                 raise ValueError("订单结果不明，保留额度与Event锁")
-            if str(result.get("asset_id")) != i["token_id"]:
-                raise ValueError("订单查询身份不一致")
-            associated = set(result.get("associate_trades") or [])
+            associated, matched, status = checked_owned_order_result(result, venue, i["token_id"])
             rows = r.store.order_fills(oid)
             confirmed = {e.info.get("venue_trade_id") for e in rows}
             gross = sum(e.info.get("pm_gross", 0) for e in rows)
             failed = i.get("failed_trades", {})
             # All matched quantity must be represented by finalized venue responses.
             # Missing/deferred records retain the reservation; never infer zero fill.
-            matched = micros(result.get("size_matched", 0))
-            status = str(result.get("status", "")).upper()
             if (
                 i.get("pending_trades")
                 or not associated.issubset(confirmed | failed.keys())
                 or gross + sum(failed.values()) < matched
             ):
                 continue
-            if status in {"CANCELED", "CANCELLED", "MATCHED", "FILLED", "EXPIRED"}:
+            if status in {
+                "CANCELED",
+                "CANCELED_MARKET_RESOLVED",
+                "CANCELLED",
+                "MATCHED",
+                "FILLED",
+                "EXPIRED",
+            }:
                 i = r.store.intent(oid)
                 i["verified_terminal"] = True
                 r.store.save_intent(oid, i)
@@ -1089,6 +1136,7 @@ class LiveExecution(PolymarketExecutionClient):
                         r.store.save_intent(oid, i)
                         r.release_cycle(i["event_id"])
                         r.store.put("business", r.business)
+                    r.note_terminal(i["event_id"])
         await asyncio.sleep(0)
         await self._update_account_state()
 

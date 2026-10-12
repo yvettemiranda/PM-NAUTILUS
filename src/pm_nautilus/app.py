@@ -37,6 +37,26 @@ class _LiveBundleResponse(FileResponse):
             cleanup_live_bundle_file(self.path)
 
 
+async def _finish_before_cancel(operation):
+    """Keep lifecycle ownership until work finishes, including repeated cancellation."""
+    task = asyncio.create_task(operation)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # Shielding alone leaves the caller's wallet lock as soon as it is
+        # cancelled. A to_thread worker cannot be stopped by cancelling its task.
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not task.cancelled():
+            task.exception()
+        raise
+
+
 def create_app(data_dir=None, public_data=True, test_clock=None):
     root = Path(data_dir or os.getenv("PM_DATA_DIR", "runtime"))
     password = os.getenv("PM_UI_PASSWORD", "")
@@ -45,6 +65,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         raise ValueError("服务端UI密码至少16字符")
     csrf = secrets.token_urlsafe(32)
     runtimes = {}
+    activating = {}
     services = {}
     cold = {}
     samplers = {}
@@ -121,10 +142,11 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             yield
         finally:
             failures = []
+            owned_runtimes = activating | runtimes
             for sampler in samplers.values():
                 sampler.task.cancel()
             await asyncio.gather(*(s.task for s in samplers.values()), return_exceptions=True)
-            for r in runtimes.values():
+            for r in owned_runtimes.values():
                 try:
                     r.pause()
                 except Exception as exc:
@@ -139,7 +161,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                     await market_hub.close()
                 except Exception as exc:
                     failures.append(exc)
-            for r in runtimes.values():
+            for r in owned_runtimes.values():
                 try:
                     if r.mode == "LIVE":
                         # shutdown drains native callbacks while SQLite is still open.
@@ -663,36 +685,45 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                     mode="LIVE",
                     live_factory=live_factory(settings, wallet),
                 )
+                # Own partial activation without presenting it as enabled.
+                activating["LIVE"] = runtime
                 await runtime.client.activate()
                 cold["LIVE"].close()
                 cold.pop("LIVE")
                 await attach("LIVE", runtime, wallet)
-            except Exception as exc:
+                activating.pop("LIVE", None)
+            except (Exception, asyncio.CancelledError) as exc:
                 wallet_state["error"] = f"LIVE 启用失败（{type(exc).__name__}）；未开始自动交易。"
-                # Make the cold dashboard available before any awaited cleanup
-                # can let another request observe the application.
-                if "LIVE" not in cold:
-                    cold["LIVE"] = Store(root / "LIVE" / "state.sqlite", "LIVE")
-                runtimes.pop("LIVE", None)
-                service = services.pop("LIVE", None)
-                sampler = samplers.pop("LIVE", None)
-                if sampler is not None and sampler.task is not None:
-                    sampler.task.cancel()
-                    await asyncio.gather(sampler.task, return_exceptions=True)
-                if service is not None:
+
+                async def cleanup():
                     try:
-                        await service.close()
-                    except Exception:
-                        pass
-                if runtime is not None:
-                    try:
-                        await runtime.client.shutdown()
-                    except Exception:
-                        pass
-                    try:
-                        runtime.store.close()
-                    except Exception:
-                        pass
+                        # Keep the cold dashboard available while cleanup awaits.
+                        if "LIVE" not in cold:
+                            cold["LIVE"] = Store(root / "LIVE" / "state.sqlite", "LIVE")
+                    finally:
+                        runtimes.pop("LIVE", None)
+                        activating.pop("LIVE", None)
+                        service = services.pop("LIVE", None)
+                        sampler = samplers.pop("LIVE", None)
+                        if sampler is not None and sampler.task is not None:
+                            sampler.task.cancel()
+                            await asyncio.gather(sampler.task, return_exceptions=True)
+                        if service is not None:
+                            try:
+                                await service.close()
+                            except Exception:
+                                pass
+                        if runtime is not None:
+                            try:
+                                await runtime.client.shutdown()
+                            except Exception:
+                                pass
+                            finally:
+                                runtime.store.close()
+
+                await _finish_before_cancel(cleanup())
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
                 raise ValueError(wallet_state["error"]) from None
             wallet_state["error"] = None
             return wallet_public()
@@ -771,17 +802,23 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 async with wallet_lock:
                     if "LIVE" in runtimes or legacy_live_enabled:
                         raise ValueError("LIVE 已启用，不能在运行中恢复账本")
-                    await asyncio.to_thread(
-                        restore_live_bundle_file,
-                        upload_path,
-                        password_input,
-                        cold["LIVE"],
-                        vault_path,
-                    )
-                    wallet_state.update(
-                        settings=None, metadata=None, readiness=None, approval=None, error=None
-                    )
-                    return wallet_public()
+
+                    async def restore():
+                        await asyncio.to_thread(
+                            restore_live_bundle_file,
+                            upload_path,
+                            password_input,
+                            cold["LIVE"],
+                            vault_path,
+                        )
+                        wallet_state.update(
+                            settings=None, metadata=None, readiness=None, approval=None, error=None
+                        )
+                        return wallet_public()
+
+                    # Do not unlock the wallet or remove the upload until the
+                    # worker has completed both the vault and ledger replacement.
+                    return await _finish_before_cancel(restore())
             finally:
                 upload_path.unlink(missing_ok=True)
 

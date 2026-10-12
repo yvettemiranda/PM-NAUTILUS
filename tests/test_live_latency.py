@@ -96,6 +96,7 @@ def test_partial_sell_waits_for_confirmed_trade_before_reselling_remaining(tmp_p
             def get_order(venue):
                 if venue == "venue-1":
                     return {
+                        "id": venue,
                         "asset_id": t.token_id,
                         "associate_trades": ["confirmed-trade-1"],
                         "size_matched": "10",
@@ -103,6 +104,7 @@ def test_partial_sell_waits_for_confirmed_trade_before_reselling_remaining(tmp_p
                     }
                 assert venue == "venue-sell-1"
                 return {
+                    "id": venue,
                     "asset_id": t.token_id,
                     "associate_trades": ["sell-trade-1"],
                     "size_matched": "4",

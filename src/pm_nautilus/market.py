@@ -405,6 +405,12 @@ class MarketService:
     def socket_closed(self, group):
         pass
 
+    def socket_error(self, group, key, exc):
+        self.remember_error(key, exc)
+
+    def pause_socket(self, group, exc):
+        self.runtime.pause()
+
     async def receive(self, ws, group):
         """Text heartbeat deadlines are independent of incoming market traffic."""
         loop = asyncio.get_running_loop()
@@ -482,11 +488,11 @@ class MarketService:
                     # HTTP 500/502/503/504). Auth errors and unknown bugs stay fatal.
                     retryable = isinstance(exc, (ConnectionClosed, ConnectionError, ValueError))
                     retryable = retryable or process_exception(exc) is None
-                    self.remember_error("streamError", exc)
+                    self.socket_error(group, "streamError", exc)
                     self.stream_state(group, "RECONNECTING", type(exc).__name__)
                     if not retryable:
-                        self.remember_error("serviceError", exc)
-                        r.pause()
+                        self.socket_error(group, "serviceError", exc)
+                        self.pause_socket(group, exc)
                 finally:
                     self.socket_closed(group)
                     r.disconnect(self.subscription_ids(group))
@@ -655,7 +661,17 @@ class PublicMarketHub(MarketService):
         if service.closed:
             return
         try:
-            service.scan_status.update(self.scan_status)
+            # Discovery belongs to the shared source. Fatal acknowledgements and
+            # stream health belong to each mode and must not be replayed by a scan.
+            for key in (
+                "scanning",
+                "lastError",
+                "eventCountScanned",
+                "lastScanAt",
+                "categoryError",
+            ):
+                if key in self.scan_status:
+                    service.scan_status[key] = self.scan_status[key]
             service.categories = [dict(category) for category in self.categories]
             if self.scan_status.get("categoryError") is None:
                 service.scan_status.pop("categoryError", None)
@@ -693,6 +709,30 @@ class PublicMarketHub(MarketService):
 
     def socket_closed(self, group):
         self.sockets.pop(group, None)
+
+    def socket_consumers(self, group):
+        ids = self.active_groups.get(group, set())
+        return [
+            service
+            for service in tuple(self.services)
+            if not service.closed and ids & service.runtime.monitored
+        ]
+
+    def socket_error(self, group, key, exc):
+        # Keep source history, but a socket fault only affects its subscribers.
+        MarketService.remember_error(self, key, exc)
+        for service in self.socket_consumers(group):
+            try:
+                service.remember_error(key, exc)
+            except Exception as consumer_exc:
+                self.consumer_error(service, consumer_exc)
+
+    def pause_socket(self, group, exc):
+        for service in self.socket_consumers(group):
+            try:
+                service.runtime.pause()
+            except Exception as consumer_exc:
+                self.consumer_error(service, consumer_exc)
 
     def stream_state(self, group, state, error=None):
         super().stream_state(group, state, error)
@@ -769,10 +809,12 @@ class PublicMarketHub(MarketService):
         # Existing sockets are subscription slots. Removing one consumer's IDs
         # changes subscriptions in place, so another consumer never reconnects
         # merely because TEST was cleared or closed.
+        removed_any = False
         for group in list(self.tasks):
             old = self.active_groups[group]
             current = old & monitored
             removed = old - current
+            removed_any = removed_any or bool(removed)
             self.active_groups[group] = current
             ws = self.sockets.get(group)
             if removed and ws is not None:
@@ -789,6 +831,43 @@ class PublicMarketHub(MarketService):
                 await asyncio.gather(task, return_exceptions=True)
                 self.active_groups.pop(group, None)
                 self.streams.pop(group, None)
+        # A large filter reduction can leave one token on every old socket.
+        # Retain the fullest sockets and move only excess fragments; unaffected
+        # subscriptions keep their connection and complete book baseline.
+        minimum_groups = (len(monitored) + 199) // 200
+        if removed_any and len(self.active_groups) > minimum_groups:
+            ordered = sorted(self.active_groups, key=lambda g: (-len(self.active_groups[g]), g))
+            retained = ordered[:minimum_groups]
+            for group in ordered[minimum_groups:]:
+                moving = sorted(self.active_groups[group])
+                # Stop the old owner before any await can deliver another old
+                # snapshot. Closing the socket also removes its subscriptions.
+                self.active_groups.pop(group, None)
+                task = self.tasks.pop(group)
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                self.streams.pop(group, None)
+                self.runtime.disconnect(moving)
+                for destination in retained:
+                    active = self.active_groups[destination]
+                    added = moving[: 200 - len(active)]
+                    if not added:
+                        continue
+                    del moving[: len(added)]
+                    active.update(added)
+                    destination_ws = self.sockets.get(destination)
+                    if destination_ws is not None:
+                        try:
+                            await destination_ws.send(
+                                json.dumps({"operation": "subscribe", "assets_ids": added})
+                            )
+                        except Exception:
+                            pass
+                    self.stream_state(
+                        destination,
+                        "AWAITING_BOOKS",
+                        self.streams.get(destination, {}).get("error"),
+                    )
         assigned = set().union(*self.active_groups.values()) if self.active_groups else set()
         additions = sorted(monitored - assigned)
         for group, active in self.active_groups.items():

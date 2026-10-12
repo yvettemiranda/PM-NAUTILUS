@@ -77,6 +77,7 @@ class Runtime:
         self._time_sensitive_events = set()
         self._refresh_control = None
         self._refresh_events = {}
+        self._terminal_events = set()
         self.replaying = False
         self.faulted = None
         self.native = Native(self, clock)
@@ -206,7 +207,15 @@ class Runtime:
             if states.get(eid) != self._refresh_events.get(eid):
                 self.dirty.add(eid)
         self._refresh_events = states
+        # An order can start and finish between two control samples. Remember
+        # its committed terminal transition even when both samples see no active
+        # order. Defer the retry to this tick to avoid a zero-fill dispatch loop.
+        self.dirty.update(self._terminal_events)
+        self._terminal_events.clear()
         self.dirty.update(self._time_sensitive_events & self.events.keys())
+
+    def note_terminal(self, event_id):
+        self._terminal_events.add(event_id)
 
     def release_unmonitored(self):
         # Called only after obsolete feed tasks have been cancelled and awaited.
@@ -368,6 +377,7 @@ class Runtime:
             raise
 
     def _project_transaction(self, seq, event, intent, t):
+        was_terminal = intent.get("terminal", False)
         with self.store.transaction():
             if isinstance(event, OrderFilled):
                 self.apply_fill(event, intent, t)
@@ -386,6 +396,8 @@ class Runtime:
             self.business["cursor"] = seq
             self.release_cycle(t.event_id)
             self.store.save_business_event(self.business, t.event_id, t.condition_id)
+        if intent.get("terminal") and not was_terminal:
+            self.note_terminal(t.event_id)
 
     def apply_fill(self, e, intent, t):
         info = e.info or {}

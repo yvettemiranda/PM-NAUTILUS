@@ -50,6 +50,7 @@ async def own_settled_position(runtime, payout=1_000_000):
     runtime.client._http_client.get_trades = Mock(return_value=[msgspec.to_builtins(trade)])
     runtime.client._http_client.get_order = Mock(
         return_value={
+            "id": "venue-1",
             "asset_id": t.token_id,
             "associate_trades": [trade.id],
             "size_matched": "10",

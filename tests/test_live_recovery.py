@@ -259,6 +259,7 @@ def test_live_cash_fak_uses_preview_depth_limit_without_raising_budget(tmp_path)
             r.client._expected_venue_order_id = Mock(return_value=VenueOrderId("venue-1"))
             r.client._post_signed_order = AsyncMock()
             r.client._check_buy_account = AsyncMock(return_value=True)
+            r.client._sdk_terms[t.token_id] = (t.tick, t.neg_risk, t.fees)
             await r.client._submit_market_order(SimpleNamespace(order=order), None)
             args = r.client._http_client.create_market_order.call_args.args[0]
             assert args.price == 0.1 and args.amount == 1 and args.order_type == "FAK"

@@ -1,9 +1,13 @@
 """Web onboarding must not expose secrets or silently start LIVE."""
 
 import importlib
+import sqlite3
 import stat
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from eth_account import Account
 from fastapi.testclient import TestClient
@@ -40,6 +44,76 @@ def _payload():
 
 def _csrf(client):
     return {"x-pm-csrf": client.get("/api/dashboard").headers["x-pm-csrf"]}
+
+
+def test_failed_live_attach_stops_public_consumer_before_native_and_store(tmp_path, monkeypatch):
+    import pm_nautilus.app as app_module
+    from test_lifecycle import controlled_factory
+
+    monkeypatch.delenv("PM_LIVE_ENABLED", raising=False)
+    monkeypatch.setattr("pm_nautilus.live_web_setup.build_live_settings", _settings)
+    monkeypatch.setattr(app_module, "run_readiness", lambda *_args, **_kwargs: {"ready": True})
+    monkeypatch.setattr("pm_nautilus.live.live_factory", lambda *_: controlled_factory)
+    monkeypatch.setattr(
+        "pm_nautilus.redemption.PolygonWallet",
+        lambda _: SimpleNamespace(preflight=lambda: None),
+    )
+    original_runtime = app_module.Runtime
+    original_service = app_module.MarketService
+    original_sampler = app_module.PerformanceSampler
+    live_services = []
+    live_runtimes = []
+
+    def service(runtime, **kwargs):
+        result = original_service(runtime, **kwargs)
+        if runtime.mode == "LIVE":
+            live_services.append(result)
+        return result
+
+    def runtime(*args, **kwargs):
+        result = original_runtime(*args, **kwargs)
+        if result.mode == "LIVE":
+            live_runtimes.append(result)
+            result.client.activate = AsyncMock()
+            original_shutdown = result.client.shutdown
+
+            async def shutdown():
+                assert live_services[0].closed
+                result.store.put("shutdown_callback", True)
+                await original_shutdown()
+
+            result.client.shutdown = shutdown
+        return result
+
+    def sampler(runtime):
+        if runtime.mode == "LIVE":
+            raise RuntimeError("controlled sampler failure after public attachment")
+        return original_sampler(runtime)
+
+    monkeypatch.setattr(app_module, "Runtime", runtime)
+    monkeypatch.setattr(app_module, "MarketService", service)
+    monkeypatch.setattr(app_module, "PerformanceSampler", sampler)
+    app = app_module.create_app(tmp_path, public_data=False)
+    with TestClient(app) as client:
+        assert (
+            client.post(
+                "/api/live/wallet/import", json=_payload(), headers=_csrf(client)
+            ).status_code
+            == 200
+        )
+        response = client.post(
+            "/api/live/wallet/enable", json={"confirmation": "ENABLE LIVE"}, headers=_csrf(client)
+        )
+        assert response.status_code == 400
+        assert live_services[0].closed and live_runtimes[0].store._closed
+        assert app.state.runtimes.keys() == {"TEST"}
+        assert client.get("/api/dashboard?mode=LIVE").json()["liveExecutionEnabled"] is False
+        assert client.get("/api/health").json()["liveExecutionEnabled"] is False
+        with closing(sqlite3.connect(tmp_path / "LIVE" / "state.sqlite")) as db:
+            assert (
+                db.execute("SELECT value FROM meta WHERE key='shutdown_callback'").fetchone()[0]
+                == "true"
+            )
 
 
 def test_wallet_import_is_encrypted_private_and_live_stays_off(tmp_path, monkeypatch):
@@ -262,7 +336,7 @@ def test_enable_attaches_paused_and_requires_separate_start(tmp_path, monkeypatc
                 self.store.put("status", "PAUSED")
 
         class FakeService:
-            def __init__(self, runtime):
+            def __init__(self, runtime, hub=None):
                 self.runtime = runtime
                 self.loop_task = None
 

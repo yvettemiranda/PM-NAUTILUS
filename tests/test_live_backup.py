@@ -1,7 +1,10 @@
 import os
 import fcntl
 import hashlib
+import json
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 
 from Crypto.Cipher import AES
@@ -39,6 +42,87 @@ def _settings():
         "signature_type": 0,
         "auto_approve_redemption": False,
     }
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_backup_preserves_business_rows_and_legacy_restores_remain_writable(tmp_path, legacy):
+    source = Store(tmp_path / "source" / "LIVE" / "state.sqlite", "LIVE")
+    vault = tmp_path / "source" / "wallet" / "live.vault"
+    identity = write_vault(vault, _settings(), PASSWORD)
+    source.put("live_wallet_identity", identity)
+    business = source.get("business")
+    business["cycles"]["event"] = {"token_id": "1", "quantity": 25}
+    business["targets"]["target"] = {"event_id": "event", "qty": 25}
+    business["claims"]["claim"] = {"state": "CREDITED", "amount": 1000}
+    source.put("business", business)
+    generation = source.generation
+    if legacy:
+        source.db.execute("DROP TABLE business_parts")
+        source.db.execute("UPDATE meta SET value=? WHERE key='business'", (json.dumps(business),))
+    bundle = export_live_bundle(source, vault, PASSWORD)
+    destination = Store(tmp_path / "destination" / "LIVE" / "state.sqlite", "LIVE")
+    assert (
+        restore_live_bundle(
+            bundle, PASSWORD, destination, tmp_path / "destination" / "wallet" / "live.vault"
+        )
+        == identity
+    )
+    assert destination.get("business") == business
+    assert destination.generation == generation
+    # The destination's previous empty write cache must not retain restored rows
+    # that have since been deleted. Legacy restores upgrade on their first save.
+    business["claims"].clear()
+    destination.put("business", business)
+    assert destination.get("business") == business
+    assert (
+        destination.db.execute(
+            "SELECT count(*) FROM business_parts WHERE collection='claims'"
+        ).fetchone()[0]
+        == 0
+    )
+    source.close()
+    destination.close()
+    destination = Store(tmp_path / "destination" / "LIVE" / "state.sqlite", "LIVE")
+    assert destination.get("business") == business and destination.generation == generation
+    destination.close()
+
+
+def test_restore_empty_guard_reads_normalized_business_without_native_history(tmp_path):
+    destination = Store(tmp_path / "LIVE" / "state.sqlite", "LIVE")
+    assert live_backup._empty(destination)
+    business = destination.get("business")
+    business["claims"]["pending"] = {"state": "SUBMITTED", "amount": 25}
+    destination.put("business", business)
+    assert not live_backup._empty(destination)
+    destination.close()
+
+
+@pytest.mark.parametrize("collection", ["cycles", "targets", "claims"])
+def test_backup_rejects_v2_inline_rows_before_overwriting_destination(tmp_path, collection):
+    source = Store(tmp_path / "source" / "LIVE" / "state.sqlite", "LIVE")
+    vault = tmp_path / "source" / "wallet" / "live.vault"
+    source.put("live_wallet_identity", write_vault(vault, _settings(), PASSWORD))
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    snapshot = live_backup._snapshot_file(source, scratch)
+    with closing(sqlite3.connect(snapshot)) as db:
+        raw = json.loads(db.execute("SELECT value FROM meta WHERE key='business'").fetchone()[0])
+        raw[collection]["unrelated"] = {"state": "PENDING", "amount": 123}
+        db.execute("UPDATE meta SET value=? WHERE key='business'", (json.dumps(raw),))
+        db.commit()
+    snapshot_before = snapshot.read_bytes()
+    bundle = scratch / "invalid.pmnb"
+    live_backup._encrypt_file(snapshot, vault.read_bytes(), PASSWORD, bundle)
+    destination = Store(tmp_path / "dest" / "LIVE" / "state.sqlite", "LIVE")
+    target = tmp_path / "dest" / "wallet" / "live.vault"
+    destination_before = list(destination.db.iterdump())
+    with pytest.raises(BackupError, match="校验或恢复失败"):
+        restore_live_bundle_file(bundle, PASSWORD, destination, target)
+    assert list(destination.db.iterdump()) == destination_before
+    assert not target.exists()
+    assert snapshot.read_bytes() == snapshot_before
+    source.close()
+    destination.close()
 
 
 def test_encrypted_live_backup_restores_wallet_and_ledger(tmp_path):

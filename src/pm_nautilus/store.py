@@ -5,6 +5,7 @@ import json
 import msgspec
 import sqlite3
 from contextlib import closing, contextmanager
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
@@ -18,6 +19,7 @@ from .rules import Token, Fees
 
 
 _INTEGRITY_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pm-integrity")
+_BUSINESS_COLLECTIONS = ("cycles", "targets", "claims")
 
 
 class BookCache(dict):
@@ -50,6 +52,8 @@ class Store:
         self._closed = False
         self._integrity_lock = asyncio.Lock()
         self._integrity_stops = set()
+        self._business_rows = None
+        self._business_target_events = {}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.path, isolation_level=None)
         self.db.row_factory = sqlite3.Row
@@ -63,6 +67,9 @@ class Store:
           kind TEXT NOT NULL,payload BLOB NOT NULL);
         CREATE TABLE IF NOT EXISTS tokens(token_id TEXT PRIMARY KEY,payload TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS books(token_id TEXT PRIMARY KEY,payload TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS business_parts(
+          collection TEXT NOT NULL,key TEXT NOT NULL,payload TEXT NOT NULL,
+          PRIMARY KEY(collection,key));
         CREATE TABLE IF NOT EXISTS intents(
           order_id TEXT PRIMARY KEY,event_id TEXT NOT NULL,token_id TEXT NOT NULL,
           side TEXT NOT NULL,payload TEXT NOT NULL);
@@ -82,6 +89,15 @@ class Store:
                 self.put("initial_capital", 100_000_000 if mode == "TEST" else None)
                 self.put("business", self.empty_business())
         self.mode = mode
+        raw_business = self._get_meta("business")
+        try:
+            if raw_business is not None and self._business_version(raw_business) is None:
+                # Upgrade atomically; every legacy collection remains in the ledger.
+                with self.transaction():
+                    self._save_business(self.read_business(self.db), force=True)
+        except BaseException:
+            self.close()
+            raise
         self.put("status", "PAUSED")
 
     @staticmethod
@@ -105,17 +121,172 @@ class Store:
             self.db.execute("COMMIT")
         except BaseException:
             self.db.execute("ROLLBACK")
+            self._business_rows = None
+            self._business_target_events = {}
             raise
 
-    def get(self, key, default=None):
+    def _get_meta(self, key, default=None):
         row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         return default if row is None else json.loads(row[0])
 
+    @staticmethod
+    def _business_version(business):
+        if not isinstance(business, dict):
+            raise ValueError("业务账本结构无效")
+        version = business.get("_storage_version")
+        if version is None:
+            return None
+        if version != 2:
+            raise ValueError("未知业务账本版本")
+        for collection in _BUSINESS_COLLECTIONS:
+            if not isinstance(business.get(collection), dict):
+                raise ValueError("业务账本集合无效")
+            # V2 stores every collection row in business_parts. Accepting inline
+            # rows would let a later Event save discard unrelated ledger entries.
+            if business[collection]:
+                raise ValueError("分行业务账本不能包含内联集合记录")
+        return version
+
+    @staticmethod
+    def read_business(db, schema="main"):
+        """Read either ledger format without opening or mutating a Store."""
+        if schema not in {"main", "live"}:
+            raise ValueError("无效账本schema")
+        row = db.execute(f"SELECT value FROM {schema}.meta WHERE key='business'").fetchone()
+        if row is None:
+            return None
+        business = json.loads(row[0])
+        version = Store._business_version(business)
+        business.pop("_storage_version", None)
+        if version is None:
+            has_parts = db.execute(
+                f"SELECT 1 FROM {schema}.sqlite_master WHERE type='table' AND name='business_parts'"
+            ).fetchone()
+            if (
+                has_parts
+                and db.execute(f"SELECT 1 FROM {schema}.business_parts LIMIT 1").fetchone()
+            ):
+                raise ValueError("旧格式业务账本与分行记录冲突")
+            return business
+        for collection, key, payload in db.execute(
+            f"SELECT collection,key,payload FROM {schema}.business_parts"
+        ):
+            if collection not in _BUSINESS_COLLECTIONS:
+                raise ValueError("未知业务账本集合")
+            value = json.loads(payload)
+            if not isinstance(value, dict):
+                raise ValueError("业务账本行无效")
+            business[collection][key] = value
+        return business
+
+    def get(self, key, default=None):
+        if key == "business":
+            value = self.read_business(self.db)
+            return default if value is None else value
+        return self._get_meta(key, default)
+
     def put(self, key, value):
+        if key == "business":
+            if self.db.in_transaction:
+                self._save_business(value)
+            else:
+                with self.transaction():
+                    self._save_business(value)
+            return
+        self._put_meta(key, value)
+
+    def _put_meta(self, key, value):
         self.db.execute(
             "INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value != excluded.value",
             (key, json.dumps(value, ensure_ascii=False, separators=(",", ":"))),
         )
+
+    def _load_business_rows(self):
+        if self._business_rows is not None:
+            return
+        # A legacy backup can replace the database of an already-open cold Store.
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS business_parts("
+            "collection TEXT NOT NULL,key TEXT NOT NULL,payload TEXT NOT NULL,"
+            "PRIMARY KEY(collection,key))"
+        )
+        self._business_rows = {name: {} for name in _BUSINESS_COLLECTIONS}
+        self._business_target_events = {}
+        for collection, key, payload in self.db.execute(
+            "SELECT collection,key,payload FROM business_parts"
+        ):
+            if collection not in self._business_rows:
+                raise ValueError("未知业务账本集合")
+            value = json.loads(payload)
+            self._business_rows[collection][key] = value
+            if collection == "targets":
+                self._business_target_events.setdefault(value["event_id"], set()).add(key)
+
+    def _sync_business_rows(self, collection, values, keys=None, force=False):
+        saved = self._business_rows[collection]
+        keys = saved.keys() | values.keys() if keys is None else keys
+        for key in keys:
+            previous = saved.get(key)
+            if key not in values:
+                if key not in saved:
+                    continue
+                self.db.execute(
+                    "DELETE FROM business_parts WHERE collection=? AND key=?",
+                    (collection, key),
+                )
+                saved.pop(key, None)
+            else:
+                value = values[key]
+                if not force and previous == value:
+                    continue
+                self.db.execute(
+                    "INSERT INTO business_parts VALUES(?,?,?) ON CONFLICT(collection,key) "
+                    "DO UPDATE SET payload=excluded.payload",
+                    (collection, key, json.dumps(value, ensure_ascii=False, separators=(",", ":"))),
+                )
+                saved[key] = deepcopy(value)
+            if collection == "targets":
+                if previous is not None:
+                    old_keys = self._business_target_events.get(previous["event_id"])
+                    if old_keys is not None:
+                        old_keys.discard(key)
+                        if not old_keys:
+                            self._business_target_events.pop(previous["event_id"])
+                if key in values:
+                    self._business_target_events.setdefault(values[key]["event_id"], set()).add(key)
+
+    def _save_business(self, business, event_id=None, force=False):
+        self._load_business_rows()
+        scalar = {key: value for key, value in business.items() if key not in _BUSINESS_COLLECTIONS}
+        scalar.update({name: {} for name in _BUSINESS_COLLECTIONS})
+        scalar["_storage_version"] = 2
+        self._put_meta("business", scalar)
+        if event_id is None:
+            for collection in _BUSINESS_COLLECTIONS:
+                self._sync_business_rows(collection, business[collection], force=force)
+            return
+        self._sync_business_rows("cycles", business["cycles"], {event_id})
+        target_keys = self._business_target_events.get(event_id, set()) | {
+            key for key, value in business["targets"].items() if value["event_id"] == event_id
+        }
+        self._sync_business_rows("targets", business["targets"], target_keys)
+        # Claims are changed only by resolution/redemption, whose generic save
+        # synchronizes them. A settlement fill supplies the changed claim below.
+
+    def save_business_event(self, business, event_id, condition_id=None):
+        """Persist only this Event's projection, atomically with its intent."""
+        if not self.db.in_transaction:
+            with self.transaction():
+                self.save_business_event(business, event_id, condition_id)
+            return
+        self._save_business(business, event_id=event_id)
+        if condition_id is not None:
+            self._sync_business_rows("claims", business["claims"], {condition_id})
+
+    def invalidate_business_cache(self):
+        """Discard write comparisons after an external snapshot replacement."""
+        self._business_rows = None
+        self._business_target_events = {}
 
     @property
     def generation(self):
@@ -127,6 +298,14 @@ class Store:
             if type(event).__name__ == "OrderFilled"
             else str(event.id)
         )
+        existing = self.db.execute(
+            "SELECT seq FROM native_events WHERE event_id=?", (event_id,)
+        ).fetchone()
+        if existing is not None:
+            # INSERT OR IGNORE on AUTOINCREMENT still writes sqlite_sequence.
+            # Native delivery is synchronous on the sole ledger owner; duplicates
+            # must preserve the first committed fact without another FULL commit.
+            return existing[0]
         self.db.execute(
             "INSERT OR IGNORE INTO native_events(event_id,kind,payload) VALUES(?,?,?)",
             (event_id, type(event).__name__, self.serializer.serialize(event)),

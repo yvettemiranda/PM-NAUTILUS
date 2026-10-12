@@ -29,6 +29,9 @@ async def prepared_order(runtime):
     client.buy_valid = Mock(return_value=True)
     client._check_buy_account = AsyncMock(return_value=True)
     client.wallet = SimpleNamespace(buy_preflight=Mock())
+    # These submission-boundary tests start with previously verified SDK metadata.
+    # Refresh and dynamic-tick behavior are exercised separately with a real SDK.
+    client._sdk_terms[t.token_id] = (t.tick, t.neg_risk, t.fees)
     return oid, order
 
 

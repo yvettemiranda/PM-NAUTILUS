@@ -1,4 +1,15 @@
 // Pure display rules. These never decide whether the strategy may trade.
+export function panelVisible(activeTab, panel) {
+  return activeTab === panel;
+}
+
+export function setMarkupIfChanged(element, markup) {
+  if (element.dataset.markup === markup) return false;
+  element.innerHTML = markup;
+  element.dataset.markup = markup;
+  return true;
+}
+
 export function displayStatus(dashboard, { lastSuccess = 0, error = null, now = Date.now() } = {}) {
   if (!dashboard || !lastSuccess) return { run: "unknown", feed: "unknown", scan: "unknown", warning: error || "等待数据" };
   if (error || now - lastSuccess > 10000) return { run: "error", feed: "error", scan: "unknown", warning: "页面数据更新中断，显示为上次快照；当前运行状态未确认。" };

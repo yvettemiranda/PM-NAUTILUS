@@ -15,6 +15,7 @@ from dataclasses import asdict
 from decimal import Decimal
 from hashlib import sha256
 from time import perf_counter_ns
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import msgspec
@@ -22,6 +23,7 @@ from py_clob_client_v2.client import ClobClient
 from py_clob_client_v2.clob_types import (
     ApiCreds,
     MarketOrderArgsV2,
+    OrderArgsV2,
     PartialCreateOrderOptions,
     TradeParams,
 )
@@ -32,6 +34,7 @@ from nautilus_trader.adapters.polymarket.providers import (
     PolymarketInstrumentProviderConfig,
 )
 from nautilus_trader.adapters.polymarket.common.credentials import PolymarketWebSocketAuth
+from nautilus_trader.adapters.polymarket.common.constants import POLYMARKET_NAUTILUS_BUILDER_CODE
 from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.execution.reports import OrderStatusReport
 from nautilus_trader.model.currencies import pUSD
@@ -44,6 +47,13 @@ from .config import SCALE, micros
 from .execution import TestExecution
 from .live_account_guard import audit_open_orders, condition_inventory_matches
 from .native import price, quantity
+from .order_terms import (
+    OrderTermsError,
+    SellTerms,
+    check_signed_buy,
+    check_signed_sell,
+    normalize_sell,
+)
 from .rules import (
     SUPPORTED_CLOB_TICKS,
     cost,
@@ -215,6 +225,10 @@ class _LedgerGate:
             raise asyncio.CancelledError
 
 
+class _PostStateChanged(ValueError):
+    """A retry was stopped after an earlier POST may already have reached the venue."""
+
+
 class _TrackedRetryManager:
     """Mark the boundary where a submitted order may reach the venue."""
 
@@ -229,10 +243,23 @@ class _TrackedRetryManager:
             # check cannot be crossed by a POST queued behind the pool.
             async with self.execution._ledger_gate.post():
                 self.execution._check_post_ready(details[0])
-                # RetryManager may schedule post_order in a worker thread. From
-                # here cancellation cannot prove that no request reached the venue.
+                # The retry manager can schedule a worker before it returns or
+                # raises. Keep the conservative boundary used by crash recovery.
                 self.execution._post_possible.add(str(details[0]))
-                return await self.inner.run(name, details, *args, **kwargs)
+
+                async def checked_attempt(*call_args, **call_kwargs):
+                    try:
+                        self.execution._check_post_ready(details[0])
+                    except ValueError as exc:
+                        if str(details[0]) in self.execution._post_possible:
+                            raise _PostStateChanged(str(exc)) from exc
+                        raise
+                    # This marks each actual attempt, not just pool acquisition.
+                    # A late worker result must never release an unknown reservation.
+                    self.execution._post_possible.add(str(details[0]))
+                    return await args[0](*call_args, **call_kwargs)
+
+                return await self.inner.run(name, details, checked_attempt, *args[1:], **kwargs)
         return await self.inner.run(name, details, *args, **kwargs)
 
     def __getattr__(self, name):
@@ -279,6 +306,9 @@ class LiveExecution(PolymarketExecutionClient):
         self._post_possible = set()
         self._boot_intents = set(owner.store.intents())
         self._sync_lock = asyncio.Lock()
+        self._sdk_terms = {}
+        self._sdk_term_locks = {}
+        self._sdk_condition_tokens = {}
         # Historical snapshot only supports native journal reconstruction. No LIVE
         # order can pass until current account and own venue state are reconciled.
         amount = Money(Decimal(owner.store.get("last_cash", 0)) / SCALE, pUSD)
@@ -560,6 +590,111 @@ class LiveExecution(PolymarketExecutionClient):
             o.strategy_id, o.instrument_id, o.client_order_id, reason, self._clock.timestamp_ns()
         )
 
+    async def _ensure_signing_metadata(self, token):
+        """Refresh the public SDK caches when the runtime's official tick changes."""
+        expected = (token.tick, token.neg_risk, token.fees)
+        lock = self._sdk_term_locks.setdefault(token.condition_id, asyncio.Lock())
+        async with lock:
+            if self._sdk_terms.get(token.token_id) == expected:
+                return
+            known_ids = self._sdk_condition_tokens.setdefault(token.condition_id, set())
+            known_ids.add(token.token_id)
+            # The SDK mutates both outcome caches before this method can inspect
+            # its response. An invalid/failed refresh invalidates our old proof
+            # too, including a later runtime metadata rollback.
+            for token_id in known_ids:
+                self._sdk_terms.pop(token_id, None)
+            info = await asyncio.to_thread(
+                self._http_client.get_clob_market_info, token.condition_id
+            )
+            if not isinstance(info, dict) or type(info.get("nr", False)) is not bool:
+                raise OrderTermsError("官方市场签名档位核对结果无效")
+            try:
+                actual = (micros(info["mts"]), info.get("nr", False))
+                ids = {str(row["t"]) for row in info["t"]}
+                fd = info.get("fd") or {}
+                rate = Decimal(str(fd.get("r", 0)))
+                exponent = Decimal(str(fd.get("e", 0)))
+                if not rate.is_finite() or not exponent.is_finite() or exponent != int(exponent):
+                    raise ValueError
+                wanted_rate = Decimal(token.fees.rate) / SCALE
+                # A zero fee has no curve, so absent exponent or SDK's zero
+                # default is equivalent to the runtime's fee-free exponent=1.
+                same_fees = rate == wanted_rate and (not rate or exponent == token.fees.exponent)
+            except (KeyError, TypeError, ValueError, ArithmeticError, AttributeError):
+                raise OrderTermsError("官方市场签名档位核对结果无效") from None
+            if token.token_id not in ids or actual != expected[:2] or not same_fees:
+                raise OrderTermsError("官方签名档位/费用与当前盘口不一致，等待重新核对")
+            known_ids.update(ids)
+            for token_id in ids:
+                self._sdk_terms[token_id] = expected
+
+    async def _timed_preparation(self, order, stage, operation):
+        started = perf_counter_ns()
+        try:
+            return await operation
+        finally:
+            timing = self._submit_timings.get(str(order.client_order_id))
+            if timing is not None:
+                timing[2][stage] = round((perf_counter_ns() - started) / 1_000_000, 3)
+
+    async def _prepare_buy_signature(self, token, args):
+        await self._ensure_signing_metadata(token)
+        return await asyncio.to_thread(
+            self._http_client.create_market_order,
+            args,
+            options=PartialCreateOrderOptions(
+                tick_size=str(Decimal(token.tick) / SCALE), neg_risk=token.neg_risk
+            ),
+        )
+
+    async def _prepare_sell_signature(self, token, terms: SellTerms):
+        await self._ensure_signing_metadata(token)
+        return await asyncio.to_thread(
+            self._http_client.create_order,
+            OrderArgsV2(
+                token_id=token.token_id,
+                price=float(Decimal(terms.limit) / SCALE),
+                size=float(Decimal(terms.quantity) / SCALE),
+                side="SELL",
+                expiration=0,
+                builder_code=POLYMARKET_NAUTILUS_BUILDER_CODE,
+            ),
+            options=PartialCreateOrderOptions(
+                tick_size=str(Decimal(terms.tick) / SCALE), neg_risk=token.neg_risk
+            ),
+        )
+
+    async def _join_preparations(self, operations):
+        # Neither operation can POST. On cancellation, wait for read/sign workers
+        # before releasing SDK ownership: a late metadata write must not corrupt a
+        # subsequent order's cache. Repeated cancellation must still finish cleanup.
+        batch = asyncio.gather(*operations, return_exceptions=True)
+        try:
+            return await asyncio.shield(batch)
+        except asyncio.CancelledError:
+            while not batch.done():
+                try:
+                    await asyncio.shield(batch)
+                except asyncio.CancelledError:
+                    pass
+            batch.result()
+            raise
+
+    def _record_outbound_terms(self, order, token, limit, maker, taker):
+        i = self.owner.store.intent(order.client_order_id)
+        if not i or i.get("terminal") or i["generation"] != self.owner.store.generation:
+            raise OrderTermsError("签名期间订单状态已变化")
+        i["outbound_terms"] = {
+            "tick": token.tick,
+            "neg_risk": token.neg_risk,
+            "side": order.side.name,
+            "limit": limit,
+            "maker": maker,
+            "taker": taker,
+        }
+        self.owner.store.save_intent(order.client_order_id, i)
+
     async def _submit_market_order(self, command, instrument):
         o = command.order
         r = self.owner
@@ -578,14 +713,6 @@ class LiveExecution(PolymarketExecutionClient):
         if self.wallet is None:
             self.deny(o, "LIVE钱包未连接，无法核对赎回授权")
             return
-        try:
-            await asyncio.to_thread(self.wallet.buy_preflight)
-            self._mark_submit_stage(o, "wallet_check_ms")
-        except Exception as exc:
-            r.store.put("status", "PAUSED")
-            r.store.put("live_error", f"买入前钱包/赎回授权核对失败：{type(exc).__name__}")
-            self.deny(o, "买入前钱包/赎回授权核对失败")
-            return
         notional = signed_buy_notional(i["cash"], Fees(**i["fees"]), tick, executable_limit)
         if notional <= 0 or notional * SCALE // executable_limit < r.tokens[i["token_id"]].min_size:
             self.deny(o, "含费预算不足以满足交易所最小订单份额")
@@ -598,24 +725,33 @@ class LiveExecution(PolymarketExecutionClient):
             order_type="FAK",
             user_usdc_balance=float(Decimal(r.cash()) / SCALE),
         )
-        signed = await asyncio.to_thread(
-            self._http_client.create_market_order,
-            args,
-            options=PartialCreateOrderOptions(neg_risk=r.tokens[i["token_id"]].neg_risk),
+        token = r.tokens[i["token_id"]]
+        wallet_result, signed = await self._join_preparations(
+            [
+                self._timed_preparation(
+                    o, "wallet_check_ms", asyncio.to_thread(self.wallet.buy_preflight)
+                ),
+                self._timed_preparation(o, "sign_ms", self._prepare_buy_signature(token, args)),
+            ]
         )
-        self._mark_submit_stage(o, "sign_ms")
+        self._mark_submit_stage(o, "preparation_ms")
+        if isinstance(wallet_result, BaseException):
+            r.store.put("status", "PAUSED")
+            r.store.put(
+                "live_error", f"买入前钱包/赎回授权核对失败：{type(wallet_result).__name__}"
+            )
+            self.deny(o, "买入前钱包/赎回授权核对失败")
+            return
+        if isinstance(signed, BaseException):
+            raise signed
         # The pinned SDK has no maxSpend option and rounds the maker amount to
         # cents. Inspect the signed facts before allowing any POST boundary.
-        maker = int(signed.makerAmount)
-        taker = int(signed.takerAmount)
-        if (
-            maker <= 0
-            or maker > notional
-            or taker < r.tokens[i["token_id"]].min_size
-            or maker * SCALE > taker * executable_limit
-        ):
-            self.deny(o, "签名订单金额/价格/最小份额未通过含费预算核对")
+        try:
+            maker, taker = check_signed_buy(signed, notional, executable_limit, token.min_size)
+        except OrderTermsError as exc:
+            self.deny(o, str(exc))
             return
+        self._record_outbound_terms(o, token, executable_limit, maker, taker)
         if not self.buy_valid(o, i):
             self.deny(o, "签名期间控制/资格发生变化")
             return
@@ -637,6 +773,38 @@ class LiveExecution(PolymarketExecutionClient):
             # until the FAK's final trades and cancellation are reconciled.
             base_quantity=quantity(ceil_div((maker + 1) * SCALE, tick)),
             expected_venue_order_id=venue,
+        )
+
+    async def _submit_limit_order(self, command, instrument):
+        """SELL signs the same rounded rights and upward price floor as TEST."""
+        o = command.order
+        r = self.owner
+        i = r.store.intent(o.client_order_id)
+        if o.side != OrderSide.SELL or o.is_quote_quantity:
+            self.deny(o, "仅使用有自有份额上限的SELL限价FAK")
+            return
+        token = r.tokens[i["token_id"]]
+        try:
+            terms = normalize_sell(i["quantity"], i["limit"], token.tick, token.min_size)
+        except OrderTermsError as exc:
+            self.deny(o, str(exc))
+            return
+        signed = await self._join_preparations(
+            [self._timed_preparation(o, "sign_ms", self._prepare_sell_signature(token, terms))]
+        )
+        signed = signed[0]
+        if isinstance(signed, BaseException):
+            raise signed
+        try:
+            maker, taker = check_signed_sell(signed, terms)
+        except OrderTermsError as exc:
+            self.deny(o, str(exc))
+            return
+        self._record_outbound_terms(o, token, terms.limit, maker, taker)
+        self.generate_order_submitted(o.strategy_id, o.instrument_id, o.client_order_id, r.now)
+        venue = self._expected_venue_order_id(signed, neg_risk=token.neg_risk)
+        await self._post_signed_order(
+            o, signed, order_type_override="FAK", expected_venue_order_id=venue
         )
 
     async def _post_signed_order(self, order, signed_order, **kwargs):
@@ -683,6 +851,41 @@ class LiveExecution(PolymarketExecutionClient):
             raise ValueError("LIVE账本/订单状态已变化，不能提交订单")
         if o.side == OrderSide.BUY and (not self.open_orders_clear or not self.buy_valid(o, i)):
             raise ValueError("提交前资格/资金/暂停状态已变化")
+        token = r.tokens[i["token_id"]]
+        terms = i.get("outbound_terms")
+        if (
+            not isinstance(terms, dict)
+            or terms.get("tick") != token.tick
+            or terms.get("neg_risk") != token.neg_risk
+            or terms.get("side") != o.side.name
+            or i["fees"] != asdict(token.fees)
+        ):
+            raise ValueError("提交前市场签名档位或费用已变化")
+        signed = SimpleNamespace(makerAmount=terms["maker"], takerAmount=terms["taker"])
+        if o.side == OrderSide.SELL:
+            current = normalize_sell(i["quantity"], i["limit"], token.tick, token.min_size)
+            if current.limit != terms["limit"]:
+                raise ValueError("提交前卖出价格已变化")
+            check_signed_sell(signed, current)
+            cycle = r.business["cycles"].get(token.event_id)
+            if (
+                not cycle
+                or cycle["token_id"] != token.token_id
+                or cycle["quantity"] < current.quantity
+            ):
+                raise ValueError("提交前自有卖出份额不足")
+        else:
+            limit = min(
+                i.get("execution_limit", i["limit"]) // token.tick * token.tick, SCALE - token.tick
+            )
+            if terms["limit"] != limit:
+                raise ValueError("提交前买入价格已变化")
+            check_signed_buy(
+                signed,
+                signed_buy_notional(i["cash"], Fees(**i["fees"]), token.tick, limit),
+                limit,
+                token.min_size,
+            )
 
     def _is_unknown_submit_result(self, exc):
         # The pinned retry manager also returns None after a cancelled POST,
@@ -691,6 +894,7 @@ class LiveExecution(PolymarketExecutionClient):
         status = getattr(exc, "status_code", None)
         return (
             exc is None
+            or isinstance(exc, _PostStateChanged)
             or super()._is_unknown_submit_result(exc)
             or (isinstance(status, int) and status >= 500)
         )
@@ -798,13 +1002,7 @@ class LiveExecution(PolymarketExecutionClient):
                 self.ingest_trade(self._decoder_trade_report.decode(msgspec.json.encode(trade)))
             await asyncio.sleep(0)
             r.store.put("last_trade_poll", poll_start)
-        filled = {}
-        for oid in intents:
-            rows = r.store.order_fills(oid)
-            filled[oid] = (
-                {e.info.get("venue_trade_id") for e in rows},
-                sum(e.info.get("pm_gross", 0) for e in rows),
-            )
+        queries = []
         for oid, i in r.store.intents(active_only=True).items():
             if i["kind"] == "SETTLEMENT" or i.get("terminal"):
                 continue
@@ -826,13 +1024,38 @@ class LiveExecution(PolymarketExecutionClient):
                 # yet (for example while awaiting the SDK pool or ledger gate).
                 # A reboot loses this proof and still treats the result as unknown.
                 continue
-            result = await asyncio.to_thread(self._http_client.get_order, venue)
+            queries.append((oid, venue))
+
+        limit = asyncio.Semaphore(4)
+
+        async def lookup(venue):
+            async with limit:
+                return await asyncio.to_thread(self._http_client.get_order, venue)
+
+        results = await asyncio.gather(
+            *(lookup(venue) for _, venue in queries), return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        # All DB and native state stays on this event loop. CONFIRMED WS facts
+        # arriving during the REST reads must be included before releasing rights.
+        await asyncio.sleep(0)
+        for (oid, venue), result in zip(queries, results, strict=True):
+            i = r.store.intent(oid)
+            if not i or i.get("terminal") or i["generation"] != r.store.generation:
+                continue
+            if i.get("venue_id") != venue:
+                raise ValueError("订单查询期间持久化身份已变化")
+            o = self._cache.order(ClientOrderId(oid))
             if not result:
                 raise ValueError("订单结果不明，保留额度与Event锁")
             if str(result.get("asset_id")) != i["token_id"]:
                 raise ValueError("订单查询身份不一致")
             associated = set(result.get("associate_trades") or [])
-            confirmed, gross = filled.get(oid, (set(), 0))
+            rows = r.store.order_fills(oid)
+            confirmed = {e.info.get("venue_trade_id") for e in rows}
+            gross = sum(e.info.get("pm_gross", 0) for e in rows)
             failed = i.get("failed_trades", {})
             # All matched quantity must be represented by finalized venue responses.
             # Missing/deferred records retain the reservation; never infer zero fill.

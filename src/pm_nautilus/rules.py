@@ -6,12 +6,9 @@ from functools import lru_cache
 from typing import Literal
 
 from .config import SCALE, Preferences
+from .order_terms import SUPPORTED_CLOB_TICKS, normalize_sell, OrderTermsError, sell_minimum
 
 Level = tuple[int, int]
-
-# The pinned py-clob-client-v2==1.0.1 order builder has rounding configurations
-# for exactly these price increments. Values are price micro-units.
-SUPPORTED_CLOB_TICKS = frozenset({100_000, 10_000, 1_000, 100})
 
 
 def ceil_div(n: int, d: int) -> int:
@@ -64,8 +61,17 @@ def _worst_buy_fee_ratio(fees: Fees, tick: int, limit: int) -> Fraction:
         return Fraction(0)
     if tick not in SUPPORTED_CLOB_TICKS or limit < tick:
         raise ValueError("无法按当前价格档位保证买入含费预算")
+    high = min(limit, SCALE - tick) // tick * tick
+    # For e >= 2, p^(e-1) * (1-p)^e increases up to
+    # p=(e-1)/(2e-1), then decreases. Its exact discrete maximum is
+    # therefore at a neighboring executable tick (or an interval endpoint).
+    # e=0 and e=1 are decreasing, so their maximum is the first tick.
+    candidates = {tick}
+    if fees.exponent >= 2:
+        below = SCALE * (fees.exponent - 1) // ((2 * fees.exponent - 1) * tick) * tick
+        candidates.update((high, max(tick, min(high, below)), max(tick, min(high, below + tick))))
     worst = Fraction(0)
-    for p in range(tick, min(limit, SCALE - tick) + 1, tick):
+    for p in candidates:
         if fees.exponent:
             ratio = Fraction(
                 fees.rate * p ** (fees.exponent - 1) * (SCALE - p) ** fees.exponent,
@@ -239,7 +245,7 @@ class SellBatch:
     fills: tuple[Fill, ...]
 
 
-def sell_batches(bids: list[Level], targets: list[Target], minimum: int, fees: Fees):
+def sell_batches(bids: list[Level], targets: list[Target], minimum: int, fees: Fees, tick=None):
     """Stable grouping and shared depth, used by previews and submitted sell batches."""
     depth = dict(bids)
     batches = []
@@ -250,10 +256,18 @@ def sell_batches(bids: list[Level], targets: list[Target], minimum: int, fees: F
             continue
         grouped.append(t)
         quantity += t.qty
-        if quantity < minimum:
+        if quantity < (sell_minimum(minimum) if tick is not None else minimum):
             continue
         limit = max(x.price for x in grouped)
-        remain = quantity
+        executable = quantity
+        if tick is not None:
+            try:
+                terms = normalize_sell(quantity, limit, tick, minimum)
+            except OrderTermsError:
+                grouped, quantity = [], 0
+                continue
+            executable, limit = terms.quantity, terms.limit
+        remain = executable
         fills = []
         for p in sorted(depth, reverse=True):
             if p < limit or not 0 < p < SCALE:
@@ -268,7 +282,7 @@ def sell_batches(bids: list[Level], targets: list[Target], minimum: int, fees: F
             if remain == 0:
                 break
         if fills:
-            batches.append(SellBatch(tuple(grouped), limit, quantity, tuple(fills)))
+            batches.append(SellBatch(tuple(grouped), limit, executable, tuple(fills)))
         grouped, quantity = [], 0
     return batches
 
@@ -331,7 +345,7 @@ def preview(
     if affordable(quote_budget, signed_limit) < t.min_size:
         return None
     targets = [Target(str(i), f.target, f.net, i) for i, f in enumerate(fills)]
-    batches = sell_batches(bids, targets, t.min_size, t.fees)
+    batches = sell_batches(bids, targets, t.min_size, t.fees, tick=t.tick)
     coverage = sum(f.net for b in batches for f in b.fills)
     proceeds = sum(max(0, cost(f.target, f.net) - t.fees.fee(f.net, f.target)) for f in fills)
     return Preview(

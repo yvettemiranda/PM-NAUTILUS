@@ -15,6 +15,7 @@ from nautilus_trader.trading.strategy import Strategy
 
 from .config import SCALE, Preferences, micros
 from .execution import TestExecution
+from .order_terms import normalize_sell, OrderTermsError, sell_minimum
 from .native import Native, instrument_id, make_instrument, quantity, price
 from .rules import (
     StopLoss,
@@ -72,6 +73,10 @@ class Runtime:
         self.instrument_tokens = {}
         self.dirty = set()
         self.evaluations = {}
+        self._preview_cache = {}
+        self._time_sensitive_events = set()
+        self._refresh_control = None
+        self._refresh_events = {}
         self.replaying = False
         self.faulted = None
         self.native = Native(self, clock)
@@ -138,6 +143,7 @@ class Runtime:
                     continue
                 self.tokens[t.token_id] = t
                 self.store.save_token(t)
+                self.dirty.add(t.event_id)
                 if str(instrument_id(t)) in self.instrument_tokens:
                     self.native.data.process(make_instrument(t))
         if official_tags is not None:
@@ -147,18 +153,60 @@ class Runtime:
 
     def refresh_eligibility(self):
         now = self.now
-        self.monitored = {
+        previous = self.events
+        eligible = {
             tid
             for tid, t in self.tokens.items()
             if static_reason(t, self.preferences, now, self.official_tags) is None
             and t.condition_id not in self.business["settled"]
         }
         self.events = {}
-        for tid in self.monitored:
+        for tid in eligible:
             self.events.setdefault(self.tokens[tid].event_id, set()).add(tid)
+        self.monitored = set(eligible)
         for cycle in self.business["cycles"].values():
             self.monitored.add(cycle["token_id"])
-        self.dirty.update(self.events)
+        for eid in previous.keys() | self.events.keys():
+            if previous.get(eid) != self.events.get(eid):
+                self.dirty.add(eid)
+        # Periodic control ticks still detect cash releases, completed/rejected
+        # orders and eligibility time boundaries. Unchanged Events need no
+        # repeated order preview; lifecycle ties retain their timed re-ranking.
+        control = (
+            self.preferences.model_dump_json(),
+            self.status,
+            self.cash(),
+            self.held_cash(),
+            tuple(self.business["banned"]),
+            tuple(self.business["settled"]),
+        )
+        if control != self._refresh_control:
+            self.dirty.update(self.events)
+            self.dirty.update(self.business["cycles"])
+            self._refresh_control = control
+        active = {}
+        for oid, intent in self.store.intents(active_only=True).items():
+            active.setdefault(intent["event_id"], []).append(oid)
+        states = {
+            eid: (
+                tuple(sorted(active.get(eid, []))),
+                (
+                    cycle["quantity"],
+                    cycle["spent"],
+                    cycle["budget"],
+                    cycle["sold"],
+                    tuple(sorted(cycle["stop"].items())),
+                )
+                if (cycle := self.business["cycles"].get(eid))
+                else None,
+            )
+            for eid in self.events.keys() | self.business["cycles"].keys() | active.keys()
+        }
+        for eid in states.keys() | self._refresh_events.keys():
+            if states.get(eid) != self._refresh_events.get(eid):
+                self.dirty.add(eid)
+        self._refresh_events = states
+        self.dirty.update(self._time_sensitive_events & self.events.keys())
 
     def release_unmonitored(self):
         # Called only after obsolete feed tasks have been cancelled and awaited.
@@ -166,6 +214,7 @@ class Runtime:
         historical = {i["token_id"] for i in self.store.intents().values()}
         for tid in self.books.keys() - self.monitored:
             del self.books[tid]
+            self._preview_cache.pop(tid, None)
         for iid, tid in list(self.instrument_tokens.items()):
             if tid not in self.monitored and tid not in historical:
                 self.native.cache.purge_instrument(instrument_id(self.tokens[tid]))
@@ -275,14 +324,45 @@ class Runtime:
             return
         tid = intent["token_id"]
         t = self.tokens[tid]
-        previous_business = deepcopy(self.business)
-        previous_book = deepcopy(self.books[tid])
+        # Only this Event can change in a synchronous native projection. Keep an
+        # undo snapshot of those rows, rather than copying every historical claim.
+        previous_cycle = deepcopy(self.business["cycles"].get(t.event_id))
+        previous_targets = {
+            key: deepcopy(value)
+            for key, value in self.business["targets"].items()
+            if value["event_id"] == t.event_id
+        }
+        previous_claim = deepcopy(self.business["claims"].get(t.condition_id))
+        previous_scalars = {
+            key: self.business[key] for key in ("cursor", "realized", "recovery_error")
+        }
+        banned_length = len(self.business["banned"])
+        previous_book = (
+            deepcopy(self.books[tid])
+            if isinstance(event, OrderFilled)
+            and self.mode == "TEST"
+            and intent["kind"] != "SETTLEMENT"
+            else None
+        )
         try:
             self._project_transaction(seq, event, intent, t)
         except Exception as exc:
-            self.business.clear()
-            self.business.update(previous_business)
-            self.books[tid] = previous_book
+            if previous_cycle is None:
+                self.business["cycles"].pop(t.event_id, None)
+            else:
+                self.business["cycles"][t.event_id] = previous_cycle
+            for key in list(self.business["targets"]):
+                if self.business["targets"][key]["event_id"] == t.event_id:
+                    del self.business["targets"][key]
+            self.business["targets"].update(previous_targets)
+            if previous_claim is None:
+                self.business["claims"].pop(t.condition_id, None)
+            else:
+                self.business["claims"][t.condition_id] = previous_claim
+            self.business.update(previous_scalars)
+            del self.business["banned"][banned_length:]
+            if previous_book is not None:
+                self.books[tid] = previous_book
             self.faulted = f"业务投影未提交，等待重启重放: {type(exc).__name__}"
             self.store.put("status", "PAUSED")
             raise
@@ -305,7 +385,7 @@ class Runtime:
             self.store.save_intent(event.client_order_id, intent)
             self.business["cursor"] = seq
             self.release_cycle(t.event_id)
-            self.store.put("business", self.business)
+            self.store.save_business_event(self.business, t.event_id, t.condition_id)
 
     def apply_fill(self, e, intent, t):
         info = e.info or {}
@@ -422,6 +502,7 @@ class Runtime:
         return self.store.intents(active_only=True, event_id=eid)
 
     def evaluate(self, eid, dispatch=True):
+        self._time_sensitive_events.discard(eid)
         self.evaluations[eid] = "NO_WINNER", None
         cycle = self.business["cycles"].get(eid)
         ids = self.events.get(eid, set())
@@ -451,9 +532,13 @@ class Runtime:
                     k: v for k, v in self.business["targets"].items() if v["event_id"] != eid
                 }
             if dispatch and (stop_changed or stop.state == "EXITING"):
-                self.store.put("business", self.business)
+                self.store.save_business_event(self.business, eid)
             if b.ready and not any(i["side"] == "SELL" for i in active.values()):
-                if stop.state == "EXITING" and bid and cycle["quantity"] >= t.min_size:
+                if (
+                    stop.state == "EXITING"
+                    and bid
+                    and cycle["quantity"] >= sell_minimum(t.min_size)
+                ):
                     if dispatch:
                         self.submit(
                             t,
@@ -468,7 +553,7 @@ class Runtime:
                     for v in self.business["targets"].values()
                     if v["event_id"] == eid
                 ]
-                batches = sell_batches(available_bids, targets, t.min_size, t.fees)
+                batches = sell_batches(available_bids, targets, t.min_size, t.fees, tick=t.tick)
                 if batches:
                     batch = batches[0]
                     if dispatch:
@@ -497,6 +582,7 @@ class Runtime:
             self.evaluations[eid] = "NO_WINNER", None
             return
         opportunities = []
+        config_key = self.preferences.model_dump_json()
         for tid in ids:
             t = self.tokens[tid]
             b = self.books[tid]
@@ -504,12 +590,34 @@ class Runtime:
                 continue
             bid = b.bid.available() if self.mode == "TEST" else list(b.bid.external.items())
             ask = b.ask.available() if self.mode == "TEST" else list(b.ask.external.items())
-            p = preview(t, self.preferences, bid, ask, min(cash, remaining), budget)
+            cache_key = (
+                t,
+                config_key,
+                id(b),
+                b.revision,
+                tuple(sorted(b.bid.consumed.items())),
+                tuple(sorted(b.ask.consumed.items())),
+                min(cash, remaining),
+                budget,
+            )
+            cached = self._preview_cache.get(tid)
+            if cached is not None and cached[0] == cache_key:
+                p = cached[1]
+            else:
+                p = preview(t, self.preferences, bid, ask, min(cash, remaining), budget)
+                self._preview_cache[tid] = cache_key, p
             if p:
                 opportunities.append(p)
         winner = arbitrate(opportunities, self.preferences, self.now)
         if winner:
             status = "READY"
+            # Only the lifecycle part of the rank changes without new quotes.
+            # Keep the periodic re-ranking where tied primary criteria permit
+            # different market durations to exchange priority over time.
+            primary = winner.rank(self.preferences, self.now)[:5]
+            tied = [p for p in opportunities if p.rank(self.preferences, self.now)[:5] == primary]
+            if len({(p.token.opened_ns, p.token.ends_ns) for p in tied}) > 1:
+                self._time_sensitive_events.add(eid)
         self.evaluations[eid] = status, winner
         if dispatch and winner and self.status == "RUNNING":
             # Evaluation is synchronous with persistence and dispatch; no await may
@@ -555,6 +663,12 @@ class Runtime:
     def submit(
         self, t, side, qty, limit, cash=0, kind="TARGET", targets=None, execution_limit=None
     ):
+        terms = None
+        if side == "SELL" and kind != "SETTLEMENT":
+            try:
+                terms = normalize_sell(qty, limit, t.tick, t.min_size)
+            except OrderTermsError:
+                return None  # Unsellable tails remain owned for eventual redemption.
         self.native.ensure_instrument(t)
         if self.mode == "TEST" and kind != "SETTLEMENT":
             # Write the pre-fill depth BEFORE any intent/native fill can commit.
@@ -592,8 +706,8 @@ class Runtime:
             order = self.strategy.order_factory.limit(
                 instrument_id(t),
                 OrderSide.SELL,
-                quantity(qty),
-                price(max(1, limit)),
+                quantity(terms.quantity if terms else qty),
+                price(terms.limit if terms else max(1, limit)),
                 time_in_force=TimeInForce.IOC,
                 client_order_id=oid,
             )

@@ -16,6 +16,7 @@ from nautilus_trader.model.identifiers import AccountId, ClientId, Venue, VenueO
 from nautilus_trader.model.objects import AccountBalance, Money
 from .config import SCALE
 from .native import price, quantity
+from .order_terms import normalize_sell, OrderTermsError
 from .rules import Target, plan_buy, sell_batches
 
 
@@ -91,9 +92,14 @@ class TestExecution(ExecutionClient):
                 self.owner.preferences,
             )
         else:
-            target = Target("batch", intent["limit"], intent["quantity"], 0)
-            batches = sell_batches(b.bid.available(), [target], t.min_size, t.fees)
-            fills = [f for batch in batches for f in batch.fills]
+            try:
+                terms = normalize_sell(intent["quantity"], intent["limit"], t.tick, t.min_size)
+            except OrderTermsError:
+                fills = []
+            else:
+                target = Target("batch", terms.limit, terms.quantity, 0)
+                batches = sell_batches(b.bid.available(), [target], t.min_size, t.fees)
+                fills = [f for batch in batches for f in batch.fills]
         if o.is_quote_quantity and fills:
             now = self._clock.timestamp_ns()
             self._send_order_event(

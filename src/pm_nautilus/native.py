@@ -151,6 +151,27 @@ class Native:
             )
         self.data.process(OrderBookDeltas(iid, deltas))
 
+    def feed_delta(self, t, book, side, levels):
+        """Publish accepted public changes without rebuilding unchanged levels."""
+        iid = instrument_id(t)
+        self.ensure_instrument(t)
+        order_side = OrderSide.BUY if side == "BID" else OrderSide.SELL
+        values = list(dict(levels).items())
+        deltas = [
+            OrderBookDelta(
+                iid,
+                BookAction.UPDATE if q else BookAction.DELETE,
+                BookOrder(order_side, price(p), quantity(q), 0),
+                128 if i == len(values) - 1 else 0,
+                0,
+                book.timestamp,
+                book.timestamp,
+            )
+            for i, (p, q) in enumerate(values)
+        ]
+        if deltas:
+            self.data.process(OrderBookDeltas(iid, deltas))
+
     def stop(self):
         for c in (self.strategy, self.execution, self.risk, self.data):
             if c is not None:

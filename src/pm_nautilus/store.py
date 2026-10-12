@@ -120,9 +120,13 @@ class Store:
             yield
             self.db.execute("COMMIT")
         except BaseException:
-            self.db.execute("ROLLBACK")
-            self._business_rows = None
-            self._business_target_events = {}
+            try:
+                # SQLite can already have rolled back (RAISE(ROLLBACK), FULL,
+                # IOERR). The comparison cache still contains uncommitted rows.
+                if self.db.in_transaction:
+                    self.db.execute("ROLLBACK")
+            finally:
+                self.invalidate_business_cache()
             raise
 
     def _get_meta(self, key, default=None):
@@ -284,7 +288,7 @@ class Store:
             self._sync_business_rows("claims", business["claims"], {condition_id})
 
     def invalidate_business_cache(self):
-        """Discard write comparisons after an external snapshot replacement."""
+        """Discard comparisons after rollback or an external snapshot replacement."""
         self._business_rows = None
         self._business_target_events = {}
 

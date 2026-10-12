@@ -1,5 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {pageHarness,profile,seedTestDashboard} from './ui-app-harness.mjs';
 import {displayStatus,curveSegments,modeSwitchDecision,walletOriginSecure,liveWalletAccountVerified,liveRunSummary,redemptionApprovalAction,panelVisible,setMarkupIfChanged} from '../src/pm_nautilus/web/ui-state.js';
 const base=()=>({executionMode:'TEST',strategy:{status:'RUNNING'},positions:[{currentSellPriceStatus:'NO_BID'}],marketScan:{lastScanAt:'2026-09-22',diagnostics:{streams:{groups:[{taskRunning:true,state:'READY',readyBookCount:2,tokenCount:2}]}}}});
 const opts={lastSuccess:1000,now:2000};
@@ -80,4 +81,73 @@ test('LIVE funds and start require fresh unlocked enabled wallet state',()=>{
  assert.equal(liveWalletAccountVerified({...state,dashboard:{liveExecutionEnabled:false}}),false);
  assert.equal(liveWalletAccountVerified({...state,now:22000}),false);
  assert.equal(liveWalletAccountVerified({...state,error:'unavailable'}),false);
+});
+
+test('switching modes clears hidden market data while the next dashboard is pending',()=>{
+ const page=pageHarness(), {ui,element}=page;
+ seedTestDashboard(page);
+ ui.events=[{eventTitle:'TEST_ONLY_MARKET',representative:{marketQuestion:'TEST_ONLY_MARKET',categoryLabels:[]},progressPercent:20,status:'NO_WINNER',outcomes:[]}];
+ ui.candidateCount=1;ui.displayCandidateCount=1;ui.staleCandidateCount=1;
+ element('#mode-toggle').handlers.click();
+ assert.equal(ui.displayMode,'LIVE');
+ assert.equal(ui.dashboard,null);
+ assert.equal(ui.events.length,0);
+ assert.equal(ui.candidateCount,0);
+ assert.equal(ui.displayCandidateCount,0);
+ assert.equal(ui.staleCandidateCount,0);
+ element('#tab-market').handlers.click();
+ assert.equal(element('#candidates').innerHTML.includes('TEST_ONLY_MARKET'),false);
+ assert.equal(element('#candidate-count').textContent,'读取中');
+ assert.equal(element('#load-more').disabled,true);
+ // An unrelated cached dashboard cannot authorize rendering another mode's data.
+ ui.dashboard={executionMode:'TEST'};
+ ui.events=[{eventTitle:'TEST_ONLY_MARKET'}];
+ page.context.renderCandidatesForTest();
+ assert.equal(element('#candidates').innerHTML.includes('TEST_ONLY_MARKET'),false);
+});
+
+for (const [control,eventType,url] of [
+ ['sort-toggle','click','/api/test/preferences'],
+ ['config-form','submit','/api/test/preferences'],
+ ['run-toggle','click','/api/test/start'],
+ ['reset-test','click','/api/test/reset'],
+]) test(`${control} serializes controls and ignores a reply from an obsolete mode`,async()=>{
+ const page=pageHarness(), {ui,element,context}=page;
+ seedTestDashboard(page);
+ let resolveMutation,requests=0;
+ context.fetch=(path)=>path===url?new Promise(resolve=>{requests++;resolveMutation=resolve;}):new Promise(()=>{});
+ const pending=element(`#${control}`).handlers[eventType]({preventDefault(){}});
+ assert.equal(requests,1);
+ assert.equal(ui.controlPending,true);
+ element('#mode-toggle').handlers.click();
+ assert.equal(ui.displayMode,'TEST');
+ await element('#sort-toggle').handlers.click();
+ await element('#run-toggle').handlers.click();
+ assert.equal(requests,1);
+ // Even a view replaced outside the click handler must reject the old reply.
+ const livePreferences={...profile,orderAmount:'7'};
+ ui.displayMode='LIVE';ui.mutationVersion++;
+ ui.dashboard={executionMode:'LIVE',preferences:livePreferences,strategy:{status:'LOCKED'}};
+ ui.preferences=livePreferences;ui.strategyStatus='LOCKED';
+ resolveMutation({ok:true,headers:{get(){return null;}},async text(){return JSON.stringify({preferences:{...profile,candidateSortDirection:'DESC'},strategy:{status:'RUNNING'}});}});
+ await pending;
+ assert.equal(ui.preferences,livePreferences);
+ assert.equal(ui.dashboard.preferences,livePreferences);
+ assert.equal(ui.strategyStatus,'LOCKED');
+ assert.equal(ui.controlPending,false);
+});
+
+test('a failed stale sort reply does not read cleared preferences or show another mode error',async()=>{
+ const page=pageHarness(), {ui,element,context}=page;
+ seedTestDashboard(page);
+ let resolveSort;
+ context.fetch=path=>path==='/api/test/preferences'?new Promise(resolve=>{resolveSort=resolve;}):new Promise(()=>{});
+ const pending=element('#sort-toggle').handlers.click();
+ ui.displayMode='LIVE';ui.mutationVersion++;ui.preferences=null;ui.dashboard=null;
+ const message=element('#message').textContent;
+ resolveSort({ok:false,headers:{get(){return null;}},async text(){return JSON.stringify({error:'old TEST failure'});}});
+ await pending;
+ assert.equal(element('#message').textContent,message);
+ assert.equal(ui.preferences,null);
+ assert.equal(element('#sort-toggle').disabled,true);
 });

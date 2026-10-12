@@ -57,6 +57,49 @@ def test_legacy_migration_reopen_and_atomic_rollback(tmp_path):
     store.close()
 
 
+@pytest.mark.parametrize("failure", ["automatic_rollback", "commit"])
+def test_failed_transaction_retries_position_update_and_target_delete(tmp_path, failure):
+    path = tmp_path / "state.sqlite"
+    store = Store(path)
+    original = legacy_business()
+    store.put("business", original)
+    generation = store.generation
+    changed = deepcopy(original)
+    changed["cycles"]["event"]["quantity"] = 10
+    changed["targets"].clear()
+    changed["cursor"] += 1
+    if failure == "automatic_rollback":
+        store.db.executescript("""
+            CREATE TEMP TRIGGER fail_after_business BEFORE INSERT ON meta
+            WHEN NEW.key='fail' BEGIN SELECT RAISE(ROLLBACK,'controlled rollback'); END;
+        """)
+        statement = "INSERT INTO meta VALUES('fail','null')"
+        reason = "controlled rollback"
+    else:
+        # A deferred FK error occurs only at COMMIT, after both caches changed.
+        store.db.executescript("""
+            CREATE TABLE parent(id INTEGER PRIMARY KEY);
+            CREATE TABLE child(parent_id INTEGER REFERENCES parent(id)
+                DEFERRABLE INITIALLY DEFERRED);
+        """)
+        statement = "INSERT INTO child VALUES(1)"
+        reason = "FOREIGN KEY constraint failed"
+    with pytest.raises(sqlite3.IntegrityError, match=reason):
+        with store.transaction():
+            store.save_business_event(changed, "event")
+            store.db.execute(statement)
+    assert not store.db.in_transaction
+    assert store._business_rows is None and store._business_target_events == {}
+    assert store.get("business") == original
+    # The exact same retry must not skip its quantity update or target deletion.
+    store.save_business_event(changed, "event")
+    assert store.get("business") == changed
+    store.close()
+    store = Store(path)
+    assert store.generation == generation and store.get("business") == changed
+    store.close()
+
+
 def test_failed_migration_keeps_the_complete_legacy_value(tmp_path, monkeypatch):
     path = tmp_path / "legacy.sqlite"
     original = legacy_business()

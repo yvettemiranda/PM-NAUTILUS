@@ -2,6 +2,7 @@
 
 import asyncio
 from dataclasses import replace
+from decimal import Decimal
 from threading import Event, Lock
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -13,8 +14,10 @@ from py_clob_client_v2.client import ClobClient
 from py_clob_client_v2.order_builder.builder import OrderBuilder, ROUNDING_CONFIG
 
 from pm_nautilus.live import LiveExecution, _LedgerGate, _TrackedRetryManager, _PostStateChanged
-from pm_nautilus.order_terms import OrderTermsError
+from pm_nautilus.order_terms import OrderTermsError, normalize_sell, check_signed_sell
+from pm_nautilus.native import instrument_id
 from pm_nautilus.rules import Fees
+from pm_nautilus.strategy import Runtime
 from test_live_recovery import accept, controlled_runtime, flush, fund, token, venue_trade
 from test_live_submit_cleanup import prepared_order
 
@@ -40,18 +43,96 @@ def unsigned_sdk(t):
     return http
 
 
-async def prepared_sell(runtime, *, floor=963_000):
+async def prepared_sell(runtime, *, floor=963_000, quantity=5_009_000):
     buy_oid, _ = await prepared_order(runtime)
     client = runtime.client
     client._submit_order = AsyncMock()
     t = runtime.tokens["1"]
     await accept(runtime, buy_oid)
-    trade = msgspec.structs.replace(venue_trade(t), size="5.009")
+    trade = msgspec.structs.replace(venue_trade(t), size=str(Decimal(quantity) / 1_000_000))
     client.ingest_trade(trade)
     await flush()
-    sell_oid = runtime.submit(t, "SELL", 5_009_000, floor)
+    sell_oid = runtime.submit(t, "SELL", quantity, floor, targets=list(runtime.business["targets"]))
     await flush()
     return sell_oid, runtime.native.cache.order(ClientOrderId(sell_oid))
+
+
+@pytest.mark.parametrize(
+    "quantity,min_size", [(5_020_000, 5_020_000), (5_029_000, 5_020_000), (8_030_000, 5_000_000)]
+)
+def test_exact_sell_size_reaches_post_and_matches_test_owned_tail(tmp_path, quantity, min_size):
+    async def run():
+        async with controlled_runtime(tmp_path / "live-sell-size.sqlite") as runtime:
+            oid, order = await prepared_sell(runtime, floor=963_001, quantity=quantity)
+            client = runtime.client
+            t = replace(runtime.tokens["1"], min_size=min_size)
+            runtime.tokens[t.token_id] = t
+            client._http_client = unsigned_sdk(t)
+            client._sdk_terms.clear()
+            client._post_signed_order = AsyncMock()
+            client._expected_venue_order_id = Mock(return_value=VenueOrderId("venue-sell"))
+            await LiveExecution._submit_order(
+                client, SimpleNamespace(order=order, instrument_id=order.instrument_id)
+            )
+            await flush()
+            client._post_signed_order.assert_awaited_once()
+            signed = client._post_signed_order.await_args.args[1]
+            terms = normalize_sell(quantity, 963_001, t.tick, t.min_size)
+            maker, _taker = check_signed_sell(signed, terms)
+            assert maker == quantity // 10_000 * 10_000
+            assert runtime.store.intent(oid)["outbound_terms"]["maker"] == maker
+            assert not runtime._test_queue_errors
+            client._http_client._post.assert_not_called()
+
+            # Apply the controlled venue's actual signed fill, including its
+            # durable identity, through the normal confirmed-trade projection.
+            venue = VenueOrderId("venue-sell")
+            runtime.native.cache.add_venue_order_id(order.client_order_id, venue)
+            intent = runtime.store.intent(oid)
+            intent["venue_id"] = str(venue)
+            runtime.store.save_intent(oid, intent)
+            client.generate_order_accepted(
+                order.strategy_id, order.instrument_id, order.client_order_id, venue, runtime.now
+            )
+            await flush()
+            trade = msgspec.to_builtins(venue_trade(t))
+            trade.update(
+                id="signed-sell-trade",
+                taker_order_id=str(venue),
+                side="SELL",
+                size=str(Decimal(maker) / 1_000_000),
+                price=str(Decimal(terms.limit) / 1_000_000),
+            )
+            client.ingest_trade(
+                msgspec.json.decode(msgspec.json.encode(trade), type=type(venue_trade(t)))
+            )
+            await flush()
+            live_cycle = runtime.business["cycles"].get(t.event_id)
+            assert (live_cycle["quantity"] if live_cycle else 0) == quantity - maker
+            positions = runtime.native.cache.positions_open(instrument_id=instrument_id(t))
+            assert sum(p.quantity.as_decimal() for p in positions) * 1_000_000 == quantity - maker
+            assert runtime.validate()["ok"]
+
+            simulated = Runtime(tmp_path / "test-sell-size.sqlite")
+            try:
+                simulated.add_tokens([t])
+                simulated.book(t.token_id, [(90_000, 100_000_000)], [(100_000, quantity)])
+                simulated.submit(t, "BUY", quantity, 100_000, cash=900_000)
+                simulated.books[t.token_id].snapshot(
+                    [(964_000, 100_000_000)], [(965_000, 100_000_000)], simulated.now
+                )
+                test_oid = simulated.submit(
+                    t, "SELL", quantity, 963_001, targets=list(simulated.business["targets"])
+                )
+                test_order = simulated.native.cache.order(ClientOrderId(test_oid))
+                assert test_order.quantity.as_decimal() * 1_000_000 == maker
+                cycle = simulated.business["cycles"].get(t.event_id)
+                assert (cycle["quantity"] if cycle else 0) == quantity - maker
+                assert simulated.validate()["ok"]
+            finally:
+                simulated.close()
+
+    asyncio.run(run())
 
 
 def test_dynamic_tick_refreshes_real_sdk_and_sell_keeps_floor_and_size(tmp_path):
@@ -388,6 +469,7 @@ def test_rest_terminal_includes_ws_confirmation_received_during_query(tmp_path):
                 entered.set()
                 assert release.wait(3)
                 return {
+                    "id": _venue,
                     "asset_id": "1",
                     "associate_trades": ["confirmed-trade-1"],
                     "size_matched": "10",

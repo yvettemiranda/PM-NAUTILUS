@@ -506,3 +506,256 @@ def test_scan_cannot_roll_back_tick_received_after_an_earlier_gamma_page(tmp_pat
         runtime.close()
 
     asyncio.run(run())
+
+
+def test_recovered_shared_socket_fatal_stays_acknowledged_after_cached_scan(tmp_path, monkeypatch):
+    async def run():
+        runtime, _, t = setup(tmp_path / "first")
+        other, _, _ = setup(tmp_path / "second")
+        recovered = IdleSocket()
+        recovered.queue.put_nowait(json.dumps(public_book(t)))
+        attempts = 0
+
+        def connect(*args, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise TypeError("controlled socket fault")
+            return recovered
+
+        monkeypatch.setattr("pm_nautilus.market.connect", connect)
+        hub = PublicMarketHub()
+        service = MarketService(runtime, hub=hub)
+        second = MarketService(other, hub=hub)
+        try:
+            await service.sync_subscriptions()
+
+            async def wait_ready():
+                while not any(entry.get("state") == "READY" for entry in hub.streams.values()):
+                    await asyncio.sleep(0.005)
+
+            await asyncio.wait_for(wait_ready(), 3)
+            assert service.scan_status["serviceError"] == "TypeError"
+            assert runtime.status == "PAUSED"
+            service.start()
+            assert runtime.status == "RUNNING"
+            hub.discovered_at = asyncio.get_running_loop().time()
+            await service.scan()
+            assert service.scan_status.get("serviceError") is None
+            assert runtime.store.get("scan").get("serviceError") is None
+            await second.scan()
+            assert second.scan_status["serviceError"] == "TypeError"
+            assert other.store.get("scan")["serviceError"] == "TypeError"
+            assert other.status == "PAUSED"
+            assert service.scan_status["lastServiceError"].startswith("TypeError:")
+            assert service.scan_status["serviceErrorClearedAt"]
+            # A new occurrence still latches; acknowledgements only clear the old fault.
+            group = next(iter(hub.tasks))
+            hub.socket_error(group, "serviceError", TypeError("new socket fault"))
+            hub.pause_socket(group, TypeError("new socket fault"))
+            assert service.scan_status["serviceError"] == "TypeError"
+            assert runtime.status == "PAUSED"
+        finally:
+            await service.close()
+            await second.close()
+            await hub.close()
+            runtime.close()
+            other.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("fail_subscribe", [False, True])
+def test_compaction_detaches_old_socket_before_pending_destination_subscribe(
+    tmp_path, monkeypatch, fail_subscribe
+):
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        class BlockingSocket(IdleSocket):
+            closed = False
+
+            async def __aexit__(self, *args):
+                self.closed = True
+                return False
+
+            async def send(self, message):
+                await super().send(message)
+                if message == "PING" or json.loads(message).get("operation") != "subscribe":
+                    return
+                entered.set()
+                await release.wait()
+                if fail_subscribe:
+                    raise ConnectionError("controlled subscription send failure")
+
+        monkeypatch.setattr("pm_nautilus.market.connect", lambda *a, **k: BlockingSocket())
+        runtime, _, t = setup(tmp_path)
+        runtime.add_tokens([replace(t, token_id=str(n)) for n in range(1, 401)])
+        hub = PublicMarketHub()
+        service = MarketService(runtime, hub=hub)
+        compaction = None
+        try:
+            await service.sync_subscriptions()
+            await settle_tasks()
+            groups = sorted(hub.active_groups)
+            selected = {min(hub.active_groups[group]) for group in groups}
+            source_group = groups[-1]
+            source_socket = hub.sockets[source_group]
+            source_task = hub.tasks[source_group]
+            moving = min(hub.active_groups[source_group])
+            for tid in selected:
+                hub.runtime.books[tid].snapshot([(15_000, 100_000_000)], [], 1_000_000_000)
+                runtime.books[tid].snapshot([(15_000, 100_000_000)], [], 1_000_000_000)
+            runtime.monitored = selected
+            compaction = asyncio.create_task(service.sync_subscriptions())
+            await asyncio.wait_for(entered.wait(), 1)
+            assert source_task.done() and source_socket.closed
+            assert hub.subscription_ids(source_group) == ()
+            assert not runtime.books[moving].ready
+            hub.message(
+                public_book(runtime.tokens[moving], timestamp=2000),
+                hub.subscription_ids(source_group),
+            )
+            assert not hub.runtime.books[moving].ready and not runtime.books[moving].ready
+            destination = next(iter(hub.active_groups))
+            hub.message(
+                dict(
+                    event_type="price_change",
+                    timestamp="2001",
+                    market=t.condition_id,
+                    price_changes=[dict(asset_id=moving, side="BUY", price="0.016", size="1")],
+                ),
+                hub.subscription_ids(destination),
+            )
+            assert not runtime.books[moving].ready
+            release.set()
+            await compaction
+            assert not runtime.books[moving].ready
+            assert moving in service.stream_diagnostics()["groups"][0]["missingTokenIds"]
+            # A failed send never licenses old depth. The existing recovery loop
+            # can reacquire the same complete baseline on the retained socket.
+            hub.message(
+                public_book(runtime.tokens[moving], timestamp=2002),
+                hub.subscription_ids(destination),
+            )
+            assert runtime.books[moving].ready
+            assert runtime.books[moving].timestamp == 2_002_000_000
+        finally:
+            release.set()
+            if compaction is not None:
+                await asyncio.gather(compaction, return_exceptions=True)
+            await service.close()
+            await hub.close()
+            runtime.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("status", [None, 401, 403])
+def test_shared_socket_fatal_pauses_only_subscribed_modes(tmp_path, monkeypatch, status):
+    from websockets.datastructures import Headers
+    from websockets.exceptions import InvalidStatus
+    from websockets.http11 import Response
+
+    async def run():
+        first, _, t = setup(tmp_path / "first")
+        second, _, _ = setup(tmp_path / "second")
+        first.add_tokens([replace(t, token_id=str(n)) for n in range(1, 201)])
+        other = replace(t, token_id="999", event_id="other")
+        second.add_tokens([replace(second.tokens["1"], open=False), other])
+        first.start()
+        second.start()
+
+        class ScopedSocket(IdleSocket):
+            async def send(self, message):
+                await super().send(message)
+                if message == "PING" or '"type": "market"' not in message:
+                    return
+                if "999" in json.loads(message)["assets_ids"]:
+                    self.queue.put_nowait(json.dumps(public_book(other)))
+                elif status is None:
+                    raise TypeError("controlled socket fault")
+                else:
+                    raise InvalidStatus(Response(status, "controlled auth fault", Headers()))
+
+        monkeypatch.setattr("pm_nautilus.market.connect", lambda *a, **k: ScopedSocket())
+        hub = PublicMarketHub()
+        one, two = MarketService(first, hub=hub), MarketService(second, hub=hub)
+        try:
+            await one.sync_subscriptions()
+            await settle_tasks()
+            assert first.status == "PAUSED"
+            assert one.scan_status["serviceError"] == (
+                "TypeError" if status is None else "InvalidStatus"
+            )
+            assert second.status == "RUNNING"
+            assert two.scan_status.get("serviceError") is None
+            assert two.scan_status.get("streamError") is None
+            assert second.books[other.token_id].ready
+            assert two.stream_diagnostics()["groups"][0]["state"] == "READY"
+        finally:
+            await one.close()
+            await two.close()
+            await hub.close()
+            first.close()
+            second.close()
+
+    asyncio.run(run())
+
+
+def test_shared_subscriptions_compact_large_filter_reduction_with_fresh_moved_books(
+    tmp_path, monkeypatch
+):
+    async def run():
+        monkeypatch.setattr("pm_nautilus.market.connect", lambda *a, **k: IdleSocket())
+        runtime, _, t = setup(tmp_path)
+        runtime.add_tokens([replace(t, token_id=str(n)) for n in range(1, 10_001)])
+        hub = PublicMarketHub()
+        service = MarketService(runtime, hub=hub)
+        try:
+            await service.sync_subscriptions()
+            await settle_tasks()
+            assert len(hub.tasks) == 50
+            old_tasks = dict(hub.tasks)
+            selected = {min(ids) for ids in hub.active_groups.values()}
+            assert len(selected) == 50
+            for tid in selected:
+                hub.runtime.books[tid].snapshot([(15_000, 100_000_000)], [], 1_000_000_000)
+                runtime.books[tid].snapshot([(15_000, 100_000_000)], [], 1_000_000_000)
+            runtime.monitored = selected
+            await service.sync_subscriptions()
+            assert len(hub.tasks) == len(hub.sockets) == 1
+            group = next(iter(hub.tasks))
+            assert hub.tasks[group] is old_tasks[group] and not hub.tasks[group].done()
+            assert hub.active_groups[group] == selected
+            continuous = {tid for tid in selected if runtime.books[tid].ready}
+            assert len(continuous) == 1
+            assert all(task.done() for key, task in old_tasks.items() if key != group)
+            moved = next(tid for tid in selected if not runtime.books[tid].ready)
+            hub.message(
+                dict(
+                    event_type="price_change",
+                    timestamp="1001",
+                    market=t.condition_id,
+                    price_changes=[dict(asset_id=moved, side="BUY", price="0.016", size="1")],
+                ),
+                selected,
+            )
+            assert not runtime.books[moved].ready
+            hub.message(public_book(runtime.tokens[moved], timestamp=1002), selected)
+            assert runtime.books[moved].ready
+            sent = [json.loads(msg) for msg in hub.sockets[group].sent if msg != "PING"]
+            subscribed = {
+                tid
+                for msg in sent
+                if msg.get("operation") == "subscribe"
+                for tid in msg["assets_ids"]
+            }
+            assert subscribed == selected - continuous
+            assert len(subscribed) == 49
+        finally:
+            await service.close()
+            await hub.close()
+            runtime.close()
+
+    asyncio.run(run())

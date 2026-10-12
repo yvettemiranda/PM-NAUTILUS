@@ -1,4 +1,4 @@
-import { displayStatus, curveSegments, modeSwitchDecision, walletOriginSecure, liveWalletAccountVerified, liveRunSummary, redemptionApprovalAction, panelVisible, setMarkupIfChanged } from "./ui-state.js?v=20261011-efficiency1";
+import { displayStatus, curveSegments, modeSwitchDecision, walletOriginSecure, liveWalletAccountVerified, liveRunSummary, redemptionApprovalAction, panelVisible, setMarkupIfChanged } from "./ui-state.js?v=20261012-correctness1";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -890,6 +890,13 @@ function formatCurrentSellPrice(position) {
 }
 
 function renderCandidates() {
+  if (!ui.dashboard || ui.dashboard.executionMode !== ui.displayMode) {
+    $("#candidate-count").textContent = "读取中";
+    $("#display-count").textContent = "";
+    $("#load-more").disabled = true;
+    setMarkupIfChanged($("#candidates"), '<p class="empty-state">正在读取市场状态…</p>');
+    return;
+  }
   const visible = ui.events;
   $("#candidate-count").textContent = ui.staleCandidateCount > 0
     ? `可交易${formatCount(ui.candidateCount)}个事件 · 待定${formatCount(ui.staleCandidateCount)}`
@@ -1149,7 +1156,8 @@ async function loadDashboard({ silent = false } = {}) {
     const dashboard = await api(`/api/dashboard?limit=${ui.visibleCandidateCount}`);
     if (mutationVersion === ui.mutationVersion) applyDashboard(dashboard);
   } catch (error) {
-    if (mutationVersion === ui.mutationVersion) { ui.dashboardError = error.message; renderStatus(); renderRunControls(); }
+    if (mutationVersion !== ui.mutationVersion) return;
+    ui.dashboardError = error.message; renderStatus(); renderRunControls();
     if (!silent) showMessage(`数据刷新失败：${error.message}`, true);
   } finally {
     ui.loading = false;
@@ -1337,13 +1345,18 @@ $("#market-progress-filter").addEventListener("input", (event) => {
 
 $("#config-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (ui.controlPending || !ui.preferences || !ui.dashboard) return;
+  const mode = ui.displayMode, version = ui.mutationVersion;
   const submit = event.submitter || $("#save-config");
+  ui.controlPending = true;
   setButtonPending(submit, true, "保存中");
+  renderRunControls();
   try {
     const response = await api("/api/test/preferences", {
       method: "PUT",
       body: JSON.stringify(collectConfigPayload()),
     });
+    if (mode !== ui.displayMode || version !== ui.mutationVersion) return;
     recordMutation();
     ui.preferences = response.preferences;
     ui.strategyStatus = response.strategy.status;
@@ -1363,14 +1376,18 @@ $("#config-form").addEventListener("submit", async (event) => {
     );
     await loadDashboard();
   } catch (error) {
+    if (mode !== ui.displayMode || version !== ui.mutationVersion) return;
     showMessage(error.message, true);
   } finally {
+    ui.controlPending = false;
     setButtonPending(submit, false);
     renderRunControls();
   }
 });
 
 $("#run-toggle").addEventListener("click", async () => {
+  if (ui.controlPending || $("#run-toggle").disabled) return;
+  const mode = ui.displayMode, version = ui.mutationVersion;
   const wasRunning = ui.strategyStatus === "RUNNING";
   if (ui.displayMode === "LIVE" && !wasRunning && (!liveStartAvailable() || ui.walletPending)) {
     showMessage("请先连接、检查并启用实盘钱包", true);
@@ -1379,13 +1396,16 @@ $("#run-toggle").addEventListener("click", async () => {
   const button = $("#run-toggle");
   ui.controlPending = true;
   setButtonPending(button, true, wasRunning ? "暂停中" : "启动中");
+  renderRunControls();
   try {
     const response = await api(wasRunning ? "/api/test/pause" : "/api/test/start", { method: "POST" });
+    if (mode !== ui.displayMode || version !== ui.mutationVersion) return;
     recordMutation();
     ui.strategyStatus = response.strategy.status;
     showMessage(wasRunning ? `${ui.displayMode}已暂停新买入；已有仓位仍继续退出和赎回` : `${ui.displayMode}已开始`);
     await loadDashboard();
   } catch (error) {
+    if (mode !== ui.displayMode || version !== ui.mutationVersion) return;
     showMessage(error.message, true);
   } finally {
     ui.controlPending = false;
@@ -1395,6 +1415,8 @@ $("#run-toggle").addEventListener("click", async () => {
 });
 
 $("#reset-test").addEventListener("click", async () => {
+  if (ui.controlPending || ui.displayMode !== "TEST" || $("#reset-test").disabled) return;
+  const mode = ui.displayMode, version = ui.mutationVersion;
   if (ui.strategyStatus !== "PAUSED") {
     showMessage("请先暂停TEST，再执行重置", true);
     return;
@@ -1404,6 +1426,7 @@ $("#reset-test").addEventListener("click", async () => {
   const button = $("#reset-test");
   ui.controlPending = true;
   setButtonPending(button, true, "重置中");
+  renderRunControls();
   try {
     await api("/api/test/reset", {
       method: "POST",
@@ -1412,6 +1435,7 @@ $("#reset-test").addEventListener("click", async () => {
         finalConfirmation: "RESET TEST AGAIN",
       }),
     });
+    if (mode !== ui.displayMode || version !== ui.mutationVersion) return;
     recordMutation();
     ui.visibleCandidateCount = 20;
     ui.configDirty = false;
@@ -1424,6 +1448,7 @@ $("#reset-test").addEventListener("click", async () => {
     showMessage("TEST已彻底重置，并保持暂停状态");
     await loadDashboard();
   } catch (error) {
+    if (mode !== ui.displayMode || version !== ui.mutationVersion) return;
     showMessage(error.message, true);
   } finally {
     ui.controlPending = false;
@@ -1444,13 +1469,14 @@ $("#mode-toggle").addEventListener("click", () => {
   ui.visibleCandidateCount = 20;
   ui.displayMode = decision.nextMode;
   ui.dashboard = null; ui.dashboardAt = 0; ui.dashboardError = null; ui.strategyStatus = "STOPPED"; ui.preferences = null;
+  ui.events = []; ui.candidateCount = 0; ui.displayCandidateCount = 0; ui.staleCandidateCount = 0;
   ui.performance = null; ui.performanceAt = 0; ui.performanceError = null; ui.recordLimit = 20;
   setConfigOpen(false);
   $("#initial-capital").value = "";
   $("#order-amount").value = "";
   $("#category-options").replaceChildren();
   renderPortfolio(null); renderPositions([]); renderTradeRecords(); drawCurve(); renderStatus();
-  setMarkupIfChanged($("#candidates"), ""); $("#redemption-status").textContent = "";
+  renderCandidates(); $("#redemption-status").textContent = "";
   renderModeControl();
   renderRunControls();
   showMessage(
@@ -1464,25 +1490,30 @@ $("#mode-toggle").addEventListener("click", () => {
 
 $("#sort-toggle").addEventListener("click", async () => {
   const button = $("#sort-toggle");
-  if (!ui.preferences || button.disabled) return;
+  if (ui.controlPending || !ui.preferences || button.disabled) return;
+  const mode = ui.displayMode, version = ui.mutationVersion;
   const direction = button.dataset.nextSort;
-  button.disabled = true;
+  ui.controlPending = true;
+  renderRunControls();
   updateSortToggle(direction);
   try {
     const response = await api("/api/test/preferences", {
       method: "PUT",
       body: JSON.stringify(savedPreferencePayload({ candidateSortDirection: direction })),
     });
+    if (mode !== ui.displayMode || version !== ui.mutationVersion) return;
     recordMutation();
     ui.preferences = response.preferences;
     ui.visibleCandidateCount = 20;
     showMessage(direction === "ASC" ? "已按市场进度正序排列" : "已按市场进度倒序排列");
     await loadDashboard();
   } catch (error) {
+    if (mode !== ui.displayMode || version !== ui.mutationVersion) return;
     updateSortToggle(ui.preferences.candidateSortDirection);
     showMessage(error.message, true);
   } finally {
-    button.disabled = false;
+    ui.controlPending = false;
+    renderRunControls();
   }
 });
 

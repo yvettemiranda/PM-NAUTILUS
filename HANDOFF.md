@@ -1,6 +1,19 @@
 # PM-NAUTILUS 接手记录
 
-本页按时间倒序记录；第一节是最新部署状态，后文的“当前”或“待部署”只代表各节记录时的情况。
+第一节是最新部署状态；后文为按各节日期保留的历史记录，其中“当前”或“待部署”只代表当时的版本。纯文档提交不会改变已运行的代码镜像。
+
+
+## 执行、恢复与优化修复完成（2026-10-12，已部署）
+
+- 当前运行代码：`dbf36d40ca1f24c1286e85efc1409b89f53e6bfb`，[PR #6](https://github.com/yvettemiranda/PM-NAUTILUS/pull/6) 已合并；[main Actions 38261461594](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/38261461594) 的 Ubuntu x86_64/ARM64 测试及 Docker verify 均通过。本次文档补记不改应用代码、依赖或策略参数，不要求重启该镜像。
+- 前序性能优化 [PR #4](https://github.com/yvettemiranda/PM-NAUTILUS/pull/4)、[PR #5](https://github.com/yvettemiranda/PM-NAUTILUS/pull/5) 已发布：减少事件循环阻塞、重复预演、盘口/历史投影和写盘开销；并行只读准备及有界订单查询；共享公开行情源，TEST/LIVE 保持独立账本与模拟消耗。发单前完整核对、含费预算、未知订单占用、持久化等级与既有策略规则保留。
+- 本次确认的问题均已修复：合法 SELL（如 5.02 份）以精确 Decimal 构造，不再被 SDK 浮点截成 5.01 份；SQLite 自动回滚或 COMMIT 失败后清缓存，重试确实保存持仓和目标删除；监控范围大幅缩小时合并稀疏连接，10,000→50 token 回归为 1 条连接，移动 token 须重建完整盘口基线。
+- 同批修复：BUY/TARGET/STOP 零成交终态在下一次定时控制检查重试；旧 fatal 经用户 START 确认后不被缓存扫描重新带回；单条行情连接 fatal 仅暂停订阅该连接的模式；异常 REST 终态不释放占用；取消 LIVE 启用完成 native/Store 清理；取消账本恢复保持钱包锁直至工作线程完成；切换模式清空旧市场数据，异步控制响应不能混入另一模式。
+- 本地 405 项 Python、17 项页面测试、Ruff/格式、JS 语法通过。锁定官方 SDK 与受控 LIVE 的 SELL 提交、确认成交和 TEST 清仓/尾仓一致；真实 SQLite 自动回滚、失败 COMMIT、重复取消及行情迁移竞态均有回归。与 `7307f33` 的离线正常场景对照：720 次行情输入、111 份状态、26 个订单的资金、仓位、账本、盘口和参数一致；不以旧错误行为作为正确结果。
+- 腾讯云原服务器 `/opt/pm-nautilus` 已构建并运行上述代码，镜像标签及 `/api/health.revision` 一致；容器 healthy、零重启，`backgroundErrors={}`、`TEST/RUNNING`、`liveExecutionEnabled=false`、钱包 `LOCKED`。完整 `/api/TEST/validation` 为 `ok=true`、`errors=[]`；页面脚本与源码一致，HTTPS 证书核对通过，未认证访问仍为 401。此处是部署后的时间点验收。
+- 升级前完成完整 TEST 校验、PAUSE 和停机备份：服务器私有目录 `backups/pre-correctness-20261012T141706Z/` 保存加密归档及受限权限的回滚快照。新代码在无网络离线容器中打开两库并核对：业务投影、代次、参数、初始资金、原生历史前缀、订单身份均保留；钱包文件和安全配置保持不变。验证后恢复此前已授权的 TEST，没有启用 LIVE 或提交真实交易。
+- 仍未验收真实钱包 BUY/SELL、实际扣款与份额、正额赎回及实盘故障恢复。最近记录的旧服务器地区实测是 2026-10-07 22:47 CST 的 `blocked=true`、`US/CA`；10-12 本轮未重新查询地区。首次 LIVE 应按 [新服指南](docs/START_FRESH_LIVE.md) 完成新出口、钱包、资金、授权、挂单和份额核对，再由用户明确决定 START。代码修复完成不代表真实交易闭环已经实测。
+
 
 ## 实盘准入修复与服务器升级（2026-10-07 22:55 CST）
 

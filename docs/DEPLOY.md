@@ -6,6 +6,8 @@
 
 2026-10-07 [逐环节审计](END_TO_END_HANDOFF_2026-10-07.md)中的费用、份额、赎回授权和最终导出问题已修复；实际部署与未验收范围见 [HANDOFF.md](../HANDOFF.md)。本手册说明部署机制；服务器健康、网页钱包就绪或 TEST 模拟通过，均不表示真实买卖及赎回闭环已验收。
 
+2026-10-12 的优化与正确性修复已部署到应用提交 `dbf36d40ca1f24c1286e85efc1409b89f53e6bfb`：[PR #6](https://github.com/yvettemiranda/PM-NAUTILUS/pull/6) 的 [双架构 CI](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/38261461594) 通过，405 项 Python、17 项前端测试通过。该轮服务器验收为容器 healthy、零重启、TEST/RUNNING、LIVE 未启用且 LOCKED、后台错误为空、TEST 完整账本验证通过；两套账本、设置、代次、历史和加密钱包均保留。策略参数未改变。后续纯文档提交不要求重新构建或重启；最新运行核对继续以 HANDOFF.md 为准。
+
 ## 1. Mac 本地开发
 
 要求 macOS 26+ arm64（所选 Nautilus wheel 的最低要求）、Python 3.12.14。其他 Mac 版本使用本地 Linux 容器。新开发环境先按 [环境配置指南](REINSTALL.md) 下载 Python 并安装锁定依赖；在克隆目录运行：
@@ -23,8 +25,8 @@ python3.12 -m venv .venv
 .venv/bin/python -m pip install uv==0.8.22
 .venv/bin/uv sync --frozen --extra dev
 .venv/bin/pytest -q
-.venv/bin/ruff check src tests deploy/live-secrets.py
-.venv/bin/ruff format --check src tests deploy/live-secrets.py
+.venv/bin/ruff check src tests scripts deploy/live-secrets.py
+.venv/bin/ruff format --check src tests scripts deploy/live-secrets.py
 ```
 
 `--offline --data-dir runtime/ui-preview` 只查看本地 UI；该选项不提供行情，已有仓位也无法依靠实时盘口退出，仅用于开发验证。`runtime/` 全部不入 Git。`.python-version` 和 `uv.lock` 为固定依赖依据。
@@ -88,7 +90,7 @@ docker compose --env-file .env -f compose.yaml -f compose.override.yaml run --rm
 
 ## 4. 部署验收与同库重启
 
-1. `git rev-parse HEAD` 与 GitHub main 的目标 SHA 相同；健康接口 revision 相同。
+1. 核对 GitHub 目标 SHA、服务器源码和健康接口 revision。镜像须对应固定的已验证应用提交；若 GitHub main 或服务器源码随后只有文档更新，允许 SHA 不同，但须确认应用代码、依赖、策略文件和部署配置没有差异，不能把未部署的程序修改当作已生效。
 2. `docker compose --env-file .env -f compose.yaml -f compose.override.yaml ps` 健康；网页设置、五项资金摘要、TEST/LIVE 切换、记录可读取。
 3. 启动后 PAUSED；浏览器切至 LIVE 不能启动未启用的实盘，不能填写虚拟实盘资金。
 4. 查看数据卷存在 `TEST/state.sqlite`、`LIVE/state.sqlite`，模式互不共用。
@@ -171,7 +173,11 @@ sudo chown -R 10001:10001 runtime/server
 
 恢复后先做 SQLite 与应用账本只读校验，核对所有真实在途订单和链上状态；网页钱包版本的加密钱包随数据目录一同恢复，用户再在网页人工解锁。确认旧服务器不会再次运行同一钱包后才能启用新服务器 LIVE。不能把旧 LIVE 快照直接当作最新交易事实。
 
-升级：记录当前 SHA和镜像标签 → PAUSE → 停服务并备份 → 拉取已验证提交 → 更新 `.env` SHA → build/up → 检查健康与同库资金。回滚：停新版本 → checkout 上一个 SHA → `.env` 改回对应镜像标签 → 用该版本启动。数据库格式变更必须先验证兼容；不能拿 TEST reset 解决升级问题。真实钱包发生交易后，严禁恢复旧 LIVE 账本直接启动：必须把旧快照与最新真实回报核对，避免遗失已发生的权利或重复赎回。
+升级：记录当前 SHA 和镜像标签 → 构建已验证的新镜像 → PAUSE 并确认在途状态 → 停服务并制作最终一致性备份 → 固定目标提交和 `.env` SHA → up → 核对健康、设置、同库资金、历史与账本代次。部署不会自动 START；恢复维护前已获授权的 TEST 运行状态仍须在校验通过后显式执行。
+
+**当前业务账本采用 v2 分行存储。**启动时，`Store` 会在单个 SQLite 事务内将旧 `meta.business` 集合迁移到 `business_parts`，保留周期、目标、结算权利、原生事件、订单、设置及账本代次；新库也使用该格式。迁移失败会回滚并拒绝继续，未知版本或混合格式不会被当作空白账本。SQLite 自动回滚后也会清掉未提交的比较缓存，重试须从已提交数据重建。部署前必须保存与旧镜像匹配的完整停机快照，首次用新版本打开数据卷后按上述项目逐项对比；不要删除表、清空游标或 TEST reset 来让升级通过。
+
+回滚前先停新版本并保存当前账本，确认目标代码能读取当前业务和原生账本格式；**不能只 checkout 旧 SHA，再让不认识 v2 的版本打开已经迁移的数据卷。**兼容版本可在核对后使用当前数据；不兼容版本必须先在隔离副本上验证转换或使用与旧版本配套的停机快照，且不得覆盖之后新增的交易事实。真实钱包发生交易后，严禁恢复旧 LIVE 账本直接启动：必须把账本与最新真实回报核对，避免遗失已发生的权利或重复赎回。
 
 2026-10-05 的四项维护修复部署时，额外核对：健康接口返回 `ok`、原 TEST 设置和账本代次不变、`LIVE` 仍未启用、`runtime/server` 中旧数据库在新镜像启动后通过 SQLite `quick_check` 与应用账本验证。新版本会在已有 `intents` 表上自动增加活动订单部分索引，不删除历史订单。LIVE 曾出现结果不明的在途订单时，资金和 Event 占用须保留至对账确认；不可通过重启、恢复旧快照或手工清空记录释放。部署结果及实际 SHA 以 [HANDOFF.md](../HANDOFF.md) 最新章节为准。
 
@@ -202,7 +208,7 @@ sudo chown -R 10001:10001 runtime/server
 
 主机或应用重启后，默认只运行 TEST；LIVE 页显示 **LOCKED**。用户在网页输入解锁密码、重新检查并启用，再自行决定是否点 ▶。锁定期间程序不维护已有 LIVE 仓位，网页不得把不可见持仓显示成已清仓。解锁密码丢失时不能靠 GitHub 找回钱包；请保管原钱包恢复方式和网页加密备份。
 
-美国来源的 API 新开仓受 [Polymarket 官方地区规则](https://docs.polymarket.com/api-reference/geoblock)限制。当前硅谷服务器应在地区核对中阻止启用；换服务器后必须从新服务器自身网络出口重新检查，不能沿用旧服务器或自己电脑的结果。
+美国来源的 API 新开仓受 [Polymarket 官方地区规则](https://docs.polymarket.com/api-reference/geoblock)限制。硅谷服务器在 **2026-10-07 22:47 CST** 的出口核对返回 `blocked=true`、`US/CA`；2026-10-12 部署验收没有重新查询地区接口。启用前必须从届时服务器自身交易出口重新检查，换服务器后也不能沿用旧服务器或自己电脑的结果。
 
 ### 7.2 网页加密备份与换服务器
 
@@ -211,6 +217,8 @@ LIVE 页面“钱包备份与管理”可下载单个 `.pmnb` 加密包，包含
 迁移已有真实 LIVE 记录时，先在旧服务器 PAUSE 新买、确认在途订单，再由管理员停止旧应用，按第 5 节制作并验证**停机后的最终一致性加密备份**。管理员在新服务器安装相同或兼容的已验证版本，配置 HTTPS/登录并恢复最终账本及加密钱包，随后从新服务器出口核对真实账户；不可让新旧服务器同时管理同一钱包。当前网页 `.pmnb` 可作另一个时间点备份，但“先下载再停机”的文件可能缺少期间的卖出或赎回，不能保证为最终账本；实际份额核对也未必能发现已经完成的回合。恢复后状态 **LOCKED**，仍需解锁、核对并手动启用/START。**GitHub 本身没有真实账本或钱包。**
 
 网页恢复只接受空白 LIVE 账本，拒绝覆盖已有钱包或交易历史。服务器升级和回滚继续遵守第 5 节的停机备份；不能用旧备份抹掉未知结果的真实订单。`deploy/live-secrets.py`、`compose.live.yaml.example` 属于旧式手工接入路径，已配置该路径的部署需先由管理员审查迁移，不得把旧 `/run` 明文和新网页钱包同时提供给一个应用。
+
+恢复开始后，后台工作线程会在钱包操作锁内完成钱包和 LIVE 账本替换，再清理上传文件；浏览器超时或请求取消不会提前释放锁。遇到这种情况先刷新并核对恢复结果，再解锁或做下一步钱包操作，不能把超时视为恢复已停止。启用过程中请求被取消时，尚未挂接的 LIVE 运行时也会完成清理，避免留下未登记的账本连接和执行队列。
 
 ### 7.3 开机与版本更新
 
@@ -224,6 +232,8 @@ LIVE 页面“钱包备份与管理”可下载单个 `.pmnb` 加密包，包含
 | 403 控制来源失败 | 刷新当前同源页面，检查反代Host/Origin；不要去掉CSRF |
 | 无可执行盘口 | 检查公网出站、WS连接、扫描错误；重连需完整快照 |
 | `streamError=ConnectionClosedError` | 公共行情常规断线会使盘口失效并自动退避重连；不应单独导致 TEST 暂停。若同时存在 `serviceError`，保持 PAUSED 并按持久化的错误类型、详情和时间排查后再显式 START |
+| 行情恢复后仍有 `serviceError` | 当前共享行情源只暂停受故障订阅影响的模式。恢复后在该模式显式 START 才确认旧故障；正常扫描不会重新带回已确认的错误，历史详情仍保留。新的故障会重新暂停；TEST 的确认不会替 LIVE 确认 |
+| 缩小筛选范围后仍有很多行情连接 | 共享行情源按两种模式的监控并集订阅，缩小范围时会合并多余连接；保留的订阅保持连接，迁移到其他连接的 token 必须先取得新完整快照。不要手工把未就绪盘口改成 READY |
 | 有行情无成交 | 检查总时长、进度、费用元数据、最小量、Bid/Ask比例、兄弟完整性与预算 |
 | 业务投影失败 | 保持PAUSED，检查磁盘/SQLite错误，备份后重启重放；不要手改cursor |
 | LIVE核对失败 | 保持PAUSED，检查真实订单/余额/自有份额；临时网络恢复后重新核对，就绪恢复不自动START |

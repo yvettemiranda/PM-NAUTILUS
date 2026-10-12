@@ -1,29 +1,35 @@
-# PM-SMALL → NautilusTrader 整体迁移设计
+# PM-SMALL → NautilusTrader 迁移设计与当前架构
 
-## 版本、依据及状态
+## 文档范围（2026-10-12）
+
+本页保留原迁移依据与规则对应表，并说明当前实现。版本、服务器采样、发布证据和待完成的实盘验收以 [HANDOFF.md](../HANDOFF.md) 和 [VALIDATION.md](VALIDATION.md) 最新章节为准；[原始迁移要求](../PM-SMALL_Nautilus_Codex_Instructions.md) 保留为历史需求来源。
+
+2026-10-12 正确性修复运行代码为 `dbf36d40ca1f24c1286e85efc1409b89f53e6bfb`，已完成 405 项 Python、17 项前端回归及双架构 CI。服务器更新后 TEST 为 RUNNING，LIVE 未启用、钱包 LOCKED；两套账本、钱包文件和既有策略参数保留。本次没有执行真实订单、实盘完整交易周期或链上写入，也没有重新检查服务器交易地区。代码和受控响应测试通过不能替代新服务器、真实钱包及首次小额实盘验收。
+
+## 原迁移版本与依据（2026-09-06）
 
 2026-09-06 核对原项目远端 HEAD/main：`eb8c6d8a09f9b0427890b7a2d744fc3485d1d3dc`，没有相对于指令的新增差异。只读副本 `.reference/PM-SMALL` 排除 Git。已完整阅读 HANDOFF、DECISIONS、README、PLAN、SERVER_DEPLOY、SECURITY，并核对领域规则、配置、处理器、数据库关键路径及 UI/API。旧阶段禁写 LIVE 的限制由本次指令替代；旧运行数据和历史发布授权不继承。
 
 选定依赖 `nautilus_trader==1.231.0`，发布源码 commit `27a8e54e7ac3c57d6cbf8891f0283dfbaee97317`。已比较安装的 `2.0.0rc4`（commit `a0400251110653b6d8ae6a9b5b89c4543fa85a2d`）：v2 提供 Rust 适配器及 fill void，但 Python 执行客户端扩展与缓存写入接口不同。v1 稳定发布包含 CLOB V2/pUSD Python 适配器，可在应用层作必要窄扩展；无需复制或修改框架核心。以下实际代码只按 v1 wheel 的接口编写，latest 文档仅用于发现与查证差异。
 
-Mac：macOS 26.6.2 arm64，CPython 3.12.14；v1 wheel 要求 macOS 26+ arm64。Linux：CPython 3.12，官方 wheel 提供 aarch64 与 x86_64，要求 glibc >=2.35，采用 Debian bookworm 容器（glibc 2.36），目标服务器架构待实际部署只读核对。依赖使用精确版本与 uv.lock，不在启动时追踪 latest。
+最初核对的 Mac 为 macOS 26.6.2 arm64、CPython 3.12.14；v1 wheel 要求 macOS 26+ arm64。当前 Docker 基础镜像固定为 `python:3.12.14-slim-bookworm`（glibc 2.36）；[HANDOFF 的 2026-09-07 部署记录](../HANDOFF.md) 核对过现有服务器 Ubuntu 24.04 amd64，2026-10-12 更新记录没有重新采集系统版本。Ubuntu x86_64/ARM64 CI 均执行锁定依赖测试与 Docker verify。官方 Linux wheel 要求 glibc >=2.35。依赖使用精确版本与 uv.lock，不在启动时追踪 latest；新服务器仍须核对其实际架构与兼容性。
 
 公开 Gamma Event API 已实际返回带完整 markets、tags、feeSchedule 的 JSON。公开扫描不需要钱包。最终兼容性、回归及 Linux 执行证据在 VALIDATION.md；未执行项不能据此文档算通过。
 
 ## 应用结构与数据所有权
 
-一个 Python 服务，FastAPI 托管复用的静态 UI 与业务 API；Nautilus Strategy、DataEngine、RiskEngine、ExecutionEngine、Cache、Portfolio 处理行情事件、订单状态、成交、账户和持仓。TEST/LIVE 运行上下文完全隔离，共用 rules/strategy。默认只创建 TEST 执行上下文，PAUSED；LIVE 配置门关闭时不得读取钱包或建立私有连接。
+一个 Python 服务，FastAPI 托管复用的静态 UI 与业务 API；Nautilus Strategy、DataEngine、RiskEngine、ExecutionEngine、Cache、Portfolio 处理行情事件、订单状态、成交、账户和持仓。TEST/LIVE 的配置、执行上下文、盘口消费、订单、账本及资金独立，共用 rules/strategy 和公开市场发现/行情连接；共享公开输入不会合并两套交易状态。默认只创建 TEST 执行上下文，PAUSED；LIVE 未启用时不建立私有交易连接，加密钱包须通过独立导入/解锁流程操作。
 
 - `config.py`：所有现有字段的唯一合法范围、固定默认值和 API 转换。
 - `rules.py`：整数微单位、资格、FAK、费用、目标批次和仲裁纯函数。
 - `books.py`：完整性、独立 Bid/Ask 版本及 TEST 按价位消费投影；行情只按 token→event 索引调度。
-- `store.py`：一个模式一套 SQLite 文件。原生 Nautilus 序列化事件是唯一成交事实来源；业务表只保存订单归属/提交意图、周期预算、目标、止损、配置、结算应收、赎回状态和重放游标。事件持久化先于业务投影；重放可恢复崩溃窗口，不另建独立 fills/positions 财务主账本。
-- `strategy.py`：Nautilus Strategy 编排同一套规则；正式周期从真实非零 Fill 推进；异步买单提交先占用现金、暂锁 Event，终态或 Fill 才能释放/转换。
-- `execution.py`：Nautilus 原生执行事件路径与 TEST 窄模拟扩展；保留完整 FAK、净份额费用和按价位消费。默认 Sandbox 的普通报价币手续费/深度刷新不能直接作为规则一致性证据。
-- `live.py`：继承所选官方适配器；仅本程序订单；使用官方签名、账户、订单查询和框架核对。v1 对 FAILED 只日志、MATCHED 提前入账，故本应用必须等待官方 CONFIRMED 回报再形成可支配 Fill，未知/未确认资金及互斥继续占用，不能把取消请求当结果；迟到确认通过原生事件去重接入。该差异需要专门测试。
-- `market.py`：公开全分页 Event 发现/栏目同步、元数据标准化、正式 Condition 结果；公开 WS 传输将完整快照/增量归一后送入 Nautilus DataEngine 的原生 OrderBookDeltas；避开官方数据工厂中不必要的私有环境凭据依赖，TEST 无私有连接。
+- `store.py`：一个模式一套 SQLite 文件。原生 Nautilus 序列化事件是唯一成交事实来源；v2 `business_parts` 按周期/目标/赎回记录分行保存业务投影，按 Event 增量更新，同一 PM-NAUTILUS 账本的旧存储格式可自动迁移。订单归属、提交意图、配置和重放游标仍由应用持有。事件持久化先于业务投影，事务失败或 SQLite 自动回滚均清除未提交的比较缓存；重放可恢复崩溃窗口，不另建独立 fills/positions 财务主账本。
+- `strategy.py`：Nautilus Strategy 编排同一套规则；正式周期从实际非零 Fill 推进；异步买单提交先占用现金、暂锁 Event，确认终态或 Fill 才能释放/转换。未变 Event 不重复预演；已确认零成交终态会安排下一轮约 5 秒定时控制重新评估，覆盖 BUY、目标卖出和止损退出，未知订单仍保持锁。
+- `order_terms.py`、`execution.py`：TEST/LIVE 共用整数出站条款。SELL 按 SDK 可签名的 0.01 份向下量化、最低价按 tick 向上量化，并保留最小订单约束；尾仓继续作为自有权利跟踪。TEST 从逐价位可用深度生成原生执行事件，BUY/SELL 使用 CLOB V2 的 pUSD 现金手续费模型，实收份额按成交份额入账。默认 Sandbox 的手续费/深度刷新不能直接作为规则一致性证据。
+- `live.py`：继承所选官方适配器；仅本程序订单；使用官方签名、账户、订单查询和框架核对。SELL 向锁定 SDK 传递精确 Decimal 份额，避免 5.02 被浮点截为 5.01，并核对签名份额及价格；BUY 签名准备与只读钱包检查可并行，实际 POST 前仍核对全部安全条件。等待官方 CONFIRMED 回报再形成可支配 Fill，未知/未确认资金及互斥继续占用，不能把取消请求当结果。REST 释放占用前必须确认订单/Token 身份、完整非负成交数量和已最终处理的相关交易；包括市场结算取消在内的终态遵守同一条件。迟到确认通过原生事件去重接入。
+- `market.py`：公开全分页 Event 发现/栏目同步、元数据标准化、正式 Condition 结果由 `PublicMarketHub` 共享，WS 按两种模式所需 token 的并集订阅，范围大幅缩小时合并稀疏组并释放多余连接；各模式分别应用行情、消费深度和策略规则。原生 OrderBookDeltas 保留完整性检查并增量更新。故障按受影响订阅与模式隔离，恢复后用户 START 的确认不会被旧 Hub 错误覆盖；TEST 无私有连接。
 - `redemption.py`：正式结算识别与实际回款分离；仅跟踪本程序已确认取得的权利。按所配置钱包/当前 collateral/standard 或 neg-risk 路径生成并提交官方合约交易；提交前持久化可恢复身份，重启查询原事务，收到成功收据并核对实际可用余额后才确认回款。TEST 使用同一状态机和模拟响应。
-- `app.py`：API、控制来源与身份校验、500ms 轻量快照、模式隔离；前端不接触私钥。
+- `app.py`：API、控制来源与身份校验、轻量快照和有界记录/权益后台采样。用户导入的助记词/私钥由自有 HTTPS 网页传给后端加密保存，API 不把已保存的明文密钥或 API 凭据返回前端；解锁后签名密钥会留在服务器内存。部分 LIVE 启用也归应用生命周期管理，请求取消时完成资源关闭；备份恢复请求取消时保持钱包锁和上传文件，直到工作线程完成恢复或回滚。前端按模式丢弃旧缓存及过期控制响应，只更新变化或当前可见内容。
 
 ## 规则对应表
 
@@ -58,7 +64,7 @@ Mac：macOS 26.6.2 arm64，CPython 3.12.14；v1 wheel 要求 macOS 26+ arm64。L
 | Bid 严格低于，两个不同版本间隔>=30秒 | database.ts executeTestStopLoss | strategy + store/应用 | 29/30秒、重复、倒退、等于、空书 |
 | ARMED 禁买，EXITING 不可逆、取消目标和买单 | database.ts | strategy/框架+应用 | 部分退出、价格恢复、部分目标剩余保护 |
 | 触发后 Event 跨暂停/重启禁入，TEST reset 不清 LIVE | database.ts | store + strategy/应用 | 两模式独立与恢复 |
-| 费用启用明确、rate 0–1/exponent整数0–10 | domain/event-filter.ts, trading-strategy.ts | rules + live/应用+框架 | 毛/净份额、净现金、实盘不双扣 |
+| 费用启用明确、rate 0–1/exponent整数0–10 | domain/event-filter.ts, trading-strategy.ts | rules + live/应用+框架 | 实收份额、pUSD现金费、含费预算、不双扣 |
 | 估值为 Best Bid 扣预计费，空 Bid=0、未知=未知 | database.ts | app/框架+应用 | 五项摘要、未知和零区分 |
 | 赎回应收不作可用现金，不双计资产 | 新要求扩充 | redemption + app/应用+框架 | 结算/提交/到账各阶段资金守恒 |
 | START 续账，PAUSE 撤未成交买、卖/止损/结算/赎回继续 | services/paper-automation-service.ts | strategy + app/框架+应用 | 暂停持仓全流程 |
@@ -87,7 +93,7 @@ Mac：macOS 26.6.2 arm64，CPython 3.12.14；v1 wheel 要求 macOS 26+ arm64。L
 
 开发先接通全路径，再集中完整回归；针对性用例验证高风险规则。发布验收包括真实公开行情+无资金模拟、可控订单/账户/赎回响应、重复/迟到/重启、资金数量关系、UI交互、Linux依赖。真实钱包/链上写不运行，另行真实验收清楚标记。
 
-本地合理分段提交并通过普通 Git 工作流同步现有公开仓库；服务器操作只依据 HANDOFF 中当前有效的地址、用户、目录和授权。部署或重启默认停在 TEST + PAUSED，正式 TEST 的 START 和 LIVE 启用都是独立控制动作。
+本地合理分段提交并通过普通 Git 工作流同步现有公开仓库；服务器操作只依据 HANDOFF 中当前有效的地址、用户、目录和授权。应用首次启动或重启默认 TEST + PAUSED；维护升级可在完整核对后恢复此前已授权的 TEST RUNNING。LIVE 解锁、启用及 START 是独立控制动作，不由部署或切换页面触发。
 
 ## 主要官方依据
 

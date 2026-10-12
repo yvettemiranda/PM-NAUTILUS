@@ -1,6 +1,6 @@
 # 新开发环境配置
 
-本指南适用于新电脑、全新系统或独立开发目录。项目公开仓库为：https://github.com/yvettemiranda/PM-NAUTILUS 。它是长期有效的开发环境恢复说明，不记录某一次电脑重装或服务器部署阶段；当前运行状态以根目录 `HANDOFF.md` 为准。
+本指南适用于新电脑、全新系统或独立开发目录。项目公开仓库为 [yvettemiranda/PM-NAUTILUS](https://github.com/yvettemiranda/PM-NAUTILUS)。它是长期有效的开发环境恢复说明，不记录某一次电脑重装或服务器部署阶段；当前运行状态以根目录 [HANDOFF.md](../HANDOFF.md) 为准。
 
 如果目的是买新服务器、放弃旧 TEST 模拟记录、首次启用本程序实盘，请先读 [从 GitHub 到首次实盘](START_FRESH_LIVE.md)。下面的 Python/uv 步骤是开发环境重建细节，不是用户需要独自逐条完成的实盘清单。
 
@@ -21,7 +21,7 @@ git log -5 --oneline
 
 ## 2. 重建开发环境
 
-原生 Mac 环境要求 macOS 26+ arm64；项目固定 Python 3.12.14、uv 0.8.22 和 NautilusTrader 1.231.0。不兼容的 Mac 使用仓库 Linux 容器，参见 DEPLOY.md，不要复制旧 `.venv`。
+原生 Mac 环境要求 macOS 26+ arm64；项目固定 Python 3.12.14、uv 0.8.22 和 NautilusTrader 1.231.0。不兼容的 Mac 使用仓库 Linux 容器，参见 [DEPLOY.md](DEPLOY.md)，不要复制旧 `.venv`。
 
 依照 [uv 官方安装说明](https://docs.astral.sh/uv/getting-started/installation/) 先安装下载工具 uv 0.12.10，然后重新打开终端。旧版 uv 0.8.22 的内置目录没有 Python 3.12.14，不能直接用它下载该 Python：
 
@@ -47,7 +47,14 @@ uv run --frozen pm-nautilus --offline --data-dir runtime/environment-check
 
 打开 http://127.0.0.1:8765 查看页面。首次使用新目录应为 TEST + PAUSED、100U、每轮1U，LIVE未启用。离线预览没有实时行情；检查完用 Ctrl+C 停止。准备连接公开行情时使用 `uv run --frozen pm-nautilus --data-dir runtime/local`，启动仍为 PAUSED，不自动开始正式长期测试。
 
-前端是静态 HTML/CSS/JS，启动无需 Node 或前端构建。需要语法检查时安装 Node 24.20.0，再执行 `node --check src/pm_nautilus/web/app.js`。GitHub Actions 也会检查前端语法及 Linux 双架构测试/镜像构建。
+前端是静态 HTML/CSS/JS，启动无需 Node 或前端构建。需要前端验收时安装 Node 24.20.0，然后运行：
+
+```sh
+node --check src/pm_nautilus/web/app.js
+node --test tests/ui-state.test.mjs
+```
+
+前端测试会执行实际页面控制处理程序，覆盖切换模式时清除旧市场数据、配置与运行操作互斥、迟到的旧模式响应不能覆盖当前视图。GitHub Actions 还会验证 Linux x86_64/ARM64 与 Docker 构建。2026-10-12 应用版本 `dbf36d40ca1f24c1286e85efc1409b89f53e6bfb` 的本地验收为 405 项 Python、17 项前端测试通过；后续版本的数量和结果以 [VALIDATION.md](VALIDATION.md) 最新章节及对应 CI 为准。
 
 ## 3. 仓库不保存的内容
 
@@ -59,7 +66,9 @@ uv run --frozen pm-nautilus --offline --data-dir runtime/environment-check
 
 若决定恢复旧账本，且快照使用 age 接收公钥加密，还须另行安全迁移对应的 identity 私钥；GitHub 无法恢复它。2026-09-23 的服务器快照采用此方式，解密身份文件与服务器备份位置见 `HANDOFF.md`。选择空白账本开始时，不需要该旧账本的解密 identity。
 
-迁移到新服务器时先暂停旧实例的新买并保存最新一致性账本，随后停止旧实例，核对未完成的真实订单与链上交易；然后在新服务器恢复加密备份和本地配置、只读验证账本，在网页解锁钱包并重新检查，确保旧实例不会再使用同一钱包和账本，最后手动启用 LIVE。不能拿较早的 LIVE 快照直接启动交易；服务器重启后默认只启 TEST，LIVE 须在网页重新人工解锁。
+迁移到新服务器时先暂停旧实例的新买、确认在途订单与链上交易，再停止旧实例，制作并验证**停机后的最终一致性备份**。随后在新服务器恢复加密备份和本地配置，核对账本、设置、代次及真实账户，在网页解锁钱包并重新检查；确保旧实例不会再次使用同一钱包后，才由用户手动启用 LIVE、另行 START。运行时下载的网页备份可能漏掉下载至停机之间的卖出或赎回，不能单独替代最终备份。服务器重启后 LIVE 锁定，须在网页重新人工解锁。
+
+当前 `Store` 会原子地将旧业务集合迁移为 v2 `business_parts`，新账本也采用该格式。新电脑继续开发时使用锁定的当前代码；若要运行历史提交，先在隔离副本上确认其能读取业务及原生账本格式，不能让不支持 v2 的旧代码直接打开已升级的生产数据库。升级、回滚及钱包恢复取消的处理见 [DEPLOY.md 第 5、7 节](DEPLOY.md#5-备份升级回滚)。纯文档更新不改变应用版本，无需为文档同步重启服务器。
 
 需要重新生成完整源码文档或离线源码备份时：
 

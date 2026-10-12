@@ -1,6 +1,7 @@
 """Read-only projections for the retained PM-SMALL UI."""
 
 from datetime import datetime, timezone
+import asyncio
 from collections import deque
 from itertools import islice
 from nautilus_trader.model.enums import OrderSide
@@ -8,6 +9,7 @@ from .config import SCALE, units, micros
 from .rules import StopLoss, cost
 
 RECORD_CACHE_ORDERS = 10_000  # The API's largest history page.
+PROJECTION_BATCH_ROWS = 128
 
 
 def iso(ns):
@@ -256,32 +258,51 @@ class _RecordProjection:
             "WHERE seq>? AND seq<=? AND kind='OrderFilled' ORDER BY seq",
             (self.cursor, head),
         ):
-            e = r.store.serializer.deserialize(payload)
-            order_id = str(e.client_order_id)
-            group = self.groups.get(order_id)
-            intent = group["intent"] if group else r.store.intent(e.client_order_id)
-            if intent:
-                # Once the window is full, a missing group can also be a late
-                # fill of an evicted order. Distinguish it by its indexed journal
-                # identity without retaining every historical order ID in RAM.
-                retired = (
-                    group is None
-                    and self.total_count >= self.capacity
-                    and bool(
-                        r.store.db.execute(
-                            "SELECT 1 FROM native_events WHERE kind='OrderFilled' "
-                            "AND json_extract(CAST(payload AS TEXT),'$.client_order_id')=? "
-                            "AND seq<? LIMIT 1",
-                            (order_id, seq),
-                        ).fetchone()
-                    )
-                )
-                self.apply(e, intent, retired)
-            else:
-                # A missing identity cannot be silently cached forever. Rebuild
-                # next time so a subsequently repaired journal remains readable.
-                self.incomplete = True
+            self.apply_payload(r, seq, payload)
         self.cursor = head
+
+    def apply_payload(self, r, seq, payload):
+        e = r.store.serializer.deserialize(payload)
+        order_id = str(e.client_order_id)
+        group = self.groups.get(order_id)
+        intent = group["intent"] if group else r.store.intent(e.client_order_id)
+        if intent:
+            # A late fill of an evicted order must not become a new history row.
+            retired = (
+                group is None
+                and self.total_count >= self.capacity
+                and bool(
+                    r.store.db.execute(
+                        "SELECT 1 FROM native_events WHERE kind='OrderFilled' "
+                        "AND json_extract(CAST(payload AS TEXT),'$.client_order_id')=? "
+                        "AND seq<? LIMIT 1",
+                        (order_id, seq),
+                    ).fetchone()
+                )
+            )
+            self.apply(e, intent, retired)
+        else:
+            # Rebuild if a missing durable identity is subsequently repaired.
+            self.incomplete = True
+
+    async def update_async(self, r):
+        head = r.store.db.execute("SELECT max(seq) FROM native_events").fetchone()[0] or 0
+        while self.cursor < head:
+            rows = r.store.db.execute(
+                "SELECT seq,CASE WHEN kind='OrderFilled' THEN payload END "
+                "FROM native_events NOT INDEXED "
+                "WHERE seq>? AND seq<=? ORDER BY seq LIMIT ?",
+                (self.cursor, head, PROJECTION_BATCH_ROWS),
+            ).fetchall()
+            for seq, payload in rows:
+                if payload is not None:
+                    self.apply_payload(r, seq, payload)
+            self.cursor = rows[-1][0] if len(rows) == PROJECTION_BATCH_ROWS else head
+            # Yield after bounded work, retaining all cost-basis history. Neither
+            # the writable connection nor native objects move to another thread.
+            await asyncio.sleep(0)
+            if r.store._closed or r.store.generation != self.generation:
+                raise ValueError("交易历史构建期间账本已更改，请重新读取")
 
     def apply(self, e, intent, retired=False):
         key = intent["token_id"]
@@ -379,6 +400,9 @@ class _RecordProjection:
 
 
 def records(r, limit):
+    lock = getattr(r, "_record_projection_lock", None)
+    if lock is not None and lock.locked():
+        raise ValueError("交易历史正在更新，请重新读取")
     generation = r.store.generation
     projection = getattr(r, "_record_projection", None)
     if (
@@ -396,3 +420,30 @@ def records(r, limit):
         # An interrupted projection must not retain partially applied fill state.
         r._record_projection = None
         raise
+
+
+async def records_async(r, limit):
+    lock = getattr(r, "_record_projection_lock", None)
+    if lock is None:
+        lock = r._record_projection_lock = asyncio.Lock()
+    async with lock:
+        generation = r.store.generation
+        projection = getattr(r, "_record_projection", None)
+        if (
+            projection is None
+            or projection.generation != generation
+            or projection.incomplete
+            or projection.capacity < limit
+        ):
+            projection = _RecordProjection(generation, max(RECORD_CACHE_ORDERS, limit))
+        try:
+            await projection.update_async(r)
+            if r.store._closed or generation != r.store.generation:
+                raise ValueError("交易历史构建期间账本已更改，请重新读取")
+            result = projection.view(r, limit)
+            r._record_projection = projection
+            return result
+        except BaseException:
+            # Cancellation/lifecycle changes must never publish partial basis.
+            r._record_projection = None
+            raise

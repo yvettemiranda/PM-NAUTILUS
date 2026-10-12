@@ -206,3 +206,76 @@ def test_health_reports_background_service_failure(tmp_path, monkeypatch):
         assert response.json()["backgroundErrors"] == {"TEST": "ValueError"}
         service.scan_status.pop("serviceError")
         assert client.get("/api/health").status_code == 200
+
+
+def test_public_hub_closes_when_initial_runtime_cannot_start(tmp_path, monkeypatch):
+    monkeypatch.delenv("PM_LIVE_ENABLED", raising=False)
+    hub = SimpleNamespace(close=AsyncMock())
+    monkeypatch.setattr(app_module, "PublicMarketHub", lambda: hub)
+
+    def fail_runtime(*args, **kwargs):
+        raise RuntimeError("controlled store failure")
+
+    monkeypatch.setattr(app_module, "Runtime", fail_runtime)
+
+    async def run():
+        app = app_module.create_app(tmp_path, public_data=True)
+        with pytest.raises(RuntimeError, match="controlled store failure"):
+            async with app.router.lifespan_context(app):
+                pytest.fail("Broken runtime must abort startup")
+        hub.close.assert_awaited_once()
+        with (tmp_path / "process.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    asyncio.run(run())
+
+
+def test_app_modes_share_public_hub_and_close_their_own_services(tmp_path, monkeypatch):
+    monkeypatch.setenv("PM_LIVE_ENABLED", "true")
+    monkeypatch.setenv("PM_UI_PASSWORD", "controlled-local-password")
+    monkeypatch.setattr("pm_nautilus.live.load_settings", lambda: {})
+    monkeypatch.setattr("pm_nautilus.live.live_factory", lambda *_: controlled_factory)
+    monkeypatch.setattr(
+        "pm_nautilus.redemption.PolygonWallet",
+        lambda _: SimpleNamespace(preflight=lambda: None),
+    )
+    hub = SimpleNamespace(close=AsyncMock())
+    monkeypatch.setattr(app_module, "PublicMarketHub", lambda: hub)
+    services = []
+
+    class ControlledService:
+        def __init__(self, runtime, hub=None):
+            self.runtime = runtime
+            self.hub = hub
+            self.loop_task = None
+            self.closed = False
+            services.append(self)
+
+        async def run(self):
+            await asyncio.Future()
+
+        async def close(self):
+            self.closed = True
+            self.loop_task.cancel()
+            await asyncio.gather(self.loop_task, return_exceptions=True)
+
+    monkeypatch.setattr(app_module, "MarketService", ControlledService)
+
+    def runtime(*args, **kwargs):
+        r = Runtime(*args, **kwargs)
+        if r.mode == "LIVE":
+            r.client.activate = AsyncMock()
+        return r
+
+    monkeypatch.setattr(app_module, "Runtime", runtime)
+
+    async def run():
+        app = app_module.create_app(tmp_path, public_data=True)
+        async with app.router.lifespan_context(app):
+            assert {s.runtime.mode for s in services} == {"TEST", "LIVE"}
+            assert all(s.hub is hub for s in services)
+            assert services[0].runtime.store is not services[1].runtime.store
+        assert all(s.closed and s.loop_task.done() for s in services)
+        hub.close.assert_awaited_once()
+
+    asyncio.run(run())

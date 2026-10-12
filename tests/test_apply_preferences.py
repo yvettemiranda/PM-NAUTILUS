@@ -148,3 +148,32 @@ def test_rejects_running_app_lock(fresh_pair):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         with pytest.raises(ValueError, match="application is running"):
             importer.apply_preferences(root, profile)
+
+
+def test_rejects_partitioned_business_activity_without_native_history(fresh_pair):
+    root, profile, _ = fresh_pair
+    with sqlite3.connect(root / "LIVE" / "state.sqlite") as db:
+        db.execute(
+            "INSERT INTO business_parts VALUES(?,?,?)",
+            ("claims", "unconfirmed", json.dumps({"state": "PENDING", "event_id": "event"})),
+        )
+    before = {mode: saved(root, mode) for mode in ("TEST", "LIVE")}
+    with pytest.raises(ValueError, match="business activity"):
+        importer.apply_preferences(root, profile)
+    assert {mode: saved(root, mode) for mode in ("TEST", "LIVE")} == before
+
+
+def test_fresh_legacy_schema_can_still_import_rules(fresh_pair):
+    root, profile, prefs = fresh_pair
+    for mode in ("TEST", "LIVE"):
+        with sqlite3.connect(root / mode / "state.sqlite") as db:
+            db.execute("DROP TABLE business_parts")
+            db.execute(
+                "UPDATE meta SET value=? WHERE key='business'",
+                (json.dumps(importer._EMPTY_BUSINESS),),
+            )
+    importer.apply_preferences(root, profile)
+    for mode in ("TEST", "LIVE"):
+        meta, _ = saved(root, mode)
+        assert meta["preferences"] == prefs
+        assert meta["business"] == importer._EMPTY_BUSINESS

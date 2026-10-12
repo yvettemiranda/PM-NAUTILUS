@@ -1,8 +1,24 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {displayStatus,curveSegments,modeSwitchDecision,walletOriginSecure,liveWalletAccountVerified,liveRunSummary,redemptionApprovalAction} from '../src/pm_nautilus/web/ui-state.js';
+import {displayStatus,curveSegments,modeSwitchDecision,walletOriginSecure,liveWalletAccountVerified,liveRunSummary,redemptionApprovalAction,panelVisible,setMarkupIfChanged} from '../src/pm_nautilus/web/ui-state.js';
 const base=()=>({executionMode:'TEST',strategy:{status:'RUNNING'},positions:[{currentSellPriceStatus:'NO_BID'}],marketScan:{lastScanAt:'2026-09-22',diagnostics:{streams:{groups:[{taskRunning:true,state:'READY',readyBookCount:2,tokenCount:2}]}}}});
 const opts={lastSuccess:1000,now:2000};
+test('only the visible panel needs list rendering',()=>{
+ for (const active of ['positions','market','records']) {
+  for (const panel of ['positions','market','records']) assert.equal(panelVisible(active,panel),active===panel);
+ }
+});
+test('unchanged list markup preserves nodes and changing status invalidates the cache',()=>{
+ let writes=0,content='';
+ const element={dataset:{},set innerHTML(value){writes++;content=value;},get innerHTML(){return content;}};
+ assert.equal(setMarkupIfChanged(element,'records'),true);
+ assert.equal(setMarkupIfChanged(element,'records'),false);
+ assert.equal(writes,1);
+ assert.equal(setMarkupIfChanged(element,'locked'),true);
+ assert.equal(setMarkupIfChanged(element,'records'),true);
+ assert.equal(writes,3);
+ assert.equal(content,'records');
+});
 test('quiet/no-bid is healthy; stale UI cannot imply running',()=>{
  assert.equal(displayStatus(base(),opts).feed,'ready');
  assert.equal(displayStatus(base(),{...opts,now:12000}).run,'error');

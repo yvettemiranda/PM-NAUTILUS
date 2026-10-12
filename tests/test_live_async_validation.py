@@ -11,6 +11,7 @@ from nautilus_trader.model.identifiers import ClientOrderId, VenueOrderId
 
 from pm_nautilus.live import LiveExecution, _LedgerGate, _TrackedRetryManager
 from pm_nautilus.store import Store
+from pm_nautilus.rules import Fees
 
 from test_live_recovery import controlled_runtime, flush
 from test_live_submit_cleanup import prepared_order
@@ -184,9 +185,37 @@ def test_paused_sell_can_exit_with_external_open_order_but_validation_blocks_it(
         order = SimpleNamespace(side=OrderSide.SELL, is_closed=False, is_pending_cancel=False)
         owner = SimpleNamespace(
             status="PAUSED",
+            tokens={
+                "1": SimpleNamespace(
+                    tick=1000,
+                    neg_risk=False,
+                    min_size=5_000_000,
+                    event_id="e",
+                    fees=Fees(False),
+                    token_id="1",
+                )
+            },
+            business={"cycles": {"e": {"token_id": "1", "quantity": 10_000_000}}},
             store=SimpleNamespace(
                 generation="generation",
-                intent=Mock(return_value={"generation": "generation", "terminal": False}),
+                intent=Mock(
+                    return_value={
+                        "generation": "generation",
+                        "terminal": False,
+                        "token_id": "1",
+                        "quantity": 10_000_000,
+                        "limit": 100_000,
+                        "fees": {"enabled": False, "rate": 0, "exponent": 1},
+                        "outbound_terms": {
+                            "tick": 1000,
+                            "neg_risk": False,
+                            "side": "SELL",
+                            "limit": 100_000,
+                            "maker": 10_000_000,
+                            "taker": 1_000_000,
+                        },
+                    }
+                ),
             ),
         )
         client = SimpleNamespace(
@@ -200,12 +229,13 @@ def test_paused_sell_can_exit_with_external_open_order_but_validation_blocks_it(
         )
         client._check_post_ready = LiveExecution._check_post_ready.__get__(client)
         inner = SimpleNamespace(run=AsyncMock(return_value={"success": True}))
-        await _TrackedRetryManager(inner, client).run("submit_order", [order_id])
+        operation = AsyncMock(return_value={"success": True})
+        await _TrackedRetryManager(inner, client).run("submit_order", [order_id], operation)
         inner.run.assert_awaited_once()
         assert str(order_id) in client._post_possible
         client.ready = False
         with pytest.raises(ValueError, match="状态已变化"):
-            await _TrackedRetryManager(inner, client).run("submit_order", [order_id])
+            await _TrackedRetryManager(inner, client).run("submit_order", [order_id], operation)
         assert inner.run.await_count == 1
 
     asyncio.run(run())
@@ -260,8 +290,10 @@ def test_independent_posts_overlap_and_pending_full_check_blocks_only_new_posts(
         release = [asyncio.Event() for _ in range(3)]
         check_entered, release_check = asyncio.Event(), asyncio.Event()
 
-        async def post(_name, details):
-            index = details[0]
+        async def post(_name, _details, operation, *args, **kwargs):
+            return await operation(*args, **kwargs)
+
+        async def operation(index):
             entered[index].set()
             await release[index].wait()
             return {"success": True}
@@ -273,8 +305,8 @@ def test_independent_posts_overlap_and_pending_full_check_blocks_only_new_posts(
                 check_entered.set()
                 await release_check.wait()
 
-        first = asyncio.create_task(manager.run("submit_order", [0]))
-        second = asyncio.create_task(manager.run("submit_order", [1]))
+        first = asyncio.create_task(manager.run("submit_order", [0], operation, 0))
+        second = asyncio.create_task(manager.run("submit_order", [1], operation, 1))
         validation = third = None
         try:
             await asyncio.wait_for(asyncio.gather(entered[0].wait(), entered[1].wait()), 1)
@@ -282,7 +314,7 @@ def test_independent_posts_overlap_and_pending_full_check_blocks_only_new_posts(
             validation = asyncio.create_task(check())
             await asyncio.sleep(0)
             assert gate.waiting_checks == 1
-            third = asyncio.create_task(manager.run("submit_order", [2]))
+            third = asyncio.create_task(manager.run("submit_order", [2], operation, 2))
             release[0].set()
             await first
             assert not check_entered.is_set() and not entered[2].is_set()

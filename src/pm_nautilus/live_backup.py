@@ -60,6 +60,10 @@ def _same_identity(left, right):
 
 
 def _read_meta(db, key):
+    if key == "business":
+        from .store import Store
+
+        return Store.read_business(db)
     row = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
     return json.loads(row[0]) if row else None
 
@@ -71,6 +75,8 @@ def _validate_snapshot(db, identity):
         raise BackupError("备份不是 LIVE 账本")
     if not _same_identity(_read_meta(db, "live_wallet_identity"), identity):
         raise BackupError("备份钱包与 LIVE 账本不一致")
+    if not isinstance(_read_meta(db, "business"), dict):
+        raise BackupError("备份业务账本无效")
 
 
 def _new_private_file(path):
@@ -355,6 +361,9 @@ def _restore_snapshot(snapshot_path, vault_bytes, password, store, vault_path):
                 except Exception:
                     raise BackupError("LIVE 账本恢复异常，请停止操作并检查服务器备份") from None
                 raise BackupError("LIVE 账本恢复失败，目标已回滚") from None
+            finally:
+                if hasattr(store, "invalidate_business_cache"):
+                    store.invalidate_business_cache()
     return identity
 
 

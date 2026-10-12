@@ -1,4 +1,4 @@
-import { displayStatus, curveSegments, modeSwitchDecision, walletOriginSecure, liveWalletAccountVerified, liveRunSummary, redemptionApprovalAction } from "./ui-state.js?v=20261007-readiness1";
+import { displayStatus, curveSegments, modeSwitchDecision, walletOriginSecure, liveWalletAccountVerified, liveRunSummary, redemptionApprovalAction, panelVisible, setMarkupIfChanged } from "./ui-state.js?v=20261011-efficiency1";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -38,6 +38,7 @@ const ui = {
   tradeRecordsError: null,
   tradeRecordsLoadedAt: 0,
   tradeRecordsLocked: false,
+  tradeRecordsRendered: null,
   liveStrategyStatus: null,
   liveStatusAt: 0,
   configDirty: false,
@@ -677,7 +678,7 @@ function renderPositions(positions = []) {
     $("#tab-position-count").textContent = "—";
     $("#position-count").textContent = "读取中";
     $("#position-list-controls").hidden = true;
-    $("#positions").innerHTML = '<p class="empty-state">正在读取持仓状态…</p>';
+    setMarkupIfChanged($("#positions"), '<p class="empty-state">正在读取持仓状态…</p>');
     return;
   }
   if (!liveAccountVisible()) {
@@ -686,10 +687,7 @@ function renderPositions(positions = []) {
     $("#position-list-controls").hidden = true;
     const message = ui.wallet?.configured ? "钱包未解锁或实盘未就绪，持仓暂未核对" : "实盘钱包尚未连接，持仓暂未核对";
     const markup = `<p class="empty-state">${message}</p>`;
-    if ($("#positions").dataset.markup !== markup) {
-      $("#positions").innerHTML = markup;
-      $("#positions").dataset.markup = markup;
-    }
+    setMarkupIfChanged($("#positions"), markup);
     return;
   }
   const current = currentPositions(positions);
@@ -708,6 +706,7 @@ function renderPositions(positions = []) {
     ? "收起至前20个"
     : `展开其余${formatCount(current.length - POSITION_PREVIEW_LIMIT)}个`;
   toggle.setAttribute("aria-expanded", String(ui.positionsExpanded));
+  if (!panelVisible(ui.activeTab, "positions")) return;
   const openIds = new Set([...$("#positions").querySelectorAll("details[open]")].map(x => x.dataset.token));
   const positionMarkup = visible.length
     ? visible
@@ -757,8 +756,7 @@ function renderPositions(positions = []) {
   // Keep focused/open details stable on unchanged 500ms refreshes.
   if ($("#positions").dataset.markup !== positionMarkup) {
     const focused = document.activeElement?.closest("details[data-token]")?.dataset.token;
-    $("#positions").innerHTML = positionMarkup;
-    $("#positions").dataset.markup = positionMarkup;
+    setMarkupIfChanged($("#positions"), positionMarkup);
     if (focused) [...$("#positions").querySelectorAll("details")].find(x => x.dataset.token === focused)?.querySelector("summary").focus({preventScroll:true});
   }
 }
@@ -782,28 +780,34 @@ function renderTradeRecords() {
     : ui.tradeRecordsLoaded
       ? `${formatCount(ui.tradeRecordTotalCount)}条`
       : "展开";
-  if (!ui.tradeRecordsExpanded) return;
+  if (!ui.tradeRecordsExpanded || !panelVisible(ui.activeTab, "records")) return;
 
   if (locked) {
-    $("#trade-records").innerHTML = '<p class="empty-state">LIVE 已锁定，交易历史暂不可读</p>';
+    ui.tradeRecordsRendered = null;
+    setMarkupIfChanged($("#trade-records"), '<p class="empty-state">LIVE 已锁定，交易历史暂不可读</p>');
     return;
   }
   if (!ui.dashboard && !ui.tradeRecordsLoaded) {
-    $("#trade-records").innerHTML = '<p class="empty-state">正在读取交易记录状态…</p>';
+    ui.tradeRecordsRendered = null;
+    setMarkupIfChanged($("#trade-records"), '<p class="empty-state">正在读取交易记录状态…</p>');
     return;
   }
 
   if (ui.tradeRecordsLoading && !ui.tradeRecordsLoaded) {
-    $("#trade-records").innerHTML = '<p class="empty-state">正在读取交易记录…</p>';
+    ui.tradeRecordsRendered = null;
+    setMarkupIfChanged($("#trade-records"), '<p class="empty-state">正在读取交易记录…</p>');
     return;
   }
   if (ui.tradeRecordsError !== null && !ui.tradeRecordsLoaded) {
-    $("#trade-records").innerHTML = `<p class="empty-state trade-record-error">交易记录加载失败：${escapeHtml(ui.tradeRecordsError)}</p>`;
+    ui.tradeRecordsRendered = null;
+    setMarkupIfChanged($("#trade-records"), `<p class="empty-state trade-record-error">交易记录加载失败：${escapeHtml(ui.tradeRecordsError)}</p>`);
     return;
   }
-  $("#trade-records").innerHTML = ui.tradeRecords.length
+  if (ui.tradeRecordsRendered === ui.tradeRecords) return;
+  setMarkupIfChanged($("#trade-records"), ui.tradeRecords.length
     ? ui.tradeRecords.map(tradeRecordMarkup).join("")
-    : '<p class="empty-state">暂无交易记录</p>';
+    : '<p class="empty-state">暂无交易记录</p>');
+  ui.tradeRecordsRendered = ui.tradeRecords;
 }
 
 function tradeRecordMarkup(record) {
@@ -895,8 +899,9 @@ function renderCandidates() {
   const allVisible = visible.length >= ui.displayCandidateCount;
   loadMore.disabled = allVisible;
   loadMore.textContent = allVisible ? "已全部显示" : "再显示20个";
+  if (!panelVisible(ui.activeTab, "market")) return;
 
-  $("#candidates").innerHTML = visible.length
+  setMarkupIfChanged($("#candidates"), visible.length
     ? visible
         .map((event) => {
           const candidate = event.winner || event.representative;
@@ -949,7 +954,7 @@ function renderCandidates() {
           </article>`;
         })
         .join("")
-    : '<p class="empty-state">当前没有符合配置的事件</p>';
+    : '<p class="empty-state">当前没有符合配置的事件</p>');
 }
 
 function renderScanStatus(status) {
@@ -1445,7 +1450,7 @@ $("#mode-toggle").addEventListener("click", () => {
   $("#order-amount").value = "";
   $("#category-options").replaceChildren();
   renderPortfolio(null); renderPositions([]); renderTradeRecords(); drawCurve(); renderStatus();
-  $("#candidates").innerHTML = ""; $("#redemption-status").textContent = "";
+  setMarkupIfChanged($("#candidates"), ""); $("#redemption-status").textContent = "";
   renderModeControl();
   renderRunControls();
   showMessage(
@@ -1593,6 +1598,8 @@ for (const tab of document.querySelectorAll('.view-tabs [role="tab"]')) tab.addE
   ui.activeTab=tab.id.replace("tab-","");
   for (const other of document.querySelectorAll('.view-tabs [role="tab"]')) {other.setAttribute("aria-selected",String(other===tab));$(`#${other.getAttribute("aria-controls")}`).hidden=other!==tab;}
   ui.tradeRecordsExpanded=ui.activeTab==="records";renderTradeRecords();renderStatus();
+  if (panelVisible(ui.activeTab, "positions")) renderPositions(ui.dashboard?.positions ?? []);
+  if (panelVisible(ui.activeTab, "market")) renderCandidates();
   if(ui.tradeRecordsExpanded)void loadTradeRecords();
 });
 $("#more-records").addEventListener("click",()=>{ui.recordLimit=Math.min(10000,ui.recordLimit+20);void loadTradeRecords();});

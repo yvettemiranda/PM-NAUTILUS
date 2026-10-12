@@ -1,7 +1,7 @@
 """Apply public strategy rules to two unused, stopped TEST/LIVE databases.
 
 Initialize both databases with Store before running this script. It deliberately
-does not import Store: opening a used database through Store changes its status.
+does not open either database through Store, which would change its status.
 """
 
 import argparse
@@ -16,6 +16,7 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from pm_nautilus.config import Preferences
+from pm_nautilus.store import Store
 
 
 _TABLES = {"meta", "native_events", "tokens", "books", "intents", "sqlite_sequence"}
@@ -63,7 +64,8 @@ def _check_fresh(connection: sqlite3.Connection, schema: str, mode: str) -> None
     objects = connection.execute(
         f"SELECT type, name FROM {schema}.sqlite_master WHERE type IN ('table', 'view', 'trigger')"
     ).fetchall()
-    if {name for kind, name in objects if kind == "table"} != _TABLES or any(
+    tables = {name for kind, name in objects if kind == "table"}
+    if tables not in (_TABLES, _TABLES | {"business_parts"}) or any(
         kind != "table" for kind, _ in objects
     ):
         raise ValueError(f"{mode} database schema is not fresh")
@@ -74,6 +76,7 @@ def _check_fresh(connection: sqlite3.Connection, schema: str, mode: str) -> None
     if set(meta) != _META_KEYS:
         raise ValueError(f"{mode} database has noninitial metadata")
     decoded = {key: _read_json(value) for key, value in meta.items()}
+    decoded["business"] = Store.read_business(connection, schema=schema)
     if decoded["mode"] != mode or decoded["status"] != "PAUSED":
         raise ValueError(f"{mode} database has wrong mode or is not PAUSED")
     generation = decoded["generation"]

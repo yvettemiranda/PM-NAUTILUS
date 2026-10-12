@@ -17,11 +17,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import Preferences
-from .market import MarketService
+from .market import MarketService, PublicMarketHub
 from .redemption import RedemptionService
 from .store import Store
 from .strategy import Runtime
-from .views import dashboard, records
+from .views import dashboard, records_async
 from .performance import PerformanceSampler
 from .wallet_vault import VaultError, derive_signer, read_public_metadata, read_vault, write_vault
 from .live_readiness import run_readiness
@@ -48,6 +48,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
     services = {}
     cold = {}
     samplers = {}
+    market_hub = None
     legacy_live_enabled = os.getenv("PM_LIVE_ENABLED") == "true"
     vault_path = root / "wallet" / "live.vault"
     wallet_lock = asyncio.Lock()
@@ -62,7 +63,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
 
     async def attach(mode, runtime, wallet=None):
         runtimes[mode] = runtime
-        service = MarketService(runtime)
+        service = MarketService(runtime, hub=market_hub)
         services[mode] = service
         redeem = RedemptionService(runtime, service, wallet)
         service.on_resolution = redeem.run_once
@@ -74,6 +75,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
 
     @asynccontextmanager
     async def lifespan(app):
+        nonlocal market_hub
         root.mkdir(parents=True, exist_ok=True)
         lock = (root / "process.lock").open("a")
         try:
@@ -82,6 +84,9 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             lock.close()
             raise RuntimeError("此数据目录已有运行实例") from exc
         try:
+            if public_data:
+                market_hub = PublicMarketHub()
+                app.state.market_hub = market_hub
             await attach("TEST", Runtime(root / "TEST" / "state.sqlite", clock=test_clock))
             if legacy_live_enabled:
                 if not password:
@@ -127,6 +132,11 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             for service in services.values():
                 try:
                     await service.close()
+                except Exception as exc:
+                    failures.append(exc)
+            if market_hub is not None:
+                try:
+                    await market_hub.close()
                 except Exception as exc:
                     failures.append(exc)
             for r in runtimes.values():
@@ -666,6 +676,14 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 runtimes.pop("LIVE", None)
                 service = services.pop("LIVE", None)
                 sampler = samplers.pop("LIVE", None)
+                if sampler is not None and sampler.task is not None:
+                    sampler.task.cancel()
+                    await asyncio.gather(sampler.task, return_exceptions=True)
+                if service is not None:
+                    try:
+                        await service.close()
+                    except Exception:
+                        pass
                 if runtime is not None:
                     try:
                         await runtime.client.shutdown()
@@ -675,14 +693,6 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                         runtime.store.close()
                     except Exception:
                         pass
-                if service is not None:
-                    try:
-                        await service.close()
-                    except Exception:
-                        pass
-                if sampler is not None:
-                    sampler.task.cancel()
-                    await asyncio.gather(sampler.task, return_exceptions=True)
                 raise ValueError(wallet_state["error"]) from None
             wallet_state["error"] = None
             return wallet_public()
@@ -851,7 +861,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         if not 1 <= limit <= 10000:
             raise ValueError("记录limit须为1–10000")
         return (
-            records(runtimes[mode], limit)
+            await records_async(runtimes[mode], limit)
             if mode in runtimes
             else {"records": [], "totalCount": 0, "locked": True}
         )
@@ -869,7 +879,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
     async def performance(mode: str):
         mode = mode_name(mode)
         return (
-            samplers[mode].view()
+            await samplers[mode].view_async()
             if mode in samplers
             else {
                 "generation": cold[mode].generation,

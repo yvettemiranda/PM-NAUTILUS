@@ -20,6 +20,8 @@ from urllib.parse import urlsplit
 
 import msgspec
 from py_clob_client_v2.client import ClobClient
+from py_clob_client_v2.order_builder.builder import OrderBuilder
+from py_clob_client_v2.order_utils import Side
 from py_clob_client_v2.clob_types import (
     ApiCreds,
     MarketOrderArgsV2,
@@ -36,24 +38,27 @@ from nautilus_trader.adapters.polymarket.providers import (
 from nautilus_trader.adapters.polymarket.common.credentials import PolymarketWebSocketAuth
 from nautilus_trader.adapters.polymarket.common.constants import POLYMARKET_NAUTILUS_BUILDER_CODE
 from nautilus_trader.core.uuid import UUID4
-from nautilus_trader.execution.reports import OrderStatusReport
+from nautilus_trader.execution.reports import OrderStatusReport, PositionStatusReport
 from nautilus_trader.model.currencies import pUSD
-from nautilus_trader.model.enums import OrderSide, LiquiditySide
-from nautilus_trader.model.events import OrderFilled
+from nautilus_trader.model.enums import OrderSide, LiquiditySide, PositionSide
+from nautilus_trader.model.events import OrderFilled, OrderUpdated
 from nautilus_trader.model.identifiers import ClientOrderId, VenueOrderId, TradeId
 from nautilus_trader.model.objects import Money, AccountBalance
 
 from .config import SCALE, micros
 from .execution import TestExecution
 from .live_account_guard import audit_open_orders, condition_inventory_matches
-from .native import price, quantity
+from .native import price, quantity, instrument_id
 from .order_terms import (
     OrderTermsError,
     SellTerms,
     check_signed_buy,
     check_signed_sell,
     normalize_sell,
+    exact_sdk_buy_amounts,
 )
+
+
 from .rules import (
     SUPPORTED_CLOB_TICKS,
     cost,
@@ -64,6 +69,18 @@ from .rules import (
     arbitrate,
     signed_buy_notional,
 )
+
+
+class _ExactBuyOrderBuilder(OrderBuilder):
+    """Only SDK BUY amount arithmetic changes; signing and fee guards stay official."""
+
+    def get_market_order_amounts(self, side, amount, price, round_config):
+        if side in ("BUY", Side.BUY):
+            maker, taker = exact_sdk_buy_amounts(
+                amount, price, round_config.price, round_config.amount
+            )
+            return Side.BUY, maker, taker
+        return super().get_market_order_amounts(side, amount, price, round_config)
 
 
 def checked_owned_order_result(result, venue: str, token_id: str) -> tuple[set[str], int, str]:
@@ -327,6 +344,13 @@ class LiveExecution(PolymarketExecutionClient):
     def __init__(self, owner, http, provider, auth, config, wallet=None):
         self.owner = owner
         self.wallet = wallet
+        if isinstance(http.builder, OrderBuilder) and not isinstance(
+            http.builder, _ExactBuyOrderBuilder
+        ):
+            builder = http.builder
+            http.builder = _ExactBuyOrderBuilder(
+                builder.signer, builder.signature_type, builder.funder
+            )
         n = owner.native
         super().__init__(
             asyncio.get_running_loop(), http, n.bus, n.cache, n.clock, provider, auth, config, None
@@ -343,6 +367,7 @@ class LiveExecution(PolymarketExecutionClient):
         self._submit_timings = {}
         self._release_verified = False
         self._pending_native = set()
+        self._undelivered_native = {}
         self._pending_conversions = set()
         self._submitting = {}
         self._post_possible = set()
@@ -369,29 +394,66 @@ class LiveExecution(PolymarketExecutionClient):
             and not self._release_verified
         ):
             first_terminal = not i.get("venue_terminal")
-            i["venue_terminal"] = True
-            r.store.save_intent(event.client_order_id, i)
             if first_terminal:
+                i["venue_terminal"] = True
+                r.store.save_intent(event.client_order_id, i)
                 self._reconcile_requested.set()
             return  # Await all associated trades; cancellation is not settlement.
+        key = (
+            f"fill:{event.client_order_id}:{event.trade_id}"
+            if isinstance(event, OrderFilled)
+            else str(event.id)
+        )
         if isinstance(event, OrderFilled):
-            key = f"fill:{event.client_order_id}:{event.trade_id}"
-            if (
-                key in self._pending_native
-                or r.store.db.execute(
+            if key in self._pending_native or (
+                key not in self._undelivered_native
+                and r.store.db.execute(
                     "SELECT 1 FROM native_events WHERE event_id=?", (key,)
                 ).fetchone()
             ):
                 return
             self._pending_native.add(key)
-        r.freeze_fill_rules(event)
-        r.store.journal(event)
-        if (
-            type(event).__name__ == "OrderSubmitted"
-            and str(event.client_order_id) in self._submitting
-        ):
-            self._submitting[str(event.client_order_id)] = True
-        super()._send_order_event(event)
+        try:
+            if key not in self._undelivered_native:
+                r.freeze_fill_rules(event)
+                r.store.journal(event)
+                self._undelivered_native[key] = event
+            else:
+                event = self._undelivered_native[key]
+            if (
+                type(event).__name__ == "OrderSubmitted"
+                and str(event.client_order_id) in self._submitting
+            ):
+                self._submitting[str(event.client_order_id)] = True
+            super()._send_order_event(event)
+            self._undelivered_native.pop(key, None)
+            if isinstance(event, OrderUpdated) and not event.is_quote_quantity:
+                self._pending_conversions.add(str(event.client_order_id))
+            elif type(event).__name__ in {
+                "OrderCanceled",
+                "OrderExpired",
+                "OrderDenied",
+                "OrderRejected",
+            }:
+                self._pending_conversions.discard(str(event.client_order_id))
+        except Exception:
+            self.ready = self.open_orders_clear = False
+            self._reconcile_requested.set()
+            try:
+                r.store.put("status", "PAUSED")
+            except Exception:
+                pass  # The original journal failure remains the caller's error.
+            raise
+        finally:
+            self._pending_native.discard(key)
+
+    def _retry_native_delivery(self, oid):
+        delivered = False
+        for event in tuple(self._undelivered_native.values()):
+            if str(event.client_order_id) == str(oid):
+                self._send_order_event(event)
+                delivered = True
+        return delivered
 
     def _handle_ws_order_msg(self, msg, wait_for_ack):
         oid = self._cache.client_order_id(VenueOrderId(msg.id))
@@ -411,6 +473,29 @@ class LiveExecution(PolymarketExecutionClient):
         if self.ingest_trade(msg):
             self._reconcile_requested.set()
 
+    def _owned_quantity_upper_bound(self, intent, order, token):
+        """Native base cap, not the BUY signature's minimum received shares."""
+        maximum = intent.get("base_quantity")
+        if maximum is None:
+            if order is None:
+                raise ValueError("订单核对缺少原生订单数量上限")
+            if not order.is_quote_quantity:
+                maximum = micros(order.quantity.as_decimal())
+            else:
+                outbound = intent.get("outbound_terms", {})
+                maker, tick = (
+                    outbound.get("maker", intent["cash"]),
+                    outbound.get("tick", token.tick),
+                )
+                if type(maker) is not int or maker <= 0 or tick not in SUPPORTED_CLOB_TICKS:
+                    raise ValueError("订单核对缺少持久化现金或价格档位上限")
+                # A better price may deliver more shares than takerAmount. This
+                # is the same conservative bound persisted before a BUY POST.
+                maximum = ceil_div((maker + 1) * SCALE, tick)
+        if type(maximum) is not int or maximum <= 0:
+            raise ValueError("订单核对份额上限无效")
+        return maximum
+
     def ingest_trade(self, msg):
         status = getattr(msg.status, "value", msg.status)
         r = self.owner
@@ -422,36 +507,72 @@ class LiveExecution(PolymarketExecutionClient):
             i = r.store.intent(oid)
             if not i or i["generation"] != r.store.generation:
                 continue
+            t = r.tokens[i["token_id"]]
+            o = self._cache.order(oid)
+            if (
+                o is None
+                or msg.market != t.condition_id
+                or msg.get_asset_id(venue) != t.token_id
+                or msg.order_side(venue) != o.side
+            ):
+                raise ValueError("实际成交身份与本程序意图不匹配")
+            if status not in {"MATCHED", "MINED", "RETRYING", "CONFIRMED", "FAILED"}:
+                raise ValueError("实际成交状态无效")
+            gross_decimal = Decimal(str(msg.last_qty(venue)))
+            gross = micros(gross_decimal)
+            if gross <= 0 or gross_decimal * SCALE != gross:
+                raise ValueError("无效真实成交数值")
+            if status == "FAILED":
+                # A failure can help release a reservation, so impossible failed
+                # quantities must never count as final evidence. Confirmed venue
+                # fills remain facts even when a separate budget guard breaches.
+                if gross > self._owned_quantity_upper_bound(i, o, t):
+                    raise ValueError("失败成交份额超过本程序签名订单上限")
+            changed |= self._retry_native_delivery(oid)
+            trade_id = TradeId(sha256(f"{msg.id}:{venue}".encode()).hexdigest()[:32])
+            fill_key = f"fill:{oid}:{trade_id}"
+            committed_fill = r.store.db.execute(
+                "SELECT 1 FROM native_events WHERE event_id=?", (fill_key,)
+            ).fetchone()
+            if committed_fill and status != "CONFIRMED":
+                continue  # Final committed fills cannot regress to a stale status.
             pending = set(i.get("pending_trades", []))
             before_pending = pending.copy()
             if status not in {"CONFIRMED", "FAILED"}:
                 pending.add(msg.id)
             else:
                 pending.discard(msg.id)
-            if status == "FAILED":
-                failed_qty = micros(msg.last_qty(venue))
-                changed |= i.get("failed_trades", {}).get(msg.id) != failed_qty
-                i.setdefault("failed_trades", {})[msg.id] = failed_qty
-            changed |= pending != before_pending
-            i["pending_trades"] = sorted(pending)
-            r.store.save_intent(oid, i)
+            state_changed = pending != before_pending
+            if status == "FAILED" and i.get("failed_trades", {}).get(msg.id) != gross:
+                i.setdefault("failed_trades", {})[msg.id] = gross
+                state_changed = True
+            elif status == "CONFIRMED" and msg.id in i.get("failed_trades", {}):
+                del i["failed_trades"][msg.id]
+                state_changed = True
+            if state_changed:
+                i["pending_trades"] = sorted(pending)
+                r.store.save_intent(oid, i)
+                changed = True
             if status != "CONFIRMED":
                 continue
-            t = r.tokens[i["token_id"]]
-            o = self._cache.order(oid)
-            if o is None or msg.market != t.condition_id or msg.get_asset_id(venue) != t.token_id:
-                raise ValueError("实际成交身份与本程序意图不匹配")
+            if fill_key in self._pending_native or committed_fill:
+                continue
+            p = micros(msg.last_px(venue))
+            if not 0 < p < SCALE:
+                raise ValueError("无效真实成交数值")
             if o.is_quote_quantity and str(oid) not in self._pending_conversions:
                 base = i.get("base_quantity")
                 if not base:
                     raise ValueError("恢复订单缺少持久化的签名份额，不能猜测转换")
                 self._pending_conversions.add(str(oid))
-                self._send_quote_to_base_update(o, VenueOrderId(venue), quantity(base))
-            gross = micros(msg.last_qty(venue))
-            p = micros(msg.last_px(venue))
-            if gross <= 0 or not 0 < p < SCALE:
-                raise ValueError("无效真实成交数值")
-            if (o.side == OrderSide.BUY and p > i["limit"]) or (
+                try:
+                    self._send_quote_to_base_update(o, VenueOrderId(venue), quantity(base))
+                except Exception:
+                    self._pending_conversions.discard(str(oid))
+                    raise
+            elif not o.is_quote_quantity:
+                self._pending_conversions.discard(str(oid))
+            if (o.side == OrderSide.BUY and p > i.get("execution_limit", i["limit"])) or (
                 o.side == OrderSide.SELL and p < i["limit"]
             ):
                 r.pause()
@@ -464,14 +585,7 @@ class LiveExecution(PolymarketExecutionClient):
             net = gross
             amount = cost(p, gross) + fee if o.side == OrderSide.BUY else cost(p, gross) - fee
             # Real venue trade identity is stable across REST/WS/status transitions.
-            trade_id = TradeId(sha256(f"{msg.id}:{venue}".encode()).hexdigest()[:32])
-            fill_key = f"fill:{oid}:{trade_id}"
-            changed |= (
-                fill_key not in self._pending_native
-                and not r.store.db.execute(
-                    "SELECT 1 FROM native_events WHERE event_id=?", (fill_key,)
-                ).fetchone()
-            )
+            changed = True
             self.generate_order_filled(
                 strategy_id=o.strategy_id,
                 instrument_id=o.instrument_id,
@@ -791,7 +905,9 @@ class LiveExecution(PolymarketExecutionClient):
         # The pinned SDK has no maxSpend option and rounds the maker amount to
         # cents. Inspect the signed facts before allowing any POST boundary.
         try:
-            maker, taker = check_signed_buy(signed, notional, executable_limit, token.min_size)
+            maker, taker = check_signed_buy(
+                signed, notional, executable_limit, token.min_size, tick
+            )
         except OrderTermsError as exc:
             self.deny(o, str(exc))
             return
@@ -929,6 +1045,7 @@ class LiveExecution(PolymarketExecutionClient):
                 signed_buy_notional(i["cash"], Fees(**i["fees"]), token.tick, limit),
                 limit,
                 token.min_size,
+                token.tick,
             )
 
     def _is_unknown_submit_result(self, exc):
@@ -993,9 +1110,7 @@ class LiveExecution(PolymarketExecutionClient):
         return audit.ok
 
     async def _check_buy_account(self, token):
-        condition_ids = tuple(
-            t.token_id for t in self.owner.tokens.values() if t.condition_id == token.condition_id
-        )
+        condition_ids = self.owner.condition_token_ids(token.condition_id)
         if self.wallet is None or len(condition_ids) != 2:
             self.ready = False
             self.open_orders_clear = False
@@ -1098,7 +1213,19 @@ class LiveExecution(PolymarketExecutionClient):
             rows = r.store.order_fills(oid)
             confirmed = {e.info.get("venue_trade_id") for e in rows}
             gross = sum(e.info.get("pm_gross", 0) for e in rows)
-            failed = i.get("failed_trades", {})
+            failed = {
+                key: qty for key, qty in i.get("failed_trades", {}).items() if key not in confirmed
+            }
+            try:
+                maximum = self._owned_quantity_upper_bound(i, o, r.tokens[i["token_id"]])
+                if matched > maximum or gross + sum(failed.values()) > maximum:
+                    raise ValueError("订单查询累计成交或失败份额超过持久化订单上限")
+            except ValueError as exc:
+                # Impossible final evidence cannot release ownership. Keep all
+                # confirmed fills and reservations for a later trustworthy read.
+                self._invalidate_ledger()
+                r.store.put("live_error", str(exc))
+                raise
             # All matched quantity must be represented by finalized venue responses.
             # Missing/deferred records retain the reservation; never infer zero fill.
             if (
@@ -1183,14 +1310,33 @@ class LiveExecution(PolymarketExecutionClient):
         # publishing whole-wallet quantities as our strategy's positions.
         positions = await self._fetch_user_positions(size_threshold=0)
         actual = {str(p["asset"]): micros(p["size"]) for p in positions}
+        reports = []
+        wanted = getattr(command, "instrument_id", None)
         for c in self.owner.business["cycles"].values():
             t = self.owner.tokens[c["token_id"]]
-            if (
-                t.condition_id not in self.owner.business["settled"]
-                and actual.get(t.token_id, 0) < c["quantity"]
-            ):
+            if t.condition_id in self.owner.business["settled"]:
+                continue  # Pending redemption rights are not freshly checked CLOB custody.
+            if actual.get(t.token_id, 0) < c["quantity"]:
                 raise ValueError("账户实际份额不足以覆盖本程序持仓")
-        return []
+            iid = instrument_id(t)
+            if c["quantity"] > 0 and (wanted is None or wanted == iid):
+                now = self._clock.timestamp_ns()
+                reports.append(
+                    PositionStatusReport(
+                        account_id=self.account_id,
+                        instrument_id=iid,
+                        position_side=PositionSide.LONG,
+                        quantity=quantity(c["quantity"]),
+                        report_id=UUID4(),
+                        ts_last=now,
+                        ts_init=now,
+                    )
+                )
+        # Custody was freshly checked for every reported cycle. Reporting only those
+        # rights lets the native startup batch skip N redundant wallet reads;
+        # manual wallet assets never become program positions, and no cache lives
+        # beyond this call.
+        return reports
 
     async def generate_order_status_report(self, command):
         oid = command.client_order_id or self._cache.client_order_id(command.venue_order_id)
@@ -1205,10 +1351,13 @@ class LiveExecution(PolymarketExecutionClient):
         ok = await self.owner.native.execution.reconcile_execution_state(timeout_secs=60)
         if not ok or not (await self._validate_ledger())["ok"]:
             raise ValueError("LIVE原生执行核对失败")
-        self.ready = True
         await self._check_open_orders()
         if not self._ledger_ok:
             raise ValueError("LIVE账本校验未通过")
+        # The native mass-status batch reads custody alongside sync_owned. Recheck
+        # the final recovered quantities before publishing readiness.
+        await self.generate_position_status_reports(None)
+        self.ready = True
         self.reconciliation_task = asyncio.create_task(self.maintain())
 
     async def _validate_ledger(self):

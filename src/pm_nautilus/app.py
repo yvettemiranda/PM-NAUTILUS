@@ -21,7 +21,7 @@ from .market import MarketService, PublicMarketHub
 from .redemption import RedemptionService
 from .store import Store
 from .strategy import Runtime
-from .views import dashboard, records_async
+from .views import dashboard, records_async, records_page_async
 from .performance import PerformanceSampler
 from .wallet_vault import VaultError, derive_signer, read_public_metadata, read_vault, write_vault
 from .live_readiness import run_readiness
@@ -37,7 +37,7 @@ class _LiveBundleResponse(FileResponse):
             cleanup_live_bundle_file(self.path)
 
 
-async def _finish_before_cancel(operation):
+async def _finish_before_cancel(operation, *, cleanup_cancelled_result=None):
     """Keep lifecycle ownership until work finishes, including repeated cancellation."""
     task = asyncio.create_task(operation)
     try:
@@ -53,7 +53,9 @@ async def _finish_before_cancel(operation):
             except Exception:
                 break
         if not task.cancelled():
-            task.exception()
+            error = task.exception()
+            if error is None and cleanup_cancelled_result is not None:
+                cleanup_cancelled_result(task.result())
         raise
 
 
@@ -70,6 +72,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
     cold = {}
     samplers = {}
     market_hub = None
+    shutting_down = False
     legacy_live_enabled = os.getenv("PM_LIVE_ENABLED") == "true"
     vault_path = root / "wallet" / "live.vault"
     wallet_lock = asyncio.Lock()
@@ -96,7 +99,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
 
     @asynccontextmanager
     async def lifespan(app):
-        nonlocal market_hub
+        nonlocal market_hub, shutting_down
         root.mkdir(parents=True, exist_ok=True)
         lock = (root / "process.lock").open("a")
         try:
@@ -105,6 +108,10 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             lock.close()
             raise RuntimeError("此数据目录已有运行实例") from exc
         try:
+            shutting_down = False
+            from .live_backup import cleanup_stale_live_scratch
+
+            cleanup_stale_live_scratch(root / "LIVE")
             if public_data:
                 market_hub = PublicMarketHub()
                 app.state.market_hub = market_hub
@@ -141,43 +148,55 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 cold["LIVE"] = Store(root / "LIVE" / "state.sqlite", "LIVE")
             yield
         finally:
-            failures = []
-            owned_runtimes = activating | runtimes
-            for sampler in samplers.values():
-                sampler.task.cancel()
-            await asyncio.gather(*(s.task for s in samplers.values()), return_exceptions=True)
-            for r in owned_runtimes.values():
+            shutting_down = True
+
+            async def shutdown():
                 try:
-                    r.pause()
-                except Exception as exc:
-                    failures.append(exc)
-            for service in services.values():
-                try:
-                    await service.close()
-                except Exception as exc:
-                    failures.append(exc)
-            if market_hub is not None:
-                try:
-                    await market_hub.close()
-                except Exception as exc:
-                    failures.append(exc)
-            for r in owned_runtimes.values():
-                try:
-                    if r.mode == "LIVE":
-                        # shutdown drains native callbacks while SQLite is still open.
-                        await r.client.shutdown()
-                    else:
-                        r.native.stop()
-                except Exception as exc:
-                    failures.append(exc)
+                    async with wallet_lock:
+                        failures = []
+                        owned_runtimes = activating | runtimes
+                        for sampler in samplers.values():
+                            sampler.task.cancel()
+                        await asyncio.gather(
+                            *(s.task for s in samplers.values()), return_exceptions=True
+                        )
+                        for r in owned_runtimes.values():
+                            try:
+                                r.pause()
+                            except Exception as exc:
+                                failures.append(exc)
+                        for service in services.values():
+                            try:
+                                await service.close()
+                            except Exception as exc:
+                                failures.append(exc)
+                        if market_hub is not None:
+                            try:
+                                await market_hub.close()
+                            except Exception as exc:
+                                failures.append(exc)
+                        for r in owned_runtimes.values():
+                            try:
+                                if r.mode == "LIVE":
+                                    # shutdown drains native callbacks while SQLite is still open.
+                                    await r.client.shutdown()
+                                else:
+                                    r.native.stop()
+                            except Exception as exc:
+                                failures.append(exc)
+                            finally:
+                                r.store.close()
+                        for s in cold.values():
+                            s.close()
+                        if failures:
+                            kinds = ",".join(sorted({type(error).__name__ for error in failures}))
+                            raise RuntimeError(f"组件关闭失败 ({kinds})") from None
                 finally:
-                    r.store.close()
-            for s in cold.values():
-                s.close()
-            lock.close()
-            if failures:
-                kinds = ",".join(sorted({type(error).__name__ for error in failures}))
-                raise RuntimeError(f"组件关闭失败 ({kinds})") from None
+                    lock.close()
+
+            # Retain process ownership until every private worker and component
+            # has finished, even if lifespan itself is cancelled repeatedly.
+            await _finish_before_cancel(shutdown())
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.runtimes = runtimes
@@ -186,6 +205,8 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
 
     @app.middleware("http")
     async def security(request, call_next):
+        if shutting_down and request.method not in {"GET", "HEAD"}:
+            return JSONResponse({"error": "服务正在关闭，请稍后重试"}, 503)
         host = request.url.hostname
         if host not in allowed:
             return JSONResponse({"error": "Host未列入服务器允许列表"}, 400)
@@ -307,7 +328,15 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             if store.db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
                 return True
         business = store.get("business")
-        return any(business.get(key) for key in ("cycles", "claims", "settled"))
+        approval = store.get("redemption_approval")
+        return any(business.get(key) for key in ("cycles", "claims", "settled")) or (
+            approval is not None
+            and (
+                not isinstance(approval, dict)
+                or approval.get("status") == "ACTIVE"
+                or approval.get("pending") is not None
+            )
+        )
 
     def ensure_wallet_identity(metadata):
         store = cold.get("LIVE") or runtimes["LIVE"].store
@@ -414,11 +443,13 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         if not local and not password:
             raise HTTPException(403, "钱包操作需要网页登录密码")
 
-    def view(mode, limit=20):
+    def view(mode, limit=20, position_limit=None):
         mode = mode_name(mode)
         live_status = runtimes["LIVE"].status if "LIVE" in runtimes else "LOCKED"
         if mode in runtimes:
-            data = dashboard(runtimes[mode], services[mode], limit, "LIVE" in runtimes)
+            data = dashboard(
+                runtimes[mode], services[mode], limit, "LIVE" in runtimes, position_limit
+            )
             data["liveStrategyStatus"] = live_status
             if mode == "LIVE":
                 data["wallet"] = wallet_public()
@@ -437,6 +468,8 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             "preferences": Preferences(**store.get("preferences")).public(),
             "capitalEditable": False,
             "positions": [],
+            "positionCount": 0,
+            "positionBooksReady": False,
             "portfolio": dict.fromkeys(
                 [
                     "totalFunds",
@@ -496,10 +529,22 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         return JSONResponse(body, status_code=503 if failures else 200)
 
     @app.get("/api/dashboard")
-    async def get_dashboard(mode: str = "TEST", limit: int = 20):
+    async def get_dashboard(
+        mode: str = "TEST", limit: int = 20, details: str = "all", position_limit: int | None = None
+    ):
         if limit < 1:
             raise ValueError("limit须大于0")
-        return view(mode, limit)
+        if details not in {"all", "positions", "market", "summary"}:
+            raise ValueError("无效明细类型")
+        if position_limit is not None and not 0 <= position_limit <= 10000:
+            raise ValueError("持仓limit须为0–10000")
+        data = view(
+            mode,
+            limit if details in {"all", "market"} else 0,
+            position_limit if details in {"all", "positions"} else 0,
+        )
+        data["details"] = details
+        return data
 
     @app.get("/api/live/wallet")
     async def get_live_wallet():
@@ -606,7 +651,15 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             await verified_vault_settings(payload.get("vaultPassword"))
             # Clear the empty ledger binding first. If unlink fails, the
             # existing encrypted wallet remains available for another try.
-            cold["LIVE"].put("live_wallet_identity", None)
+            with cold["LIVE"].transaction():
+                cold["LIVE"].put("live_wallet_identity", None)
+                approval = cold["LIVE"].get("redemption_approval")
+                if (
+                    isinstance(approval, dict)
+                    and approval.get("status") == "COMPLETE"
+                    and approval.get("pending") is None
+                ):
+                    cold["LIVE"].put("redemption_approval", None)
             try:
                 vault_path.unlink()
             except OSError:
@@ -648,7 +701,9 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 PolygonWallet(wallet_state["settings"]), root / "LIVE" / "state.sqlite"
             )
             try:
-                approval_result = await asyncio.to_thread(approval_service.start)
+                approval_result = await _finish_before_cancel(
+                    asyncio.to_thread(approval_service.start)
+                )
             except RedemptionCheckError as exc:
                 raise ValueError(str(exc)) from None
             except Exception:
@@ -737,11 +792,14 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         async with wallet_lock:
             if not vault_path.is_file():
                 raise ValueError("尚未配置加密钱包")
-            from .live_backup import export_live_bundle_file
+            from .live_backup import cleanup_live_bundle_file, export_live_bundle_file
 
             store = cold.get("LIVE") or runtimes["LIVE"].store
-            bundle_path = await asyncio.to_thread(
-                export_live_bundle_file, store, vault_path, payload["vaultPassword"]
+            bundle_path = await _finish_before_cancel(
+                asyncio.to_thread(
+                    export_live_bundle_file, store, vault_path, payload["vaultPassword"]
+                ),
+                cleanup_cancelled_result=cleanup_live_bundle_file,
             )
             return _LiveBundleResponse(
                 path=bundle_path,
@@ -861,9 +919,9 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             async with wallet_lock:
                 if not (await refresh_readiness())["ready"]:
                     raise ValueError("实盘账户检查未通过，不能开始交易")
-                services[mode].start()
+                await services[mode].start_async()
         else:
-            services[mode].start()
+            await services[mode].start_async()
         return view(mode)
 
     @app.post("/api/{mode}/pause")
@@ -893,12 +951,22 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         return view("TEST")
 
     @app.get("/api/{mode}/trade-records")
-    async def trade_records(mode: str, limit: int = 100):
+    async def trade_records(
+        mode: str,
+        limit: int = 100,
+        paged: bool = False,
+        cursor: str | None = None,
+        since: str | None = None,
+    ):
         mode = mode_name(mode)
         if not 1 <= limit <= 10000:
             raise ValueError("记录limit须为1–10000")
         return (
-            await records_async(runtimes[mode], limit)
+            (
+                await records_page_async(runtimes[mode], limit, cursor, since)
+                if paged
+                else await records_async(runtimes[mode], limit)
+            )
             if mode in runtimes
             else {"records": [], "totalCount": 0, "locked": True}
         )

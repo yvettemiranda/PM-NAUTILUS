@@ -157,9 +157,13 @@ def test_market_task_failure_pauses_and_recovers_without_start(monkeypatch):
     service.sync_subscriptions = AsyncMock()
     service.on_resolution = AsyncMock()
     rounds = []
+    real_sleep = asyncio.sleep
 
     async def finish_round(_):
         rounds.append((runtime.status, service.scan_status.get("serviceError")))
+        # Independent resolution tasks get the same scheduling opportunity as
+        # the production control loop's asynchronous sleep.
+        await real_sleep(0)
         if len(rounds) == 2:
             raise asyncio.CancelledError
 

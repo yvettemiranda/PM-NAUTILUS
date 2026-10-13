@@ -9,6 +9,7 @@ import pytest
 
 from pm_nautilus import live
 from pm_nautilus.redemption import RedemptionCheckError, RedemptionService
+from pm_nautilus.store import Store
 
 
 SETTINGS = {
@@ -94,42 +95,41 @@ def test_live_credentials_reject_bad_key_and_rpc_without_echo(tmp_path, monkeypa
         assert marker not in str(exc.value)
 
 
-class Store:
-    generation = 1
-
-    def __init__(self):
-        self.saved = []
-
-    def put(self, key, value):
-        self.saved.append((key, value))
-
-
-def test_redemption_external_value_error_cannot_enter_persisted_state():
+def test_redemption_external_value_error_cannot_enter_persisted_state(tmp_path):
     marker = "SECRET_MARKER_DO_NOT_EXPOSE"
-    claim = {"generation": 1, "state": "IDENTIFIED"}
-    store = Store()
-    runtime = SimpleNamespace(
-        mode="LIVE", store=store, business={"cycles": {}, "claims": {"claim": claim}}
-    )
+    store = Store(tmp_path / "LIVE.sqlite", "LIVE")
+    claim = {"generation": store.generation, "state": "IDENTIFIED", "condition_id": "claim"}
+    business = store.get("business")
+    business["claims"]["claim"] = claim
+    store.put("business", business)
+    runtime = SimpleNamespace(mode="LIVE", store=store, business=business)
 
     class Wallet:
         def prepare(self, _claim):
             raise ValueError(f"RPC rejected secret={marker}")
 
-    asyncio.run(RedemptionService(runtime, None, Wallet()).run_once())
-    assert claim["error"] == "ValueError"
-    assert marker not in repr(store.saved)
+    try:
+        asyncio.run(RedemptionService(runtime, None, Wallet()).run_once())
+        assert claim["error"] == "ValueError"
+        assert marker not in repr(store.get("business"))
+    finally:
+        store.close()
 
 
-def test_redemption_application_check_keeps_its_static_guidance():
-    claim = {"generation": 1, "state": "IDENTIFIED"}
-    runtime = SimpleNamespace(
-        mode="LIVE", store=Store(), business={"cycles": {}, "claims": {"claim": claim}}
-    )
+def test_redemption_application_check_keeps_its_static_guidance(tmp_path):
+    store = Store(tmp_path / "LIVE.sqlite", "LIVE")
+    claim = {"generation": store.generation, "state": "IDENTIFIED", "condition_id": "claim"}
+    business = store.get("business")
+    business["claims"]["claim"] = claim
+    store.put("business", business)
+    runtime = SimpleNamespace(mode="LIVE", store=store, business=business)
 
     class Wallet:
         def prepare(self, _claim):
             raise RedemptionCheckError("链上尚未正式结算")
 
-    asyncio.run(RedemptionService(runtime, None, Wallet()).run_once())
-    assert claim["error"] == "链上尚未正式结算"
+    try:
+        asyncio.run(RedemptionService(runtime, None, Wallet()).run_once())
+        assert claim["error"] == "链上尚未正式结算"
+    finally:
+        store.close()

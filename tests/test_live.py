@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 from nautilus_trader.common.providers import InstrumentProvider
 from nautilus_trader.adapters.polymarket.config import PolymarketExecClientConfig
 from nautilus_trader.adapters.polymarket.common.credentials import PolymarketWebSocketAuth
-from nautilus_trader.model.enums import LiquiditySide
+from nautilus_trader.model.enums import LiquiditySide, OrderSide
 from nautilus_trader.model.identifiers import VenueOrderId, ClientOrderId
 from pm_nautilus.live import LiveExecution
 from pm_nautilus.strategy import Runtime
@@ -51,6 +51,9 @@ class Trade:
 
     def liquidity_side(self):
         return LiquiditySide.TAKER
+
+    def order_side(self, *args):
+        return OrderSide.BUY
 
 
 async def flush():

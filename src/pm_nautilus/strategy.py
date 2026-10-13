@@ -30,6 +30,70 @@ from .rules import (
 from .store import Store
 
 TERMINAL = {"OrderCanceled", "OrderRejected", "OrderDenied", "OrderExpired"}
+_MISSING = object()
+
+
+class TokenRegistry(dict):
+    """Metadata index maintained by the same mutations as the token mapping."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        self._conditions = {}
+        self.update(*args, **kwargs)
+
+    def __setitem__(self, key, token):
+        condition = token.condition_id
+        if key in self:
+            old = self[key]
+            if old.condition_id != condition:
+                self._remove_condition(key, old.condition_id)
+        super().__setitem__(key, token)
+        self._conditions.setdefault(condition, set()).add(key)
+
+    def _remove_condition(self, key, condition):
+        ids = self._conditions[condition]
+        ids.remove(key)
+        if not ids:
+            del self._conditions[condition]
+
+    def __delitem__(self, key):
+        self._remove_condition(key, self[key].condition_id)
+        super().__delitem__(key)
+
+    def update(self, *args, **kwargs):
+        for key, token in dict(*args, **kwargs).items():
+            self[key] = token
+
+    def setdefault(self, key, default=None):
+        if key not in self:
+            self[key] = default
+        return self[key]
+
+    def pop(self, key, default=_MISSING):
+        if key not in self:
+            if default is _MISSING:
+                raise KeyError(key)
+            return default
+        token = self[key]
+        del self[key]
+        return token
+
+    def popitem(self):
+        if not self:
+            raise KeyError("popitem(): dictionary is empty")
+        key = next(reversed(self))
+        return key, self.pop(key)
+
+    def clear(self):
+        super().clear()
+        self._conditions.clear()
+
+    def __ior__(self, other):
+        self.update(other)
+        return self
+
+    def condition_token_ids(self, condition):
+        return tuple(sorted(self._conditions.get(condition, ())))
 
 
 class PMStrategy(Strategy):
@@ -62,7 +126,7 @@ class Runtime:
         self.store = Store(path, mode)
         self.mode = mode
         self.preferences = Preferences(**self.store.get("preferences"))
-        self.tokens = self.store.tokens(active_only=True)
+        self.tokens = TokenRegistry(self.store.tokens(active_only=True))
         from .store import BookCache
 
         self.books = BookCache(self.store)
@@ -80,6 +144,7 @@ class Runtime:
         self._terminal_events = set()
         self.replaying = False
         self.faulted = None
+        self._start_epoch = 0
         self.native = Native(self, clock)
         self.strategy = PMStrategy(self)
         self.client = TestExecution(self) if mode == "TEST" else live_factory(self)
@@ -152,14 +217,18 @@ class Runtime:
             self.store.put("official_tags", sorted(self.official_tags))
         self.refresh_eligibility()
 
+    def condition_token_ids(self, condition_id):
+        return self.tokens.condition_token_ids(condition_id)
+
     def refresh_eligibility(self):
         now = self.now
         previous = self.events
+        settled = set(self.business["settled"])
         eligible = {
             tid
             for tid, t in self.tokens.items()
             if static_reason(t, self.preferences, now, self.official_tags) is None
-            and t.condition_id not in self.business["settled"]
+            and t.condition_id not in settled
         }
         self.events = {}
         for tid in eligible:
@@ -220,7 +289,7 @@ class Runtime:
     def release_unmonitored(self):
         # Called only after obsolete feed tasks have been cancelled and awaited.
         # Historical execution instruments stay available for native accounting.
-        historical = {i["token_id"] for i in self.store.intents().values()}
+        historical = self.store.historical_token_ids()
         for tid in self.books.keys() - self.monitored:
             del self.books[tid]
             self._preview_cache.pop(tid, None)
@@ -309,7 +378,10 @@ class Runtime:
             return
         seq = self.store.journal(event)
         if seq > self.business["cursor"] and not self.faulted:
-            self.project(seq, event)
+            # A durable event can precede its native delivery. Never let a later
+            # cancellation advance the projection cursor over that saved fill.
+            for pending_seq, pending_event in self.store.events(self.business["cursor"], until=seq):
+                self.project(pending_seq, pending_event)
 
     def freeze_fill_rules(self, event):
         if isinstance(event, OrderFilled) and event.order_side == OrderSide.BUY:
@@ -565,7 +637,9 @@ class Runtime:
                     for v in self.business["targets"].values()
                     if v["event_id"] == eid
                 ]
-                batches = sell_batches(available_bids, targets, t.min_size, t.fees, tick=t.tick)
+                batches = sell_batches(
+                    available_bids, targets, t.min_size, t.fees, tick=t.tick, first_only=True
+                )
                 if batches:
                     batch = batches[0]
                     if dispatch:
@@ -750,19 +824,37 @@ class Runtime:
                     count += 1
         return count
 
-    def start(self):
+    def _check_start_readiness(self):
         if self.mode == "LIVE" and not self.client.ready:
             raise ValueError("LIVE 尚未完成实际账户核对")
         if self.mode == "LIVE" and not self.client.open_orders_clear:
             raise ValueError("LIVE 账户开放挂单核对未通过")
-        result = self.validate()
+
+    def _finish_start(self, result):
         if not result["ok"]:
             raise ValueError("账本核对失败，不能启动: " + ", ".join(result["errors"]))
+        self._start_epoch += 1
         self.store.put("status", "RUNNING")
         self.refresh_eligibility()
         self.drain()
 
+    def start(self):
+        self._check_start_readiness()
+        self._finish_start(self.validate())
+
+    async def start_async(self):
+        self._check_start_readiness()
+        epoch = self._start_epoch
+        result = await self.validate_async()
+        if epoch != self._start_epoch:
+            raise ValueError("启动核对期间状态已更改，请重新点击 START")
+        # validate_async has re-read business/native state on this owner loop;
+        # recheck live readiness and enter RUNNING without another await.
+        self._check_start_readiness()
+        self._finish_start(result)
+
     def pause(self):
+        self._start_epoch += 1
         self.store.put("status", "PAUSED")
         self.cancel_buys()
 
@@ -818,6 +910,7 @@ class Runtime:
 
     def _validate(self, integrity):
         errors = []
+        settled = set(self.business["settled"])
         if self.faulted:
             errors.append(self.faulted)
         if self.business.get("recovery_error"):
@@ -836,7 +929,7 @@ class Runtime:
                 x["qty"] for x in self.business["targets"].values() if x["event_id"] == eid
             )
             if (
-                t.condition_id not in self.business["settled"]
+                t.condition_id not in settled
                 and c["stop"]["state"] not in ("EXITING", "STOPPED")
                 and target_qty != c["quantity"]
             ):

@@ -10,8 +10,10 @@ import hashlib
 import fcntl
 import json
 import os
+import re
 import shutil
 import sqlite3
+import stat
 import tempfile
 import zlib
 from contextlib import closing
@@ -152,8 +154,18 @@ def _empty(store):
             if db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
                 return False
         business = _read_meta(db, "business")
-        return isinstance(business, dict) and not any(
-            business.get(key) for key in ("cycles", "targets", "claims", "settled")
+        approval = _read_meta(db, "redemption_approval")
+        return (
+            isinstance(business, dict)
+            and not any(business.get(key) for key in ("cycles", "targets", "claims", "settled"))
+            and (
+                approval is None
+                or (
+                    isinstance(approval, dict)
+                    and approval.get("status") != "ACTIVE"
+                    and approval.get("pending") is None
+                )
+            )
         )
 
 
@@ -165,6 +177,53 @@ def cleanup_live_bundle_file(path):
     shutil.rmtree(path.parent)
 
 
+def cleanup_stale_live_scratch(live_directory):
+    """Called only under the process lock, before any backup worker can start."""
+    directory = Path(live_directory)
+    if not directory.is_dir():
+        return
+    for path in directory.iterdir():
+        info = path.lstat()
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
+            continue
+        folder = re.fullmatch(r"\.pm-live-(export|restore|upload)-[a-z0-9_]{8}", path.name)
+        if stat.S_ISDIR(info.st_mode) and folder:
+            allowed = {
+                "export": {"snapshot.sqlite", "bundle.pmnb"},
+                "restore": {"payload.bin", "restored.sqlite", "snapshot.sqlite", "live.vault"},
+                "upload": {"upload.pmnb"},
+            }[folder[1]]
+            # Reserved names plus known contents keep user-created directories
+            # and symlinks outside this narrowly scoped crash cleanup.
+            entries = list(path.iterdir())
+            if all(
+                entry.name in allowed
+                or any(
+                    entry.name == name + suffix
+                    for name in allowed
+                    for suffix in ("-wal", "-shm", "-journal")
+                )
+                or (
+                    folder[1] == "restore"
+                    and re.fullmatch(r"\.live\.vault\.[a-f0-9]{32}\.tmp", entry.name)
+                )
+                for entry in entries
+            ) and not any(entry.is_dir() for entry in entries):
+                shutil.rmtree(path)
+        elif stat.S_ISREG(info.st_mode) and re.fullmatch(
+            r"\.pm-live-upload-[a-z0-9_]{8}\.pmnb", path.name
+        ):
+            path.unlink()
+
+
+def _fsync_directory(directory):
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def export_live_bundle_file(store, vault_path: Path, password: str) -> Path:
     """Create an encrypted .pmnb in /data using bounded memory; caller cleans up."""
     scratch = Path(tempfile.mkdtemp(prefix=".pm-live-export-", dir=store.path.parent))
@@ -173,7 +232,7 @@ def export_live_bundle_file(store, vault_path: Path, password: str) -> Path:
         identity = _identity(settings)
         vault = _read_vault_bytes(vault_path)
         snapshot_path = _snapshot_file(store, scratch)
-        with sqlite3.connect(snapshot_path) as snapshot:
+        with closing(sqlite3.connect(snapshot_path)) as snapshot:
             _validate_snapshot(snapshot, identity)
         output_path = _new_private_file(scratch / "bundle.pmnb")
         _encrypt_file(snapshot_path, vault, password, output_path)
@@ -226,6 +285,9 @@ def export_final_live_bundle_file(data_dir: Path, password: str, destination: Pa
                 staged.flush()
                 os.fsync(staged.fileno())
             os.link(staged_path, destination)
+            staged_path.unlink()
+            staged_path = None
+            _fsync_directory(destination.parent)
             return digest.hexdigest()
         except FileExistsError:
             raise BackupError("最终备份文件已存在，不能覆盖") from None

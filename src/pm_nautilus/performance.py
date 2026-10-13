@@ -34,7 +34,7 @@ class PerformanceSampler:
 
     def sample(self, at_ms=None):
         r = self.runtime
-        _, portfolio = portfolio_view(r)
+        _, portfolio = portfolio_view(r, position_limit=0)
         total = portfolio["totalFunds"]
         unrealized = portfolio["unrealizedPnl"]
         # Unknown books/recovery must leave a gap, not zero or a stale valuation.

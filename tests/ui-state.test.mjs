@@ -151,3 +151,82 @@ test('a failed stale sort reply does not read cleared preferences or show anothe
  assert.equal(ui.preferences,null);
  assert.equal(element('#sort-toggle').disabled,true);
 });
+
+
+test('summary readiness includes hidden positions',()=>{
+ const dashboard=base();dashboard.positions=[];dashboard.positionBooksReady=false;
+ assert.equal(displayStatus(dashboard,{lastSuccess:1000,now:2000}).feed,'waiting');
+});
+
+test('unchanged category refresh preserves focused input nodes',()=>{
+ const page=pageHarness();seedTestDashboard(page);
+ const el=page.element('#category-options');let writes=0, markup='';
+ Object.defineProperty(el,'innerHTML',{get(){return markup;},set(value){writes++;markup=value;}});
+ page.context.renderCategoriesForTest(page.ui.preferences);
+ page.context.document.activeElement=el;
+ page.context.renderCategoriesForTest(page.ui.preferences);
+ assert.equal(writes,1);assert.equal(page.context.document.activeElement,el);
+});
+
+test('record paging crosses ten thousand and refreshes late fills without losing expanded history',async()=>{
+ const page=pageHarness();seedTestDashboard(page);
+ const {ui,context}=page;ui.activeTab='records';ui.tradeRecordsExpanded=true;
+ const replies=[
+  {generation:'g',head:'g:10005',totalCount:10005,nextCursor:'g:10004',records:[{id:'new',firstSeq:10005,quantity:'1'},{id:'old',firstSeq:10004,quantity:'1'}]},
+  {generation:'g',head:'g:10005',totalCount:10005,nextCursor:'g:3',records:[{id:'beyond-10000',firstSeq:3,quantity:'1'}]},
+  {generation:'g',head:'g:10007',totalCount:10006,nextCursor:'g:10005',records:[{id:'newest',firstSeq:10006,quantity:'1'},{id:'new',firstSeq:10005,quantity:'1'}],changes:[{id:'beyond-10000',firstSeq:3,quantity:'2'},{id:'newest',firstSeq:10006,quantity:'1'}]},
+ ];
+ const requests=[];
+ context.fetch=async path=>{requests.push(path);return {ok:true,headers:{get(){return null;}},async text(){const reply=replies.shift();for(const row of [...reply.records,...(reply.changes??[])])row.type="OPEN";return JSON.stringify(reply);}};};
+ await context.loadTradeRecordsForTest();
+ await context.loadTradeRecordsForTest({more:true});
+ assert.match(requests[1],/cursor=g%3A10004/);
+ await context.loadTradeRecordsForTest({silent:true});
+ assert.match(requests[2],/since=g%3A10005/);
+ assert.deepEqual(Array.from(ui.tradeRecords,r=>r.id),['newest','new','old','beyond-10000']);
+ assert.equal(ui.tradeRecords.at(-1).quantity,'2');assert.equal(ui.recordCursor,'g:3');
+ assert.equal(ui.tradeRecordTotalCount,10006);
+});
+
+test('hidden page stops dashboard polling and refreshes on return',()=>{
+ const page=pageHarness();const {context,ui}=page;ui.loading=false;
+ let requests=0;context.fetch=()=>{requests++;return new Promise(()=>{});};
+ context.document.hidden=true;context.window.intervals.at(-1)();assert.equal(requests,0);
+ context.document.hidden=false;context.document.handlers.visibilitychange();assert.equal(requests,1);
+});
+
+test('an old mode history response cannot release ownership of a newer request',async()=>{
+ const page=pageHarness();seedTestDashboard(page);
+ const {ui,context,element}=page;let oldResolve,newResolve,requests=0;
+ context.fetch=path=>{
+  if(!path.includes('trade-records'))return new Promise(()=>{});
+  requests++;return new Promise(resolve=>{if(requests===1)oldResolve=resolve;else newResolve=resolve;});
+ };
+ const old=context.loadTradeRecordsForTest();
+ element('#mode-toggle').handlers.click();
+ const current=context.loadTradeRecordsForTest();
+ const reply=(quantity,head)=>({ok:true,headers:{get(){return null;}},async text(){return JSON.stringify({generation:'g',head:`g:${head}`,totalCount:1,nextCursor:'g:1',records:[{id:'row',type:'OPEN',firstSeq:1,quantity}]});}});
+ oldResolve(reply('2',2));await old;
+ assert.equal(ui.tradeRecordsLoading,true);
+ await context.loadTradeRecordsForTest();assert.equal(requests,2);
+ newResolve(reply('3',3));await current;
+ assert.equal(ui.tradeRecordsLoading,false);assert.equal(ui.tradeRecords[0].quantity,'3');assert.equal(ui.recordHead,'g:3');
+});
+
+test('mode switch invalidates category markup cache after clearing nodes',()=>{
+ const page=pageHarness();seedTestDashboard(page);
+ const {ui,context,element}=page;ui.dashboard.marketScan={diagnostics:{availableCategories:[{id:'1',label:'Sports'}]}};
+ context.renderCategoriesForTest(ui.preferences);assert.equal(element('#category-options').dataset.markup.includes('data-category-id="1"'),true);
+ element('#mode-toggle').handlers.click();assert.equal(element('#category-options').dataset.markup,undefined);
+});
+
+test('an external reset clears history immediately and rejects its late response',async()=>{
+ const page=pageHarness();seedTestDashboard(page);
+ const {ui,context}=page;ui.dashboard.generation='old';ui.recordGeneration='old';ui.recordHead='old:1';ui.recordCursor='old:1';ui.tradeRecords=[{id:'old-fill',type:'OPEN',firstSeq:1}];
+ let resolve;context.fetch=path=>path.includes('trade-records')?new Promise(r=>{resolve=r;}):new Promise(()=>{});
+ const pending=context.loadTradeRecordsForTest();
+ context.applyDashboardForTest({executionMode:'TEST',generation:'new',details:'summary',liveStrategyStatus:'LOCKED',preferences:{...profile},strategy:{status:'PAUSED',initialCapital:'100',availableCash:'100'},positions:[],positionCount:0,positionBooksReady:true,portfolio:{},marketScan:{events:[],diagnostics:{availableCategories:[]}}});
+ assert.equal(ui.tradeRecords.length,0);assert.equal(ui.recordHead,null);assert.equal(ui.tradeRecordsLoading,false);
+ resolve({ok:true,headers:{get(){return null;}},async text(){return JSON.stringify({generation:'old',head:'old:2',totalCount:1,records:[{id:'old-fill',type:'OPEN',firstSeq:1}]});}});
+ await pending;assert.equal(ui.tradeRecords.length,0);assert.equal(ui.recordHead,null);
+});

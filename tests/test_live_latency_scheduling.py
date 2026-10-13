@@ -57,6 +57,7 @@ def test_buy_account_reads_overlap_and_use_current_local_inventory():
         cycle = {"token_id": "1", "quantity": 5_000_000}
         owner = SimpleNamespace(
             tokens={"1": yes, "2": no},
+            condition_token_ids=lambda condition: ("1", "2"),
             business={"cycles": {"event": cycle}},
             store=SimpleNamespace(put=lambda key, value: values.update({key: value})),
             pause=Mock(),

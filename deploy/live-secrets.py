@@ -183,6 +183,13 @@ def write_new_file(path: Path, payload: bytes, uid: int, gid: int):
         # link is atomic and fails if a prior vault/unlock exists. A failed run
         # cannot replace a working credential file.
         os.link(temporary, path)
+        os.unlink(temporary)
+        temporary = None
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         if temporary is not None:
             os.unlink(temporary)

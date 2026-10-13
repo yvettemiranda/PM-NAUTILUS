@@ -17,6 +17,10 @@ class Side:
         for p, qty in incoming.items():
             if not 0 < p < 1_000_000 or qty < 0:
                 raise ValueError("非法盘口数值")
+            if self.external.get(p, 0) != qty:
+                # Private cache state is deliberately not a dataclass field:
+                # persisted books retain only external/consumed quantities.
+                self._content_version = None
             # A reduction removes available public depth first. Consumed shadow size
             # remains up to new public size; later growth releases only the new size.
             consumed = min(self.consumed.get(p, 0), qty)
@@ -31,7 +35,11 @@ class Side:
 
     @property
     def version(self):
-        return sha256(repr(sorted(self.external.items())).encode()).hexdigest()
+        version = getattr(self, "_content_version", None)
+        if version is None:
+            version = sha256(repr(sorted(self.external.items())).encode()).hexdigest()
+            self._content_version = version
+        return version
 
     def available(self):
         return [

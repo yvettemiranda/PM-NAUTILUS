@@ -6,7 +6,13 @@ from functools import lru_cache
 from typing import Literal
 
 from .config import SCALE, Preferences
-from .order_terms import SUPPORTED_CLOB_TICKS, normalize_sell, OrderTermsError, sell_minimum
+from .order_terms import (
+    SUPPORTED_CLOB_TICKS,
+    normalize_sell,
+    OrderTermsError,
+    sell_minimum,
+    canonical_buy_taker,
+)
 
 Level = tuple[int, int]
 
@@ -93,17 +99,10 @@ def signed_buy_notional(budget: int, fees: Fees, tick: int, limit: int) -> int:
     if budget <= 0:
         return 0
     ratio = _worst_buy_fee_ratio(fees, tick, limit)
-    cents = budget // 10_000
-    low, high = 0, cents
-    while low < high:
-        mid = (low + high + 1) // 2
-        notional = mid * 10_000
-        worst_fee = ceil_div(notional * ratio.numerator, ratio.denominator)
-        if notional + worst_fee <= budget:
-            low = mid
-        else:
-            high = mid - 1
-    return low * 10_000
+    # For integer notional/budget, n + ceil(n * ratio) <= budget is exactly
+    # n * (denominator + numerator) <= budget * denominator.
+    cents = budget * ratio.denominator // (10_000 * (ratio.denominator + ratio.numerator))
+    return cents * 10_000
 
 
 @dataclass(frozen=True)
@@ -154,7 +153,7 @@ def static_reason(t: Token, c: Preferences, now: int, official_tags: set[str]) -
         return "PROGRESS_BELOW_ZERO"
     if now >= t.ends_ns:
         return "CLOSED"
-    if t.progress(now) > c.maxMarketProgressPercent:
+    if (now - t.opened_ns) * 100 > c.maxMarketProgressPercent * duration:
         return "PROGRESS_ABOVE_MAX"
     return None
 
@@ -171,11 +170,11 @@ def quote_reason(t: Token, c: Preferences, bids: list[Level], asks: list[Level],
         return "ASK_ABOVE_MAX"
     if bid * 100 < ask * c.minBidAskRatioPercent:
         return "BID_ASK_RATIO"
-    if t.tick <= 0 or any(p % t.tick for p, q in bids + asks if q):
+    if t.tick not in SUPPORTED_CLOB_TICKS or any(p % t.tick for p, q in bids + asks if q):
         return "TICK_SIZE"
     if t.min_size <= 0:
         return "MIN_ORDER_SIZE"
-    if affordable(budget, ask) < t.min_size:
+    if canonical_buy_taker(budget, ask, t.tick) < t.min_size:
         return "ORDER_BUDGET"
     return None
 
@@ -203,18 +202,21 @@ def plan_buy(
     if quote_budget is None:
         quote_budget = signed_buy_notional(budget, fees, tick, limit)
     levels = sorted((p, q) for p, q in asks if 0 < p <= limit and q > 0)
-    if not levels or affordable(quote_budget, levels[0][0]) < minimum:
+    if not levels or canonical_buy_taker(quote_budget, levels[0][0], tick) < minimum:
         return []
     fills = []
     for p, depth in levels:
-        q = min(depth, affordable(quote_budget, p))
-        lo, hi = 0, q
-        while lo < hi:
-            candidate = (lo + hi + 1) // 2
-            if cost(p, candidate) + fees.fee(candidate, p) <= budget:
-                lo = candidate
-            else:
-                hi = candidate - 1
+        q = min(depth, canonical_buy_taker(quote_budget, p, tick))
+        if cost(p, q) + fees.fee(q, p) <= budget:
+            lo = q
+        else:
+            lo, hi = 0, q
+            while lo < hi:
+                candidate = (lo + hi + 1) // 2
+                if cost(p, candidate) + fees.fee(candidate, p) <= budget:
+                    lo = candidate
+                else:
+                    hi = candidate - 1
         q = lo
         amount = cost(p, q)
         fee = fees.fee(q, p)
@@ -245,9 +247,18 @@ class SellBatch:
     fills: tuple[Fill, ...]
 
 
-def sell_batches(bids: list[Level], targets: list[Target], minimum: int, fees: Fees, tick=None):
+def sell_batches(
+    bids: list[Level],
+    targets: list[Target],
+    minimum: int,
+    fees: Fees,
+    tick=None,
+    *,
+    first_only=False,
+):
     """Stable grouping and shared depth, used by previews and submitted sell batches."""
     depth = dict(bids)
+    ordered_prices = sorted(depth, reverse=True)
     batches = []
     grouped: list[Target] = []
     quantity = 0
@@ -269,8 +280,10 @@ def sell_batches(bids: list[Level], targets: list[Target], minimum: int, fees: F
             executable, limit = terms.quantity, terms.limit
         remain = executable
         fills = []
-        for p in sorted(depth, reverse=True):
-            if p < limit or not 0 < p < SCALE:
+        for p in ordered_prices:
+            if p < limit:
+                break
+            if not 0 < p < SCALE:
                 continue
             q = min(remain, depth[p])
             if q <= 0:
@@ -283,6 +296,8 @@ def sell_batches(bids: list[Level], targets: list[Target], minimum: int, fees: F
                 break
         if fills:
             batches.append(SellBatch(tuple(grouped), limit, executable, tuple(fills)))
+            if first_only:
+                return batches
         grouped, quantity = [], 0
     return batches
 
@@ -342,7 +357,7 @@ def preview(
     fills = plan_buy(asks, available, signed_limit, t.min_size, t.fees, t.tick, c, quote_budget)
     if not fills:
         return None
-    if affordable(quote_budget, signed_limit) < t.min_size:
+    if canonical_buy_taker(quote_budget, signed_limit, t.tick) < t.min_size:
         return None
     targets = [Target(str(i), f.target, f.net, i) for i, f in enumerate(fills)]
     batches = sell_batches(bids, targets, t.min_size, t.fees, tick=t.tick)

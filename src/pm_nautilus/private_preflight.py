@@ -19,7 +19,7 @@ from .config import Preferences
 from .live import load_settings
 from .live_account_guard import audit_open_orders
 from .preflight import EXCHANGES, PublicRPC, inspect
-from .redemption import ADAPTERS, APPROVAL_KEY
+from .redemption import ADAPTERS, APPROVAL_KEY, approval_error_public
 
 
 def ledger_intents(data_dir):
@@ -132,9 +132,10 @@ def run_preflight(settings, expected_signer, expected_funder, data_dir):
     )
     approvals = public.get("ctfApprovals")
     if not isinstance(approvals, dict) or any(
-        type(approvals.get(target)) is not bool for target in ADAPTERS.values()
+        type(approvals.get(target)) is not bool for target in (*ADAPTERS.values(), *EXCHANGES)
     ):
-        raise ValueError("CTF redemption approval inspection is incomplete")
+        raise ValueError("CTF trading/redemption approval inspection is incomplete")
+    outcome_approved = all(approvals[target] for target in EXCHANGES)
     redemption_approved = all(approvals[target] for target in ADAPTERS.values())
     approval_settled = approval_state is None or approval_state["status"] == "COMPLETE"
     pending = approval_state.get("pending") if approval_state else None
@@ -151,6 +152,7 @@ def run_preflight(settings, expected_signer, expected_funder, data_dir):
         not isinstance(pending_hash, str) or not re.fullmatch(r"0x[0-9a-fA-F]{64}", pending_hash)
     ):
         raise ValueError("Redemption approval transaction identity is invalid")
+    approval_error = approval_error_public(approval_state)
     return {
         "scope": "PRIVATE_READ_ONLY_NO_ORDER_SIGNATURES_OR_WRITES",
         "signer": signer,
@@ -168,18 +170,22 @@ def run_preflight(settings, expected_signer, expected_funder, data_dir):
         "signerPOLWei": public["signerPOLWei"],
         "signerGasAvailable": gas_available,
         "collateralAllowancePresent": allowance,
+        "outcomeTokenApprovalPresent": outcome_approved,
         "redemptionApprovalComplete": redemption_approved and approval_settled,
         "redemptionApproval": {
             "status": approval_status,
             "standardApproved": approvals[ADAPTERS[False]],
             "negRiskApproved": approvals[ADAPTERS[True]],
             "pendingTxHash": pending_hash,
-            "networkError": False,
+            "networkError": approval_error["errorCode"]
+            in {"RPC_RESULT_UNKNOWN", "RPC_RECEIPT_UNAVAILABLE"},
+            **approval_error,
         },
         "canStartNewBuys": (
             open_orders.ok
             and funded
             and allowance
+            and outcome_approved
             and gas_available
             and redemption_approved
             and approval_settled

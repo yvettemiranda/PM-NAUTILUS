@@ -289,6 +289,7 @@ def test_missing_or_pending_redemption_approval_cannot_be_ready():
     [
         ("collateralBalanceSufficient", "pUSD 余额不足"),
         ("collateralAllowancePresent", "pUSD 交易授权额度不足"),
+        ("outcomeTokenApprovalPresent", "交易所卖出授权尚未完成"),
         ("signerGasAvailable", "Polygon POL 余额不足"),
     ],
 )
@@ -301,3 +302,74 @@ def test_unready_account_names_the_blocking_resource(field, message):
     account = next(item for item in result["checks"] if item["id"] == "account")
     assert account["status"] == "blocked"
     assert message in account["message"]
+
+
+def test_missing_approval_does_not_hide_other_confirmed_account_blockers():
+    result = check(
+        Client(Response({"blocked": True}), Response(page([]))),
+        private_check=lambda *_: {
+            **private_pass(SETTINGS, SIGNER, FUNDER, "/unused"),
+            "canStartNewBuys": False,
+            "redemptionApprovalComplete": False,
+            "collateralBalanceSufficient": False,
+            "collateralAllowancePresent": False,
+            "outcomeTokenApprovalPresent": False,
+            "signerGasAvailable": False,
+            "unknownOpenOrderCount": 1,
+            "redemptionApproval": {
+                "status": "MISSING",
+                "standardApproved": False,
+                "negRiskApproved": False,
+                "pendingTxHash": None,
+            },
+        },
+    )
+    account = next(item for item in result["checks"] if item["id"] == "account")
+    assert account["status"] == "blocked"
+    for message in (
+        "本程序以外的挂单",
+        "赎回适配器授权尚未确认",
+        "pUSD 余额不足",
+        "pUSD 交易授权额度不足",
+        "交易所卖出授权尚未完成",
+        "Polygon POL 余额不足",
+    ):
+        assert message in account["message"]
+    assert result["ready"] is False
+    assert statuses(result) == {"account": "blocked", "region": "blocked", "positions": "pass"}
+    assert SECRET not in json.dumps(result)
+
+
+@pytest.mark.parametrize("error_code", ["TX_FEE_REJECTED", "RPC_RESULT_UNKNOWN", SECRET])
+def test_readiness_preserves_only_safe_durable_approval_diagnostics(error_code):
+    tx_hash = "0x" + "ab" * 32
+    result = check(
+        Client(Response({"blocked": False}), Response(page([]))),
+        private_check=lambda *_: {
+            "canStartNewBuys": False,
+            "redemptionApprovalComplete": False,
+            "redemptionApproval": {
+                "status": "PENDING",
+                "standardApproved": False,
+                "negRiskApproved": False,
+                "pendingTxHash": tx_hash,
+                "errorCode": error_code,
+                "stage": "broadcast",
+                "errorMessage": SECRET,
+                "networkError": True,
+            },
+        },
+    )
+    approval = result["redemptionApproval"]
+    assert result["ready"] is False
+    assert SECRET not in json.dumps(result)
+    if error_code == SECRET:
+        assert statuses(result)["account"] == "unknown"
+        assert approval["status"] == "UNKNOWN"
+    else:
+        assert statuses(result)["account"] == "blocked"
+        assert approval["status"] == "PENDING"
+        assert approval["pendingTxHash"] == tx_hash
+        assert approval["errorCode"] == error_code
+        assert approval["stage"] == "broadcast"
+        assert approval["networkError"] is (error_code == "RPC_RESULT_UNKNOWN")

@@ -8,11 +8,13 @@ from unittest.mock import Mock
 
 import pytest
 from web3 import Web3
+from web3.exceptions import Web3RPCError
 
 from pm_nautilus.redemption import (
     ADAPTERS,
     APPROVAL_KEY,
     CTF,
+    EXCHANGES,
     PUSD,
     PolygonWallet,
     RedemptionApprovalService,
@@ -228,6 +230,198 @@ def test_signed_approval_transaction_uses_eoa_or_single_owner_safe(signature_typ
     assert prepared["operation"] == "APPROVE"
 
 
+@pytest.mark.parametrize("estimate_error", [ValueError, Web3RPCError])
+def test_insufficient_pol_during_gas_estimation_is_safe_and_never_signed(estimate_error):
+    wallet = PolygonWallet.__new__(PolygonWallet)
+    wallet.signature_type = 0
+    wallet.funder = SIGNER
+    wallet.signer = SimpleNamespace(address=SIGNER, sign_transaction=Mock())
+    wallet.w3 = SimpleNamespace(
+        eth=SimpleNamespace(
+            get_transaction_count=Mock(return_value=7),
+            gas_price=100,
+            get_balance=Mock(return_value=1),
+            estimate_gas=Mock(side_effect=estimate_error("insufficient funds: private-rpc-marker")),
+        )
+    )
+    with pytest.raises(RedemptionCheckError, match="POL") as raised:
+        wallet._sign_contract_call(CTF, "0x1234", "APPROVE")
+    assert raised.value.code == "INSUFFICIENT_POL"
+    assert "private-rpc-marker" not in str(raised.value)
+    wallet.signer.sign_transaction.assert_not_called()
+
+
+def test_zero_pol_is_checked_before_estimation_or_signing():
+    wallet = PolygonWallet.__new__(PolygonWallet)
+    wallet.signature_type = 0
+    wallet.funder = SIGNER
+    wallet.signer = SimpleNamespace(address=SIGNER, sign_transaction=Mock())
+    wallet.w3 = SimpleNamespace(
+        eth=SimpleNamespace(
+            get_transaction_count=Mock(return_value=7),
+            gas_price=100,
+            get_balance=Mock(return_value=0),
+            estimate_gas=Mock(),
+        )
+    )
+    with pytest.raises(RedemptionCheckError, match="POL"):
+        wallet._sign_contract_call(CTF, "0x1234", "APPROVE")
+    wallet.w3.eth.estimate_gas.assert_not_called()
+    wallet.signer.sign_transaction.assert_not_called()
+
+
+@pytest.mark.parametrize("error_type", [ValueError, Web3RPCError])
+@pytest.mark.parametrize("message", ["already known", "known transaction"])
+def test_pinned_web3_known_transaction_is_an_idempotent_broadcast(error_type, message):
+    wallet = PolygonWallet.__new__(PolygonWallet)
+    wallet.w3 = SimpleNamespace(
+        eth=SimpleNamespace(send_raw_transaction=Mock(side_effect=error_type(message)))
+    )
+    wallet.broadcast({"raw_tx": "0x0102", "tx_hash": "0x" + "00" * 32})
+    wallet.w3.eth.send_raw_transaction.assert_called_once_with("0x0102")
+
+
+def test_unknown_transaction_is_not_mistaken_for_known_transaction():
+    wallet = PolygonWallet.__new__(PolygonWallet)
+    wallet.w3 = SimpleNamespace(
+        eth=SimpleNamespace(
+            send_raw_transaction=Mock(side_effect=Web3RPCError("unknown transaction"))
+        )
+    )
+    with pytest.raises(Web3RPCError):
+        wallet.broadcast({"raw_tx": "0x0102", "tx_hash": "0x" + "00" * 32})
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (Web3RPCError("insufficient funds: private-rpc-marker"), "INSUFFICIENT_POL"),
+        (Web3RPCError("execution reverted: private-rpc-marker"), "TRANSACTION_REVERTED"),
+        (
+            Web3RPCError("execution reverted: insufficient funds in contract"),
+            "TRANSACTION_REVERTED",
+        ),
+        (TimeoutError("private-rpc-marker"), "PREPARATION_FAILED"),
+    ],
+)
+def test_preparation_failure_is_durable_safe_and_retryable_without_pending(tmp_path, error, code):
+    path = ledger(tmp_path)
+    wallet = ControlledWallet()
+    prepare = wallet.prepare_approval
+    wallet.prepare_approval = Mock(side_effect=error)
+    failed = RedemptionApprovalService(wallet, path).start()
+    assert failed["status"] == "FAILED" and failed["pendingTxHash"] is None
+    assert failed["errorCode"] == code and failed["stage"] == "prepare"
+    assert failed["networkError"] is False
+    assert not wallet.prepared and not wallet.broadcasts
+    record = saved(path)
+    assert record["status"] == "FAILED" and record["pending"] is None
+    assert "private-rpc-marker" not in json.dumps(record)
+    resumed = RedemptionApprovalService(wallet, path)
+    assert resumed.status()["errorCode"] == code
+    wallet.prepare_approval = prepare
+    pending = resumed.start()
+    assert pending["status"] == "PENDING" and pending["errorCode"] is None
+    assert len(wallet.prepared) == 1 and len(wallet.broadcasts) == 1
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "network_error"),
+    [
+        (Web3RPCError("transaction underpriced: private-rpc-marker"), "TX_FEE_REJECTED", False),
+        (ValueError("nonce too low: private-rpc-marker"), "TX_NONCE_REJECTED", False),
+        (Web3RPCError("insufficient funds: private-rpc-marker"), "INSUFFICIENT_POL", False),
+        (Web3RPCError("invalid sender: private-rpc-marker"), "RPC_REJECTED", False),
+        (TimeoutError("private-rpc-marker"), "RPC_RESULT_UNKNOWN", True),
+    ],
+)
+def test_rejected_or_unknown_submission_preserves_exact_pending_and_nonce(
+    tmp_path, error, code, network_error
+):
+    path = ledger(tmp_path)
+    wallet = ControlledWallet()
+    wallet.broadcast = Mock(side_effect=error)
+    first = RedemptionApprovalService(wallet, path).start()
+    assert first["status"] == "PENDING" and first["errorCode"] == code
+    assert first["networkError"] is network_error and first["stage"] == "broadcast"
+    original = saved(path)["pending"]
+    assert "private-rpc-marker" not in json.dumps(saved(path))
+    restarted = RedemptionApprovalService(wallet, path)
+    assert restarted.status()["errorCode"] == code
+    second = restarted.start()
+    assert second["pendingTxHash"] == first["pendingTxHash"]
+    assert saved(path)["pending"] == original and wallet.prepared == [False]
+    assert wallet.broadcast.call_args_list[0].args[0] == wallet.broadcast.call_args_list[1].args[0]
+    wallet.broadcast.side_effect = None
+    recovered = restarted.start()
+    assert recovered["errorCode"] is None and recovered["networkError"] is False
+    assert saved(path)["pending"] == original and wallet.prepared == [False]
+
+
+def test_receipt_rpc_failure_retains_pending_and_durable_safe_diagnostic(tmp_path):
+    path = ledger(tmp_path)
+    wallet = ControlledWallet()
+    service = RedemptionApprovalService(wallet, path)
+    service.start()
+    original = saved(path)["pending"]
+    wallet.receipt = Mock(side_effect=TimeoutError("private-rpc-marker"))
+    result = service.advance()
+    assert result["errorCode"] == "RPC_RECEIPT_UNAVAILABLE" and result["stage"] == "receipt"
+    assert result["networkError"] is True and saved(path)["pending"] == original
+    assert wallet.prepared == [False] and len(wallet.broadcasts) == 1
+    assert "private-rpc-marker" not in json.dumps(saved(path))
+
+
+def test_status_uses_fixed_message_instead_of_stored_free_form_text(tmp_path):
+    path = ledger(tmp_path)
+    wallet = ControlledWallet()
+    service = RedemptionApprovalService(wallet, path)
+    service.start()
+    record = saved(path)
+    record.update(errorCode="TX_FEE_REJECTED", stage="broadcast", errorMessage="private-rpc-marker")
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE meta SET value=? WHERE key=?", (json.dumps(record), APPROVAL_KEY))
+    result = service.status()
+    assert result["errorCode"] == "TX_FEE_REJECTED"
+    assert "private-rpc-marker" not in json.dumps(result)
+
+
+def test_legacy_active_without_pending_can_record_pol_failure_and_retry(tmp_path):
+    path = ledger(tmp_path)
+    wallet = ControlledWallet()
+    service = RedemptionApprovalService(wallet, path)
+    legacy = {
+        "version": 1,
+        "status": "ACTIVE",
+        "identity": service._identity(),
+        "remaining": [False, True],
+        "pending": None,
+    }
+    with sqlite3.connect(path) as db:
+        db.execute("INSERT INTO meta VALUES (?,?)", (APPROVAL_KEY, json.dumps(legacy)))
+        generation = db.execute("SELECT value FROM meta WHERE key='generation'").fetchone()[0]
+        preferences = db.execute("SELECT value FROM meta WHERE key='preferences'").fetchone()[0]
+    prepare = wallet.prepare_approval
+    wallet.prepare_approval = Mock(
+        side_effect=RedemptionCheckError("POL不足", code="INSUFFICIENT_POL")
+    )
+    failed = service.start()
+    assert failed["status"] == "FAILED" and failed["errorCode"] == "INSUFFICIENT_POL"
+    assert saved(path)["pending"] is None and not wallet.broadcasts
+    wallet.prepare_approval = prepare
+    assert RedemptionApprovalService(wallet, path).start()["status"] == "PENDING"
+    assert wallet.prepared == [False] and len(wallet.broadcasts) == 1
+    with sqlite3.connect(path) as db:
+        assert (
+            db.execute("SELECT value FROM meta WHERE key='generation'").fetchone()[0] == generation
+        )
+        assert (
+            db.execute("SELECT value FROM meta WHERE key='preferences'").fetchone()[0]
+            == preferences
+        )
+        assert db.execute("SELECT count(*) FROM native_events").fetchone()[0] == 0
+
+
 def test_safe_ownership_requires_exactly_one_owner():
     wallet = PolygonWallet.__new__(PolygonWallet)
     wallet.funder = FUNDER
@@ -306,9 +500,11 @@ def test_approval_and_outcome_balances_are_fresh_parallel_reads_that_fail_closed
     wallet = PolygonWallet.__new__(PolygonWallet)
     wallet.funder = FUNDER
     wallet.preflight = Mock()
-    approval_barrier = Barrier(2)
+    approval_barrier = Barrier(4)
     balance_barrier = Barrier(2)
-    approval_values = {Web3.to_checksum_address(address): True for address in ADAPTERS.values()}
+    approval_values = {
+        Web3.to_checksum_address(address): True for address in (*ADAPTERS.values(), *EXCHANGES)
+    }
 
     def approval(operator):
         approval_barrier.wait(timeout=3)
@@ -340,3 +536,30 @@ def test_approval_and_outcome_balances_are_fresh_parallel_reads_that_fail_closed
     balances.pop(2)
     with pytest.raises(KeyError):
         wallet.token_balances(("1", "2"))
+
+
+@pytest.mark.parametrize("missing_exchange", EXCHANGES)
+def test_buy_preflight_rejects_missing_exchange_sell_approval_in_one_parallel_batch(
+    missing_exchange,
+):
+    wallet = PolygonWallet.__new__(PolygonWallet)
+    wallet.funder = FUNDER
+    wallet.preflight = Mock()
+    operators = []
+    wallet.ctf = SimpleNamespace(
+        functions=SimpleNamespace(
+            isApprovedForAll=lambda funder, operator: SimpleNamespace(
+                call=lambda: operator.lower() != missing_exchange.lower()
+            )
+        )
+    )
+
+    def batch(calls):
+        operators.append(len(calls))
+        return [call() for call in calls]
+
+    wallet._parallel_reads = batch
+    with pytest.raises(RedemptionCheckError, match="交易所卖出份额授权"):
+        wallet.buy_preflight()
+    wallet.preflight.assert_called_once()
+    assert operators == [4]

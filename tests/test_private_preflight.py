@@ -48,8 +48,9 @@ def test_collateral_response_requires_balance_and_allowance():
 
 
 @pytest.mark.parametrize("open_order,ready", [("own-venue", True), ("old-manual", False)])
+@pytest.mark.parametrize("missing_sell_approval", [None, *EXCHANGES])
 def test_private_preflight_only_uses_read_calls_and_checks_full_wallet(
-    tmp_path, monkeypatch, open_order, ready
+    tmp_path, monkeypatch, open_order, ready, missing_sell_approval
 ):
     store = Store(tmp_path / "LIVE" / "state.sqlite", mode="LIVE")
     store.save_intent(
@@ -86,13 +87,17 @@ def test_private_preflight_only_uses_read_calls_and_checks_full_wallet(
             "pusdBalanceMicros": 2_000_000,
             "signerPOLWei": 1,
             "exchangeAllowancesMicros": {address: 1_000_000 for address in EXCHANGES},
-            "ctfApprovals": {target: True for target in ADAPTERS.values()},
+            "ctfApprovals": {
+                target: target != missing_sell_approval
+                for target in (*ADAPTERS.values(), *EXCHANGES)
+            },
         }
 
     monkeypatch.setattr(check, "ClobClient", ControlledClob)
     monkeypatch.setattr(check, "inspect", public)
     result = check.run_preflight(SETTINGS, SIGNER, FUNDER, tmp_path)
-    assert result["canStartNewBuys"] is ready
+    assert result["canStartNewBuys"] is (ready and missing_sell_approval is None)
+    assert result["outcomeTokenApprovalPresent"] is (missing_sell_approval is None)
     assert result["redemptionApprovalComplete"] is True
     assert result["redemptionApproval"]["status"] == "APPROVED"
     assert result["unknownOpenOrderCount"] == (not ready)
@@ -107,9 +112,20 @@ def test_preflight_rejects_wrong_signer_before_network(tmp_path, monkeypatch):
         check.run_preflight(SETTINGS, FUNDER, FUNDER, tmp_path)
 
 
-@pytest.mark.parametrize("approval_status", [None, "ACTIVE", "FAILED", "COMPLETE"])
+@pytest.mark.parametrize(
+    "approval_status,error_code",
+    [
+        (None, None),
+        ("ACTIVE", None),
+        ("FAILED", None),
+        ("COMPLETE", None),
+        ("FAILED", "INSUFFICIENT_POL"),
+        ("ACTIVE", "TX_FEE_REJECTED"),
+        ("ACTIVE", "RPC_RESULT_UNKNOWN"),
+    ],
+)
 def test_missing_adapter_or_unconfirmed_authorization_blocks_new_buys(
-    tmp_path, monkeypatch, approval_status
+    tmp_path, monkeypatch, approval_status, error_code
 ):
     store = Store(tmp_path / "LIVE" / "state.sqlite", mode="LIVE")
     if approval_status is not None:
@@ -125,6 +141,15 @@ def test_missing_adapter_or_unconfirmed_authorization_blocks_new_buys(
                 },
                 "remaining": [],
                 "pending": None,
+                **(
+                    {
+                        "errorCode": error_code,
+                        "stage": "prepare" if approval_status == "FAILED" else "broadcast",
+                        "errorMessage": "provider-secret-must-not-appear",
+                    }
+                    if error_code
+                    else {}
+                ),
             },
         )
     store.close()
@@ -149,13 +174,18 @@ def test_missing_adapter_or_unconfirmed_authorization_blocks_new_buys(
             "pusdBalanceMicros": 2_000_000,
             "signerPOLWei": 1,
             "exchangeAllowancesMicros": {address: 1_000_000 for address in EXCHANGES},
-            "ctfApprovals": {target: approval_status is not None for target in ADAPTERS.values()},
+            "ctfApprovals": {
+                target: approval_status is not None for target in (*ADAPTERS.values(), *EXCHANGES)
+            },
         },
     )
     result = check.run_preflight(SETTINGS, SIGNER, FUNDER, tmp_path)
     ready = approval_status == "COMPLETE"
     assert result["redemptionApprovalComplete"] is ready
     assert result["canStartNewBuys"] is ready
+    assert result["redemptionApproval"]["errorCode"] == error_code
+    assert result["redemptionApproval"]["networkError"] is (error_code == "RPC_RESULT_UNKNOWN")
+    assert "provider-secret-must-not-appear" not in json.dumps(result)
     assert (
         result["redemptionApproval"]["status"]
         == {
@@ -211,7 +241,7 @@ def test_private_preflight_requires_saved_order_amount_on_both_exchange_paths(
             "pusdBalanceMicros": onchain_balance,
             "signerPOLWei": 1,
             "exchangeAllowancesMicros": dict(zip(EXCHANGES, onchain_allowances, strict=True)),
-            "ctfApprovals": {target: True for target in ADAPTERS.values()},
+            "ctfApprovals": {target: True for target in (*ADAPTERS.values(), *EXCHANGES)},
         },
     )
     result = check.run_preflight(SETTINGS, SIGNER, FUNDER, tmp_path)

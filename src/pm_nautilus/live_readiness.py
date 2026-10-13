@@ -14,6 +14,7 @@ import httpx
 from web3 import Web3
 
 from .private_preflight import run_preflight
+from .redemption import RedemptionCheckError, approval_error_public
 
 
 GEOBLOCK_URL = "https://polymarket.com/api/geoblock"
@@ -67,26 +68,35 @@ def _private_check(settings, signer, funder, data_dir, preflight):
         )
     ):
         return _check("account", "unknown", "赎回授权核对结果不完整。"), _unknown_approval()
+    try:
+        approval_error = approval_error_public(approval)
+    except RedemptionCheckError:
+        return _check("account", "unknown", "赎回授权故障记录无效。"), _unknown_approval()
     approval = {
         "status": approval["status"],
         "standardApproved": approval["standardApproved"],
         "negRiskApproved": approval["negRiskApproved"],
         "pendingTxHash": approval.get("pendingTxHash"),
-        "networkError": False,
+        "networkError": approval_error["errorCode"]
+        in {"RPC_RESULT_UNKNOWN", "RPC_RECEIPT_UNAVAILABLE"},
+        **approval_error,
     }
     if not result["canStartNewBuys"]:
+        blockers = []
         if type(result.get("unknownOpenOrderCount")) is int and result["unknownOpenOrderCount"] > 0:
-            return _check("account", "blocked", "账户存在本程序以外的挂单，请先核对。"), approval
+            blockers.append("账户存在本程序以外的挂单，请先核对。")
         if result.get("redemptionApprovalComplete") is False:
-            return _check("account", "blocked", "赎回适配器授权尚未确认。"), approval
+            blockers.append("赎回适配器授权尚未确认。")
         if result.get("collateralBalanceSufficient") is False:
-            return _check("account", "blocked", "pUSD 余额不足以覆盖已保存的每轮金额。"), approval
+            blockers.append("pUSD 余额不足以覆盖已保存的每轮金额。")
         if result.get("collateralAllowancePresent") is False:
-            return _check(
-                "account", "blocked", "pUSD 交易授权额度不足以覆盖已保存的每轮金额。"
-            ), approval
+            blockers.append("pUSD 交易授权额度不足以覆盖已保存的每轮金额。")
+        if result.get("outcomeTokenApprovalPresent") is False:
+            blockers.append("份额代币的交易所卖出授权尚未完成。")
         if result.get("signerGasAvailable") is False:
-            return _check("account", "blocked", "签名钱包的 Polygon POL 余额不足。"), approval
+            blockers.append("签名钱包的 Polygon POL 余额不足。")
+        if blockers:
+            return _check("account", "blocked", " ".join(blockers)), approval
         return _check(
             "account", "blocked", "账户资金、授权或手续费余额尚未满足实盘要求。"
         ), approval

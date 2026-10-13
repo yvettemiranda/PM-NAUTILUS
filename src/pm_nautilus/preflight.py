@@ -10,12 +10,7 @@ import httpx
 from eth_abi import decode, encode
 from web3 import Web3
 
-from .redemption import ADAPTERS, CTF, PUSD
-
-EXCHANGES = (
-    "0xE111180000d2663C0091e4f400237545B87B996B",
-    "0xe2222d279d744050d28e00520010520000310F59",
-)
+from .redemption import ADAPTERS, CTF, EXCHANGES, PUSD
 
 
 class PublicRPC:

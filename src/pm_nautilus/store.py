@@ -318,12 +318,16 @@ class Store:
             "SELECT seq FROM native_events WHERE event_id=?", (event_id,)
         ).fetchone()[0]
 
-    def events(self, after=0):
+    def events(self, after=0, until=None):
+        query = "SELECT seq,payload FROM native_events WHERE seq>?"
+        parameters = (after,)
+        if until is not None:
+            query += " AND seq<=?"
+            parameters += (until,)
+        query += " ORDER BY seq"
         return [
             (r["seq"], self.serializer.deserialize(r["payload"]))
-            for r in self.db.execute(
-                "SELECT seq,payload FROM native_events WHERE seq>? ORDER BY seq", (after,)
-            )
+            for r in self.db.execute(query, parameters)
         ]
 
     def order_fills(self, order_id):
@@ -392,6 +396,10 @@ class Store:
                 json.dumps(payload),
             ),
         )
+
+    def historical_token_ids(self):
+        """Read committed order ownership without decoding historical orders."""
+        return {row[0] for row in self.db.execute("SELECT DISTINCT token_id FROM intents")}
 
     def intents(self, active_only=False, event_id=None):
         clauses = []

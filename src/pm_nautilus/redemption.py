@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import closing
 from functools import partial
 from pathlib import Path
+from threading import Lock
 from web3 import Web3
 from web3.exceptions import TransactionNotFound
 
@@ -28,10 +29,111 @@ APPROVAL_KEY = "redemption_approval"
 ZERO = "0x" + "00" * 20
 # Stable workers let Web3's per-thread HTTP sessions reuse their connections.
 _RPC_READ_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pm-polygon-read")
+_ACCOUNT_LOCKS = {}
+_ACCOUNT_LOCKS_GUARD = Lock()
+RESOLUTION_CONCURRENCY = 4
 
 
 class RedemptionCheckError(ValueError):
     """A static, application-owned message that is safe to persist for the UI."""
+
+
+def _account_lock(path):
+    # The process lock excludes another application process. This mutex also
+    # covers authorization workers and owner-loop redemption preparations.
+    key = str(Path(path).resolve())
+    with _ACCOUNT_LOCKS_GUARD:
+        return _ACCOUNT_LOCKS.setdefault(key, Lock())
+
+
+def _nonce_key(wallet):
+    address = getattr(getattr(wallet, "signer", None), "address", None)
+    return f"polygon_nonce_floor:{address.lower()}" if isinstance(address, str) else None
+
+
+def _nonce(pending):
+    value = pending.get("nonce")
+    if type(value) is not int or value < 0:
+        raise RedemptionCheckError("链上交易 nonce 记录无效，须先核对原交易")
+    return value
+
+
+def _pending_owners(db):
+    """Existing durable raw transactions are the account's nonce ownership."""
+    row = db.execute("SELECT value FROM meta WHERE key='business'").fetchone()
+    business = json.loads(row[0]) if row else {}
+    if business.get("_storage_version") == 2:
+        claims = (
+            (key, json.loads(payload))
+            for key, payload in db.execute(
+                "SELECT key,payload FROM business_parts WHERE collection='claims'"
+            )
+        )
+    else:
+        claims = business.get("claims", {}).items()
+    owners = [(("CLAIM", key), value) for key, value in claims if value.get("state") == "SUBMITTED"]
+    row = db.execute("SELECT value FROM meta WHERE key=?", (APPROVAL_KEY,)).fetchone()
+    approval = json.loads(row[0]) if row else None
+    if approval is not None:
+        if not isinstance(approval, dict):
+            raise RedemptionCheckError("赎回授权记录无效，不能准备新交易")
+        if approval.get("status") == "ACTIVE":
+            owners.append((("APPROVAL", None), approval.get("pending")))
+    return owners
+
+
+def _check_account_owner(db, owner, *, preparing=False, pending=None):
+    others = [(key, value) for key, value in _pending_owners(db) if key != owner]
+    if preparing and others:
+        raise RedemptionCheckError("账户已有待确认链上交易，须先继续核对原交易")
+    if pending is not None:
+        nonce = _nonce(pending)
+        if any(value is None or _nonce(value) == nonce for _, value in others):
+            raise RedemptionCheckError("账户待确认交易 nonce 冲突，须先核对原交易")
+
+
+def _check_prepared_nonce(db, wallet, pending):
+    nonce = _nonce(pending)
+    key = _nonce_key(wallet)
+    row = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone() if key else None
+    if row is not None:
+        floor = json.loads(row[0])
+        if type(floor) is not int or floor < 0 or nonce <= floor:
+            raise RedemptionCheckError("RPC nonce 未超过本账户已确认交易，请稍后重新核对")
+
+
+def _consume_nonce(db, wallet, pending):
+    key = _nonce_key(wallet)
+    nonce = _nonce(pending)
+    if key is None:
+        return
+    row = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    previous = json.loads(row[0]) if row else -1
+    if type(previous) is not int:
+        raise RedemptionCheckError("本账户已确认 nonce 记录无效")
+    db.execute(
+        "INSERT INTO meta(key,value) VALUES(?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, json.dumps(max(previous, nonce))),
+    )
+
+
+async def _finish_rpc(operation, *, cleanup_cancelled_result=None):
+    """Join uninterruptible RPC workers before releasing lifecycle ownership."""
+    task = asyncio.create_task(operation)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not task.cancelled() and task.exception() is None and cleanup_cancelled_result:
+            cleanup_cancelled_result(task.result())
+        raise
 
 
 def abi(name, args, outputs=(), view=True):
@@ -337,7 +439,7 @@ class RedemptionApprovalService:
                     raise RedemptionCheckError("待确认赎回授权交易无效") from None
         return record
 
-    def _write(self, record):
+    def _write(self, record, *, consumed=None):
         payload = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
         try:
             with closing(
@@ -345,6 +447,8 @@ class RedemptionApprovalService:
             ) as db:
                 db.execute("PRAGMA synchronous=FULL")
                 with db:
+                    if consumed is not None:
+                        _consume_nonce(db, self.wallet, consumed)
                     db.execute(
                         "INSERT INTO meta(key,value) VALUES(?,?) "
                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -379,10 +483,24 @@ class RedemptionApprovalService:
 
     def start(self):
         """Only call after a separate explicit approval action for both operators."""
+        with _account_lock(self.ledger_path):
+            return self._start()
+
+    def _check_owner(self, *, preparing=False, pending=None):
+        with closing(
+            sqlite3.connect(self.ledger_path.resolve().as_uri() + "?mode=ro", uri=True)
+        ) as db:
+            db.execute("BEGIN")
+            _check_account_owner(db, ("APPROVAL", None), preparing=preparing, pending=pending)
+            if preparing and pending is not None:
+                _check_prepared_nonce(db, self.wallet, pending)
+
+    def _start(self):
         self.wallet.preflight()
         record = self._read()
         if record is not None and record["status"] == "ACTIVE":
-            return self.advance()
+            return self._advance()
+        self._check_owner(preparing=True)
         approvals = self.wallet.adapter_approvals()
         if all(approvals.values()) and (record is None or record["status"] != "ACTIVE"):
             record = {
@@ -402,10 +520,14 @@ class RedemptionApprovalService:
             "pending": None,
         }
         self._write(record)
-        return self.advance()
+        return self._advance()
 
     def advance(self):
         """Resume a previously authorized transaction without replacing its nonce."""
+        with _account_lock(self.ledger_path):
+            return self._advance()
+
+    def _advance(self):
         self.wallet.preflight()
         record = self._read()
         approvals = self.wallet.adapter_approvals()
@@ -418,6 +540,7 @@ class RedemptionApprovalService:
             except Exception:
                 return self._public(record, approvals, network_error=True)
             if result is None:
+                self._check_owner(pending=pending)
                 try:
                     self.wallet.broadcast(pending)
                 except Exception:
@@ -425,13 +548,13 @@ class RedemptionApprovalService:
                 return self._public(record, approvals)
             if result.get("status") == "FAILED":
                 record["status"] = "FAILED"
-                self._write(record)
+                self._write(record, consumed=pending)
                 return self._public(record, approvals)
             if result.get("status") != "APPROVED":
                 raise RedemptionCheckError("赎回授权回执无效")
             record["pending"] = None
             record["remaining"].pop(0)
-            self._write(record)
+            self._write(record, consumed=pending)
             approvals = self.wallet.adapter_approvals()
         while record["remaining"]:
             neg_risk = record["remaining"][0]
@@ -439,6 +562,7 @@ class RedemptionApprovalService:
                 record["remaining"].pop(0)
                 self._write(record)
                 continue
+            self._check_owner(preparing=True)
             prepared = self.wallet.prepare_approval(neg_risk)
             if prepared is None:
                 approvals = self.wallet.adapter_approvals()
@@ -446,6 +570,7 @@ class RedemptionApprovalService:
                     raise RedemptionCheckError("赎回授权查询结果不一致")
                 continue
             record["pending"] = prepared
+            self._check_owner(preparing=True, pending=prepared)
             self._write(record)
             try:
                 self.wallet.broadcast(prepared)
@@ -493,13 +618,21 @@ class RedemptionService:
             "generation": r.store.generation,
             "error": None,
         }
-        with r.store.transaction():
-            r.business["claims"][token.condition_id] = claim
-            r.business["settled"].append(token.condition_id)
-            r.business["targets"] = {
-                k: v for k, v in r.business["targets"].items() if v["event_id"] != token.event_id
-            }
-            r.store.put("business", r.business)
+        targets = r.business["targets"]
+        settled_length = len(r.business["settled"])
+        try:
+            with r.store.transaction():
+                r.business["claims"][token.condition_id] = claim
+                r.business["settled"].append(token.condition_id)
+                r.business["targets"] = {
+                    k: v for k, v in targets.items() if v["event_id"] != token.event_id
+                }
+                r.store.put("business", r.business)
+        except BaseException:
+            r.business["claims"].pop(token.condition_id, None)
+            del r.business["settled"][settled_length:]
+            r.business["targets"] = targets
+            raise
         r.refresh_eligibility()
 
     async def advance(self, claim):
@@ -508,33 +641,78 @@ class RedemptionService:
             return
         if r.mode == "TEST":
             if claim["state"] == "IDENTIFIED":
-                claim["state"] = "CONFIRMED"  # Separate observable step; no cash yet.
-                r.store.put("business", r.business)
+                # Separate observable step; no cash yet. Failed persistence
+                # must leave both projections in the original state.
+                self._save_claim(claim, dict(claim, state="CONFIRMED"))
                 return
             r.settlement_fill(claim)
             return
+        lock = _account_lock(r.store.path)
+        await _finish_rpc(
+            asyncio.to_thread(lock.acquire), cleanup_cancelled_result=lambda _: lock.release()
+        )
+        try:
+            await self._advance_live(claim)
+        finally:
+            lock.release()
+
+    def _save_claim(self, claim, change, *, consumed=None):
+        before = dict(claim)
+        try:
+            with self.r.store.transaction():
+                claim.clear()
+                claim.update(change)
+                if consumed is not None:
+                    _consume_nonce(self.r.store.db, self.wallet, consumed)
+                self.r.store.put("business", self.r.business)
+        except BaseException:
+            claim.clear()
+            claim.update(before)
+            raise
+
+    async def _advance_live(self, claim):
+        r = self.r
+        if claim["generation"] != r.store.generation or claim["state"] in {"CREDITED", "FAILED"}:
+            return
+        owner = ("CLAIM", claim["condition_id"])
         if claim["state"] in {"IDENTIFIED", "RETRY"}:
-            prepared = await asyncio.to_thread(self.wallet.prepare, claim)
-            claim.update(prepared, state="SUBMITTED", error=None)
-            r.store.put("business", r.business)  # Persist hash/raw/nonce BEFORE any RPC send.
+            if any(key != owner for key, _ in _pending_owners(r.store.db)):
+                return
+
+            def adopt(prepared):
+                _check_prepared_nonce(r.store.db, self.wallet, prepared)
+                self._save_claim(claim, dict(claim, **prepared, state="SUBMITTED", error=None))
+
+            prepared = await _finish_rpc(
+                asyncio.to_thread(self.wallet.prepare, dict(claim)), cleanup_cancelled_result=adopt
+            )
+            # Adoption runs on the owner loop, including cancellation after the
+            # worker signs. A failed save cannot be followed by a broadcast.
+            adopt(prepared)
         if claim["state"] == "SUBMITTED":
-            result = await asyncio.to_thread(self.wallet.receipt, claim)
+            result = await _finish_rpc(asyncio.to_thread(self.wallet.receipt, dict(claim)))
             if result is None:
-                await asyncio.to_thread(self.wallet.broadcast, claim)
+                _check_account_owner(r.store.db, owner, pending=claim)
+                await _finish_rpc(asyncio.to_thread(self.wallet.broadcast, dict(claim)))
                 return  # Same raw bytes only, even after a timeout/restart.
+            updated = dict(claim)
             if result["status"] == "APPROVED":
-                claim["approval_hash"] = claim.pop("tx_hash")
-                claim.pop("raw_tx", None)
-                claim["state"] = "IDENTIFIED"
+                updated["approval_hash"] = updated.pop("tx_hash")
+                updated.pop("raw_tx", None)
+                updated["state"] = "IDENTIFIED"
             elif result["status"] == "FAILED":
-                claim["state"] = "FAILED"
-                claim["error"] = "链上执行失败或权利未全部赎回；需要核对"
+                updated["state"] = "FAILED"
+                updated["error"] = "链上执行失败或权利未全部赎回；需要核对"
+            elif result["status"] != "CONFIRMED":
+                raise RedemptionCheckError("赎回交易回执无效")
             elif result["amount"] != claim["amount"]:
-                claim["state"] = "FAILED"
-                claim["error"] = "实际回款与自有应收不一致"
+                updated["state"] = "FAILED"
+                updated["error"] = "实际回款与自有应收不一致"
             else:
-                claim["state"] = "CONFIRMED"
-            r.store.put("business", r.business)
+                updated["state"] = "CONFIRMED"
+            # The receipt confirms consumption of the account nonce even when
+            # asset or amount checks correctly prevent ledger credit.
+            self._save_claim(claim, updated, consumed=dict(claim))
         if claim["state"] == "CONFIRMED":
             # Refresh the actual venue cash balance first. The settlement native
             # event closes own inventory; it never invents spendable LIVE cash.
@@ -551,17 +729,32 @@ class RedemptionService:
         self.busy = True
         try:
             r = self.r
-            for cycle in list(r.business["cycles"].values()):
-                t = r.tokens[cycle["token_id"]]
-                if t.condition_id in r.business["claims"]:
-                    continue
-                try:
-                    raw = await self.market.get(f"{GAMMA}/markets/{t.market_id}")
-                    payouts = resolution(raw, t)
-                    if payouts is not None:
-                        self.identify(t, payouts)
-                except Exception as exc:
-                    r.store.put("settlement_error", type(exc).__name__)
+            generation = r.store.generation
+            tokens = iter(
+                r.tokens[cycle["token_id"]]
+                for cycle in list(r.business["cycles"].values())
+                if r.tokens[cycle["token_id"]].condition_id not in r.business["claims"]
+            )
+
+            async def query_resolutions():
+                for token in tokens:
+                    try:
+                        raw = await self.market.get(f"{GAMMA}/markets/{token.market_id}")
+                        payouts = resolution(raw, token)
+                        if payouts is not None and r.store.generation == generation:
+                            self.identify(token, payouts)
+                    except Exception as exc:
+                        r.store.put("settlement_error", type(exc).__name__)
+
+            queries = [
+                asyncio.create_task(query_resolutions()) for _ in range(RESOLUTION_CONCURRENCY)
+            ]
+            try:
+                await asyncio.gather(*queries)
+            finally:
+                for task in queries:
+                    task.cancel()
+                await asyncio.gather(*queries, return_exceptions=True)
             for claim in list(r.business["claims"].values()):
                 if claim["state"] in {"CREDITED", "FAILED"}:
                     continue

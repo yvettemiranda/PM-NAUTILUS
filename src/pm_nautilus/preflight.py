@@ -3,6 +3,8 @@
 import argparse
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 import httpx
 from eth_abi import decode, encode
@@ -43,6 +45,14 @@ class PublicRPC:
         return decode(outputs, bytes.fromhex(result[2:]))[0]
 
 
+def _read_parallel(calls):
+    # Independent reads share one fixed block. Join all workers before returning
+    # or raising so the caller can safely close its HTTP client.
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="pm-preflight") as pool:
+        futures = [pool.submit(call) for call in calls]
+        return [future.result() for future in futures]
+
+
 def inspect(rpc, signer, funder, signature_type):
     signer, funder = map(Web3.to_checksum_address, (signer, funder))
     if type(signature_type) is not int or signature_type not in (0, 2):
@@ -50,16 +60,24 @@ def inspect(rpc, signer, funder, signature_type):
     if int(rpc.query("eth_chainId", []), 16) != 137:
         raise ValueError("RPC is not Polygon mainnet")
     rpc.block = rpc.query("eth_blockNumber", [])
+    addresses = list(dict.fromkeys([PUSD, CTF, *ADAPTERS.values(), *EXCHANGES, signer, funder]))
+    codes = dict(
+        zip(
+            addresses,
+            _read_parallel(
+                [partial(rpc.query, "eth_getCode", [address, rpc.block]) for address in addresses]
+            ),
+            strict=True,
+        )
+    )
     contracts = {
-        address: rpc.query("eth_getCode", [address, rpc.block]) != "0x"
-        for address in (PUSD, CTF, *ADAPTERS.values(), *EXCHANGES)
+        address: codes[address] != "0x" for address in (PUSD, CTF, *ADAPTERS.values(), *EXCHANGES)
     }
     if not all(contracts.values()):
         raise ValueError("A required contract has no deployed code")
-    signer_code = rpc.query("eth_getCode", [signer, rpc.block])
-    if signer_code != "0x":
+    if codes[signer] != "0x":
         raise ValueError("Signer has contract/delegation code; requires separate review")
-    funder_code = rpc.query("eth_getCode", [funder, rpc.block])
+    funder_code = codes[funder]
     if signature_type == 0:
         if signer != funder:
             raise ValueError("EOA signer and funder must match")
@@ -68,28 +86,45 @@ def inspect(rpc, signer, funder, signature_type):
     else:
         if funder_code == "0x":
             raise ValueError("Safe funder has no deployed code")
-        owners = rpc.call(funder, "getOwners()", outputs=("address[]",))
-        threshold = rpc.call(funder, "getThreshold()")
+        owners, threshold = _read_parallel(
+            [
+                partial(rpc.call, funder, "getOwners()", outputs=("address[]",)),
+                partial(rpc.call, funder, "getThreshold()"),
+            ]
+        )
         if threshold != 1 or len(owners) != 1 or owners[0].lower() != signer.lower():
             raise ValueError("Safe must have exactly this owner and threshold 1")
-    balance = rpc.call(PUSD, "balanceOf(address)", (funder,), ("address",))
-    gas = int(rpc.query("eth_getBalance", [signer, rpc.block]), 16)
-    allowances = {
-        spender: rpc.call(
-            PUSD, "allowance(address,address)", (funder, spender), ("address", "address")
-        )
-        for spender in EXCHANGES
-    }
-    approvals = {
-        spender: rpc.call(
-            CTF,
-            "isApprovedForAll(address,address)",
-            (funder, spender),
-            ("address", "address"),
-            ("bool",),
-        )
-        for spender in (*EXCHANGES, *ADAPTERS.values())
-    }
+    approval_spenders = (*EXCHANGES, *ADAPTERS.values())
+    facts = _read_parallel(
+        [
+            partial(rpc.call, PUSD, "balanceOf(address)", (funder,), ("address",)),
+            partial(rpc.query, "eth_getBalance", [signer, rpc.block]),
+            *[
+                partial(
+                    rpc.call,
+                    PUSD,
+                    "allowance(address,address)",
+                    (funder, spender),
+                    ("address", "address"),
+                )
+                for spender in EXCHANGES
+            ],
+            *[
+                partial(
+                    rpc.call,
+                    CTF,
+                    "isApprovedForAll(address,address)",
+                    (funder, spender),
+                    ("address", "address"),
+                    ("bool",),
+                )
+                for spender in approval_spenders
+            ],
+        ]
+    )
+    balance, gas = facts[0], int(facts[1], 16)
+    allowances = dict(zip(EXCHANGES, facts[2:4], strict=True))
+    approvals = dict(zip(approval_spenders, facts[4:], strict=True))
     if any(type(value) is not bool for value in approvals.values()):
         raise ValueError("Invalid CTF approval response")
     return {

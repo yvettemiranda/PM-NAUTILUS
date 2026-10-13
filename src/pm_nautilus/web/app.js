@@ -1,4 +1,4 @@
-import { displayStatus, curveSegments, modeSwitchDecision, walletOriginSecure, liveWalletAccountVerified, liveRunSummary, redemptionApprovalAction, panelVisible, setMarkupIfChanged } from "./ui-state.js?v=20261012-correctness1";
+import { displayStatus, curveSegments, modeSwitchDecision, walletOriginSecure, liveWalletAccountVerified, liveRunSummary, redemptionApprovalAction, panelVisible, setMarkupIfChanged } from "./ui-state.js?v=20261013-optimization1";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -8,6 +8,10 @@ const ui = {
   dashboardAt: 0,
   dashboardError: null,
   recordLimit: 20,
+  recordCursor: null,
+  recordHead: null,
+  recordGeneration: null,
+  recordRequest: 0,
   performance: null,
   performanceAt: 0,
   performanceLoading: false,
@@ -162,26 +166,24 @@ function formatCents(value) {
   return Number.isFinite(cents) ? `${cents.toFixed(2)}¢` : "—";
 }
 
+const quantityFormatter = new Intl.NumberFormat("zh-CN", {minimumFractionDigits: 2, maximumFractionDigits: 4});
+const countFormatter = new Intl.NumberFormat("zh-CN");
+const clockFormatter = new Intl.DateTimeFormat("zh-CN", {hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false});
+const dateFormatter = new Intl.DateTimeFormat("zh-CN", {month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false});
+const utcDayFormatter = new Intl.DateTimeFormat("zh-CN", {timeZone: "UTC", month: "2-digit", day: "2-digit"});
+
 function formatQuantity(value) {
   if (value === null || value === undefined || value === "") return "—";
   const quantity = Number(value);
   if (!Number.isFinite(quantity)) return "—";
-  return quantity.toLocaleString("zh-CN", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 4,
-  });
+  return quantityFormatter.format(quantity);
 }
 
 function formatClock(value) {
   if (value === null || value === undefined || value === "") return "—";
   const date = new Date(value);
   return Number.isFinite(date.getTime())
-    ? new Intl.DateTimeFormat("zh-CN", {
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        hour12: false,
-      }).format(date)
+    ? clockFormatter.format(date)
     : "—";
 }
 
@@ -189,19 +191,13 @@ function formatDate(value) {
   if (value === null || value === undefined || value === "") return "—";
   const date = new Date(value);
   return Number.isFinite(date.getTime())
-    ? new Intl.DateTimeFormat("zh-CN", {
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: false,
-      }).format(date)
+    ? dateFormatter.format(date)
     : "—";
 }
 
 function formatCount(value) {
   const count = Number(value);
-  return Number.isFinite(count) ? Math.max(0, count).toLocaleString("zh-CN") : "0";
+  return Number.isFinite(count) ? countFormatter.format(Math.max(0, count)) : "0";
 }
 
 function setMoneyValue(selector, value, signed = false) {
@@ -271,7 +267,7 @@ function renderPortfolio(portfolio, positions = []) {
   setMoneyValue("#realized-pnl", portfolio?.realizedPnl, true);
   setMoneyValue("#unrealized-pnl", portfolio?.unrealizedPnl, true);
   setMoneyValue("#position-value", portfolio?.positionValue);
-  const positionCount = currentPositions(positions).length;
+  const positionCount = ui.dashboard?.positionCount ?? currentPositions(positions).length;
   const count = $("#portfolio-position-count");
   count.textContent = liveAccountVisible() ? `${formatCount(positionCount)}单` : "—";
   count.dataset.tone = "neutral";
@@ -674,7 +670,7 @@ function renderRunControls() {
 }
 
 function renderPositions(positions = []) {
-  if (!ui.dashboard) {
+  if (!ui.dashboard || ["summary", "market"].includes(ui.dashboard.details)) {
     $("#tab-position-count").textContent = "—";
     $("#position-count").textContent = "读取中";
     $("#position-list-controls").hidden = true;
@@ -691,20 +687,21 @@ function renderPositions(positions = []) {
     return;
   }
   const current = currentPositions(positions);
-  if (current.length <= POSITION_PREVIEW_LIMIT) ui.positionsExpanded = false;
+  const totalCount = ui.dashboard?.positionCount ?? current.length;
+  if (totalCount <= POSITION_PREVIEW_LIMIT) ui.positionsExpanded = false;
   const visible = ui.positionsExpanded
     ? current
     : current.slice(0, POSITION_PREVIEW_LIMIT);
-  $("#tab-position-count").textContent = formatCount(current.length);
-  $("#position-count").textContent = `${formatCount(current.length)}单`;
+  $("#tab-position-count").textContent = formatCount(totalCount);
+  $("#position-count").textContent = `${formatCount(totalCount)}单`;
   const controls = $("#position-list-controls");
   const toggle = $("#toggle-positions");
-  controls.hidden = current.length <= POSITION_PREVIEW_LIMIT;
+  controls.hidden = totalCount <= POSITION_PREVIEW_LIMIT;
   $("#position-display-count").textContent =
-    `当前显示 ${formatCount(visible.length)} / ${formatCount(current.length)}`;
+    `当前显示 ${formatCount(visible.length)} / ${formatCount(totalCount)}`;
   toggle.textContent = ui.positionsExpanded
     ? "收起至前20个"
-    : `展开其余${formatCount(current.length - POSITION_PREVIEW_LIMIT)}个`;
+    : `展开其余${formatCount(totalCount - POSITION_PREVIEW_LIMIT)}个`;
   toggle.setAttribute("aria-expanded", String(ui.positionsExpanded));
   if (!panelVisible(ui.activeTab, "positions")) return;
   const openIds = new Set([...$("#positions").querySelectorAll("details[open]")].map(x => x.dataset.token));
@@ -852,28 +849,47 @@ function tradeRecordMarkup(record) {
   </article>`;
 }
 
-async function loadTradeRecords({ silent = false } = {}) {
+async function loadTradeRecords({ silent = false, more = false } = {}) {
   if (ui.tradeRecordsLoading) return;
   const mode = ui.displayMode;
   const version = ui.mutationVersion;
+  const request = ++ui.recordRequest;
   ui.tradeRecordsLoading = true;
   ui.tradeRecordsError = null;
   renderTradeRecords();
   try {
-    const response = await api(`/api/test/trade-records?limit=${ui.recordLimit}`);
-    if (mode !== ui.displayMode || version !== ui.mutationVersion) return;
-    ui.tradeRecords = Array.isArray(response.records) ? response.records : [];
+    const cursor = more ? ui.recordCursor : null;
+    const since = !more ? ui.recordHead : null;
+    const query = `limit=20&paged=true${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${since ? `&since=${encodeURIComponent(since)}` : ""}`;
+    const response = await api(`/api/test/trade-records?${query}`);
+    if (mode !== ui.displayMode || version !== ui.mutationVersion || request !== ui.recordRequest) return;
+    if (response.generation && ui.dashboard?.generation && response.generation !== ui.dashboard.generation) return;
+    const rows = Array.isArray(response.records) ? response.records : [];
+    if (ui.recordGeneration !== response.generation) {
+      ui.tradeRecords = []; ui.recordCursor = null; ui.recordHead = null;
+    }
+    const existing = new Map(ui.tradeRecords.map(row => [row.id, row]));
+    const firstSeq = ui.tradeRecords[0]?.firstSeq ?? Number.POSITIVE_INFINITY;
+    for (const row of response.changes ?? []) {
+      if (existing.has(row.id) || row.firstSeq > firstSeq) existing.set(row.id, row);
+    }
+    for (const row of rows) existing.set(row.id, row);
+    ui.tradeRecords = [...existing.values()].sort((a, b) => b.firstSeq - a.firstSeq);
+    ui.recordGeneration = response.generation;
+    if (more || !ui.recordCursor) ui.recordCursor = response.nextCursor ?? null;
+    if (!more) ui.recordHead = response.head ?? null;
     ui.tradeRecordTotalCount = Number(response.totalCount) || 0;
     ui.tradeRecordsLocked = response.locked === true;
     ui.tradeRecordsLoaded = true;
     ui.tradeRecordsLoadedAt = Date.now();
   } catch (error) {
-    if (mode !== ui.displayMode || version !== ui.mutationVersion) return;
+    if (mode !== ui.displayMode || version !== ui.mutationVersion || request !== ui.recordRequest) return;
     ui.tradeRecordsError = error.message;
+    if (error.message.includes("游标已失效")) { clearTradeRecordView(); renderTradeRecords(); renderStatus(); }
     if (!silent) showMessage(`交易记录加载失败：${error.message}`, true);
   } finally {
-    ui.tradeRecordsLoading = false;
-    if (mode === ui.displayMode && version === ui.mutationVersion) { renderTradeRecords(); renderStatus(); }
+    if (request === ui.recordRequest) ui.tradeRecordsLoading = false;
+    if (request === ui.recordRequest && mode === ui.displayMode && version === ui.mutationVersion) { renderTradeRecords(); renderStatus(); }
   }
 }
 
@@ -890,7 +906,7 @@ function formatCurrentSellPrice(position) {
 }
 
 function renderCandidates() {
-  if (!ui.dashboard || ui.dashboard.executionMode !== ui.displayMode) {
+  if (!ui.dashboard || ui.dashboard.executionMode !== ui.displayMode || ["summary", "positions"].includes(ui.dashboard.details)) {
     $("#candidate-count").textContent = "读取中";
     $("#display-count").textContent = "";
     $("#load-more").disabled = true;
@@ -1018,12 +1034,12 @@ function renderCategories(preferences) {
   const selectedIds = preferences.selectedCategoryIds ?? preferences.selectedCategories ?? [];
   const all = preferences.allCategories;
   $("#all-categories").checked = all;
-  $("#category-options").innerHTML = categories
+  setMarkupIfChanged($("#category-options"), categories
     .map((category) => `<label class="category-chip">
       <input type="checkbox" data-category-id="${escapeHtml(category.id)}" ${all || selectedIds.includes(category.id) ? "checked" : ""} />
       <span>${escapeHtml(categoryDisplayLabel(category))}</span>
     </label>`)
-    .join("");
+    .join(""));
   $("#category-note").textContent = categories.length
     ? all
       ? `已全选 ${categories.length} 个首页栏目 · 新栏目自动纳入`
@@ -1103,7 +1119,16 @@ function updateSortToggle(direction) {
   );
 }
 
+function clearTradeRecordView() {
+  ui.recordRequest += 1;
+  ui.recordHead = null; ui.recordCursor = null; ui.recordGeneration = null;
+  ui.tradeRecords = []; ui.tradeRecordTotalCount = 0; ui.tradeRecordsRendered = null;
+  ui.tradeRecordsLoaded = false; ui.tradeRecordsLoading = false; ui.tradeRecordsLoadedAt = 0;
+}
+
 function applyDashboard(dashboard) {
+  if ((ui.dashboard?.generation && ui.dashboard.generation !== dashboard.generation) ||
+      (ui.recordGeneration && ui.recordGeneration !== dashboard.generation)) clearTradeRecordView();
   ui.dashboard = dashboard;
   ui.dashboardAt = Date.now();
   ui.dashboardError = null;
@@ -1152,9 +1177,12 @@ async function loadDashboard({ silent = false } = {}) {
   }
   ui.loading = true;
   const mutationVersion = ui.mutationVersion;
+  const requestedTab = ui.activeTab;
   try {
-    const dashboard = await api(`/api/dashboard?limit=${ui.visibleCandidateCount}`);
-    if (mutationVersion === ui.mutationVersion) applyDashboard(dashboard);
+    const details = ui.activeTab === "records" ? "summary" : ui.activeTab;
+    const positions = ui.positionsExpanded ? "" : `&position_limit=${POSITION_PREVIEW_LIMIT}`;
+    const dashboard = await api(`/api/dashboard?limit=${ui.visibleCandidateCount}&details=${details}${positions}`);
+    if (mutationVersion === ui.mutationVersion && requestedTab === ui.activeTab) applyDashboard(dashboard);
   } catch (error) {
     if (mutationVersion !== ui.mutationVersion) return;
     ui.dashboardError = error.message; renderStatus(); renderRunControls();
@@ -1439,7 +1467,7 @@ $("#reset-test").addEventListener("click", async () => {
     recordMutation();
     ui.visibleCandidateCount = 20;
     ui.configDirty = false;
-    ui.performance = null; ui.performanceAt = 0; ui.recordLimit = 20;
+    ui.performance = null; ui.performanceAt = 0; ui.recordLimit = 20; ui.recordCursor = null; ui.recordHead = null; ui.recordGeneration = null;
     ui.tradeRecords = [];
     ui.tradeRecordTotalCount = 0;
     ui.tradeRecordsLoaded = false;
@@ -1470,11 +1498,12 @@ $("#mode-toggle").addEventListener("click", () => {
   ui.displayMode = decision.nextMode;
   ui.dashboard = null; ui.dashboardAt = 0; ui.dashboardError = null; ui.strategyStatus = "STOPPED"; ui.preferences = null;
   ui.events = []; ui.candidateCount = 0; ui.displayCandidateCount = 0; ui.staleCandidateCount = 0;
-  ui.performance = null; ui.performanceAt = 0; ui.performanceError = null; ui.recordLimit = 20;
+  ui.performance = null; ui.performanceAt = 0; ui.performanceError = null; ui.recordLimit = 20; ui.recordCursor = null; ui.recordHead = null; ui.recordGeneration = null;
   setConfigOpen(false);
   $("#initial-capital").value = "";
   $("#order-amount").value = "";
   $("#category-options").replaceChildren();
+  delete $("#category-options").dataset.markup;
   renderPortfolio(null); renderPositions([]); renderTradeRecords(); drawCurve(); renderStatus();
   renderCandidates(); $("#redemption-status").textContent = "";
   renderModeControl();
@@ -1520,6 +1549,7 @@ $("#sort-toggle").addEventListener("click", async () => {
 $("#toggle-positions").addEventListener("click", () => {
   ui.positionsExpanded = !ui.positionsExpanded;
   renderPositions(ui.dashboard?.positions ?? []);
+  void loadDashboard({silent: true});
 });
 
 $("#trade-records-toggle").addEventListener("click", () => {
@@ -1597,7 +1627,7 @@ function drawCurve() {
   }
   const selected=ui.chartIndex===null?valid.at(-1):valid[Math.min(valid.length-1,ui.chartIndex)];
   add("circle",{cx:x(selected.at),cy:y(Number(selected.pnl)),r:3,class:"curve-point"});
-  const utcDay=p=>new Intl.DateTimeFormat("zh-CN",{timeZone:"UTC",month:"2-digit",day:"2-digit"}).format(p.bucket*86400000);
+  const utcDay=p=>utcDayFormatter.format(p.bucket*86400000);
   if(ui.chartIndex!==null){add("line",{x1:x(selected.at),x2:x(selected.at),y1:top,y2:h-bottom,class:"curve-guide"});$("#curve-status").textContent=`${ui.curveGranularity==="D"?`${utcDay(selected)} UTC`:formatDate(selected.at)} · ${formatMoney(selected.pnl,true)}`;}
   const dateLabel=p=>ui.curveGranularity==="D"?utcDay(p):from===to?formatClock(p.at):new Date(from).toDateString()===new Date(to).toDateString()?formatClock(p.at).slice(0,5):formatDate(p.at);
   add("text",{x:left,y:h-3,"text-anchor":"start"},dateLabel(points[0]));if(to!==from)add("text",{x:w-right,y:h-3,"text-anchor":"end"},dateLabel(points.at(-1)));
@@ -1632,14 +1662,18 @@ for (const tab of document.querySelectorAll('.view-tabs [role="tab"]')) tab.addE
   if (panelVisible(ui.activeTab, "positions")) renderPositions(ui.dashboard?.positions ?? []);
   if (panelVisible(ui.activeTab, "market")) renderCandidates();
   if(ui.tradeRecordsExpanded)void loadTradeRecords();
+  void loadDashboard({silent: true});
 });
-$("#more-records").addEventListener("click",()=>{ui.recordLimit=Math.min(10000,ui.recordLimit+20);void loadTradeRecords();});
+$("#more-records").addEventListener("click",()=>{if(ui.recordCursor)void loadTradeRecords({more:true});});
 window.setInterval(renderStatus,1000);
 
 renderModeControl();
 renderRunControls();
 renderTradeRecords();
 void loadDashboard();
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) void loadDashboard({silent: true});
+});
 window.setInterval(() => {
-  void loadDashboard({ silent: true });
+  if (!document.hidden) void loadDashboard({ silent: true });
 }, 500);

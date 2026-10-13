@@ -7,6 +7,7 @@ public GET endpoints. A failed or incomplete check never means ``ready``.
 from decimal import Decimal, InvalidOperation
 from collections.abc import Collection, Mapping
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import httpx
@@ -264,18 +265,26 @@ def run_readiness(
     the ledger must equal the full paginated public wallet inventory.
     """
     preflight = private_check if private_check is not None else run_preflight
-    account, approval = _private_check(
-        settings, expected_signer, expected_funder, data_dir, preflight
-    )
+
+    def checks_with(client):
+        # No results survive this invocation. All workers are joined before the
+        # HTTP client is closed, and every original activation gate still runs.
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="pm-readiness") as pool:
+            account_future = pool.submit(
+                _private_check, settings, expected_signer, expected_funder, data_dir, preflight
+            )
+            region_future = pool.submit(_geoblock_check, client)
+            positions_future = pool.submit(
+                _positions_check, client, expected_funder, known_token_ids, known_positions
+            )
+            account, approval = account_future.result()
+            return account, approval, region_future.result(), positions_future.result()
+
     if http_client is None:
-        # Direct outbound requests from this host, no environment proxy and no
-        # redirect; the result must describe this server's real trade origin.
         with httpx.Client(timeout=10, follow_redirects=False, trust_env=False) as client:
-            region = _geoblock_check(client)
-            positions = _positions_check(client, expected_funder, known_token_ids, known_positions)
+            account, approval, region, positions = checks_with(client)
     else:
-        region = _geoblock_check(http_client)
-        positions = _positions_check(http_client, expected_funder, known_token_ids, known_positions)
+        account, approval, region, positions = checks_with(http_client)
     checks = [account, region, positions]
     return {
         "scope": "READ_ONLY_NO_ORDER_SIGNATURES_OR_WRITES",

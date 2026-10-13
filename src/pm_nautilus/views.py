@@ -2,6 +2,8 @@
 
 from datetime import datetime, timezone
 import asyncio
+import sqlite3
+from contextlib import closing
 from collections import deque
 from itertools import islice
 from nautilus_trader.model.enums import OrderSide
@@ -45,19 +47,18 @@ def token_view(r, t):
     }
 
 
-def portfolio_view(r):
+def portfolio_view(r, position_limit=None):
     positions = []
     values = []
     costs = 0
+    settled = set(r.business["settled"])
     targets_by_event = {}
-    for target in r.business["targets"].values():
+    for target in r.business["targets"].values() if position_limit != 0 else ():
         targets_by_event.setdefault(target["event_id"], set()).add(target["price"])
     for eid, c in r.business["cycles"].items():
-        if c["quantity"] <= 0 or r.tokens[c["token_id"]].condition_id in r.business["settled"]:
+        if c["quantity"] <= 0 or r.tokens[c["token_id"]].condition_id in settled:
             continue
         t = r.tokens[c["token_id"]]
-        v = token_view(r, t)
-        stop = StopLoss(**c["stop"])
         book = r.books[t.token_id]
         value = None
         sellable = None
@@ -76,27 +77,30 @@ def portfolio_view(r):
                 if remaining == 0:
                     break
             sellable = c["quantity"] - remaining
-        targets = sorted(targets_by_event.get(eid, ()))
-        v.update(
-            quantity=units(c["quantity"]),
-            averageBuyPrice=units(c["cost"] * SCALE // c["quantity"]),
-            cycleBudget=units(c["budget"]),
-            cycleSpent=units(c["spent"]),
-            targetSellPrice=units(targets[0]) if targets else None,
-            targetSellPrices=list(map(units, targets)),
-            stopLossThreshold=units(stop.threshold) if stop.enabled else None,
-            stopLossMultiplier=units(stop.multiplier),
-            executableSellValue=units(value),
-            executableSellQuantity=units(sellable),
-            cycleStatus="STOP_EXITING"
-            if stop.state == "EXITING"
-            else "STOP_ARMED"
-            if stop.state == "ARMED"
-            else "EXITING"
-            if c["sold"]
-            else "ACCUMULATING",
-        )
-        positions.append(v)
+        if position_limit is None or len(positions) < position_limit:
+            v = token_view(r, t)
+            stop = StopLoss(**c["stop"])
+            targets = sorted(targets_by_event.get(eid, ()))
+            v.update(
+                quantity=units(c["quantity"]),
+                averageBuyPrice=units(c["cost"] * SCALE // c["quantity"]),
+                cycleBudget=units(c["budget"]),
+                cycleSpent=units(c["spent"]),
+                targetSellPrice=units(targets[0]) if targets else None,
+                targetSellPrices=list(map(units, targets)),
+                stopLossThreshold=units(stop.threshold) if stop.enabled else None,
+                stopLossMultiplier=units(stop.multiplier),
+                executableSellValue=units(value),
+                executableSellQuantity=units(sellable),
+                cycleStatus="STOP_EXITING"
+                if stop.state == "EXITING"
+                else "STOP_ARMED"
+                if stop.state == "ARMED"
+                else "EXITING"
+                if c["sold"]
+                else "ACCUMULATING",
+            )
+            positions.append(v)
         values.append(value)
         costs += c["cost"]
     claims = list(r.business["claims"].values())
@@ -125,8 +129,14 @@ def portfolio_view(r):
     return positions, portfolio
 
 
-def dashboard(r, service=None, limit=20, live_enabled=False):
-    positions, portfolio = portfolio_view(r)
+def dashboard(r, service=None, limit=20, live_enabled=False, position_limit=None):
+    positions, portfolio = portfolio_view(r, position_limit)
+    settled = set(r.business["settled"])
+    position_cycles = [
+        c
+        for c in r.business["cycles"].values()
+        if c["quantity"] > 0 and r.tokens[c["token_id"]].condition_id not in settled
+    ]
     # Rank and diagnose every monitored event, but only build depth-backed token
     # projections for the visible page. The page size never changes eligibility.
     summaries = []
@@ -143,7 +153,7 @@ def dashboard(r, service=None, limit=20, live_enabled=False):
                 "winner": winner,
                 "tokenId": tid,
                 "ids": ids,
-                "progressPercent": float(r.tokens[tid].progress(r.now)),
+                "progressPercent": float(r.tokens[tid].progress(r.now)) if limit else 0,
                 "pendingReason": ("AWAITING_FULL_BOOKS" if missing else "AWAITING_EVALUATION")
                 if status == "INCOMPLETE"
                 else None,
@@ -151,10 +161,13 @@ def dashboard(r, service=None, limit=20, live_enabled=False):
             }
         )
     direction = 1 if r.preferences.candidateSortDirection == "ASC" else -1
-    summaries.sort(
-        key=lambda e: (e["status"] != "READY", e["progressPercent"] * direction, e["eventId"])
+    if limit:
+        summaries.sort(
+            key=lambda e: (e["status"] != "READY", e["progressPercent"] * direction, e["eventId"])
+        )
+    active_events = (
+        {i["event_id"] for i in r.store.intents(active_only=True).values()} if limit else set()
     )
-    active_events = {i["event_id"] for i in r.store.intents(active_only=True).values()}
     events = []
     for summary in summaries[:limit]:
         eid, ids = summary["eventId"], summary["ids"]
@@ -202,7 +215,7 @@ def dashboard(r, service=None, limit=20, live_enabled=False):
             "pendingEvents": [
                 {k: e[k] for k in ("eventId", "pendingReason", "missingBookTokenIds")}
                 for e in summaries
-                if e["status"] == "INCOMPLETE"
+                if limit and e["status"] == "INCOMPLETE"
             ],
         },
     )
@@ -220,6 +233,8 @@ def dashboard(r, service=None, limit=20, live_enabled=False):
         "capitalEditable": r.mode == "TEST" and r.status == "PAUSED" and not r.store.has_history(),
         "preferences": r.preferences.public(),
         "positions": positions,
+        "positionCount": len(position_cycles),
+        "positionBooksReady": all(r.books[c["token_id"]].ready for c in position_cycles),
         "marketScan": scan,
         "portfolio": portfolio,
         "redemptions": [
@@ -280,7 +295,7 @@ class _RecordProjection:
                     ).fetchone()
                 )
             )
-            self.apply(e, intent, retired)
+            self.apply(e, intent, retired, seq)
         else:
             # Rebuild if a missing durable identity is subsequently repaired.
             self.incomplete = True
@@ -304,7 +319,7 @@ class _RecordProjection:
             if r.store._closed or r.store.generation != self.generation:
                 raise ValueError("交易历史构建期间账本已更改，请重新读取")
 
-    def apply(self, e, intent, retired=False):
+    def apply(self, e, intent, retired=False, seq=0):
         key = intent["token_id"]
         q = micros(e.last_qty.as_decimal())
         amount = e.info["pm_amount"]
@@ -369,6 +384,7 @@ class _RecordProjection:
         if len(self.order_ids) == self.capacity:
             self.groups.pop(self.order_ids.popleft())
         self.groups[group_key] = {
+            "first_seq": seq,
             "row": row,
             "intent": {"token_id": key, "kind": intent.get("kind")},
             "quantity_micros": q,
@@ -383,20 +399,20 @@ class _RecordProjection:
     def view(self, r, limit):
         out = []
         for order_id in islice(reversed(self.order_ids), limit):
-            group = self.groups[order_id]
-            t = r.tokens[group["intent"]["token_id"]]
-            # Discovery metadata can change without another fill. Refresh it for
-            # each visible row and never expose a mutable cached record.
-            out.append(
-                group["row"]
-                | {
-                    "eventTitle": t.event_title,
-                    "marketQuestion": t.question,
-                    "marketUrl": f"https://polymarket.com/event/{t.slug}" if t.slug else None,
-                    "direction": t.direction,
-                }
-            )
+            out.append(self.row(r, order_id))
         return {"records": out, "totalCount": self.total_count}
+
+    def row(self, r, order_id, paged=False):
+        group = self.groups[order_id]
+        t = r.tokens[group["intent"]["token_id"]]
+        # Refresh mutable discovery metadata without exposing cached records.
+        row = group["row"] | {
+            "eventTitle": t.event_title,
+            "marketQuestion": t.question,
+            "marketUrl": f"https://polymarket.com/event/{t.slug}" if t.slug else None,
+            "direction": t.direction,
+        }
+        return row | {"firstSeq": group["first_seq"]} if paged else row
 
 
 def records(r, limit):
@@ -446,4 +462,133 @@ async def records_async(r, limit):
         except BaseException:
             # Cancellation/lifecycle changes must never publish partial basis.
             r._record_projection = None
+            raise
+
+
+class _SelectedRecords(_RecordProjection):
+    """Replay all cost basis while retaining only one requested history page."""
+
+    def __init__(self, generation, selected):
+        super().__init__(generation, max(1, len(selected)))
+        self.selected = set(selected)
+
+    def apply_payload(self, r, seq, payload):
+        event = r.store.serializer.deserialize(payload)
+        intent = r.store.intent(event.client_order_id)
+        if intent:
+            self.apply(event, intent, str(event.client_order_id) not in self.selected, seq)
+
+
+def _history_ids(path, head, before, limit, since):
+    # This connection is independent of the writable runtime connection and
+    # always closed, including cancellation of the awaiting HTTP request.
+    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+        groups = (
+            "SELECT i.order_id,min(e.seq) AS first_seq FROM native_events e "
+            "JOIN intents i ON i.order_id=json_extract(CAST(e.payload AS TEXT),'$.client_order_id') "
+            "WHERE e.kind='OrderFilled' AND e.seq<=? GROUP BY i.order_id "
+        )
+        page = (
+            db.execute(
+                groups + "HAVING min(e.seq)<? ORDER BY first_seq DESC LIMIT ?",
+                (head, before, limit),
+            ).fetchall()
+            if before
+            else []
+        )
+        changed = (
+            db.execute(
+                "SELECT i.order_id FROM native_events e NOT INDEXED JOIN intents i "
+                "ON i.order_id=json_extract(CAST(e.payload AS TEXT),'$.client_order_id') "
+                "WHERE e.kind='OrderFilled' AND e.seq>? AND e.seq<=? GROUP BY i.order_id",
+                (since, head),
+            ).fetchall()
+            if since is not None and since < head
+            else []
+        )
+        return [row[0] for row in page], [row[0] for row in changed]
+
+
+def _history_cursor(value, generation):
+    if value is None:
+        return None
+    try:
+        owner, number = value.rsplit(":", 1)
+        number = int(number)
+        if owner != generation or not 0 <= number <= 2**63 - 1:
+            raise ValueError
+        return number
+    except (AttributeError, ValueError):
+        raise ValueError("交易历史游标已失效，请重新读取") from None
+
+
+async def records_page_async(r, limit=20, cursor=None, since=None):
+    """Stable first-fill keyset pages and incremental updates, without a 10k cap."""
+    await records_async(r, min(limit, RECORD_CACHE_ORDERS))
+    async with r._record_projection_lock:
+        generation = r.store.generation
+        before = _history_cursor(cursor, generation)
+        since_seq = _history_cursor(since, generation)
+        projection = r._record_projection
+        if projection is None or projection.generation != generation:
+            raise ValueError("交易历史构建期间账本已更改，请重新读取")
+        head = projection.cursor
+        if since_seq is not None and since_seq > head:
+            raise ValueError("交易历史游标已失效，请重新读取")
+        page_ids, changed_ids = await asyncio.to_thread(
+            _history_ids, r.store.path, head, before, limit, since_seq
+        )
+        if before is None:
+            page_ids = list(islice(reversed(projection.order_ids), limit))
+        selected = tuple(dict.fromkeys([*page_ids, *changed_ids]))
+        missing = tuple(oid for oid in selected if oid not in projection.groups)
+        extra = None
+        try:
+            if missing:
+                key = (generation, head, missing)
+                cache = getattr(r, "_record_page_cache", {})
+                extra = cache.get(key)
+                if extra is None:
+                    extra = _SelectedRecords(generation, missing)
+                    # Use the captured journal head, including late fills of
+                    # older orders, while yielding after bounded owner-loop work.
+                    while extra.cursor < head:
+                        rows = r.store.db.execute(
+                            "SELECT seq,CASE WHEN kind='OrderFilled' THEN payload END "
+                            "FROM native_events NOT INDEXED WHERE seq>? AND seq<=? "
+                            "ORDER BY seq LIMIT ?",
+                            (extra.cursor, head, PROJECTION_BATCH_ROWS),
+                        ).fetchall()
+                        for seq, payload in rows:
+                            if payload is not None:
+                                extra.apply_payload(r, seq, payload)
+                        extra.cursor = rows[-1][0] if len(rows) == PROJECTION_BATCH_ROWS else head
+                        await asyncio.sleep(0)
+                        if r.store._closed or r.store.generation != generation:
+                            raise ValueError("交易历史构建期间账本已更改，请重新读取")
+                    extra.qty.clear()
+                    extra.basis.clear()
+                    cache = {k: v for k, v in cache.items() if k[:2] == key[:2]}
+                    if len(cache) >= 8:
+                        cache.pop(next(iter(cache)))
+                    cache[key] = extra
+                    r._record_page_cache = cache
+            if r.store._closed or r.store.generation != generation:
+                raise ValueError("交易历史构建期间账本已更改，请重新读取")
+
+            def row(oid):
+                owner = projection if oid in projection.groups else extra
+                return owner.row(r, oid, paged=True)
+
+            page = [row(oid) for oid in page_ids]
+            return {
+                "records": page,
+                "changes": [row(oid) for oid in changed_ids],
+                "totalCount": projection.total_count,
+                "generation": generation,
+                "head": f"{generation}:{head}",
+                "nextCursor": f"{generation}:{page[-1]['firstSeq']}" if page else None,
+            }
+        except BaseException:
+            r._record_page_cache = {}
             raise

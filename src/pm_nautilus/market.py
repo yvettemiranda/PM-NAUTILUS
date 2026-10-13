@@ -155,6 +155,7 @@ class MarketService:
         self.closed = False
         self.loop_task = None
         self.on_resolution = None
+        self.resolution_task = None
         self.subscription_lock = asyncio.Lock()
         self.unsupported_ticks = runtime.store.get("unsupported_ticks", {})
         if hub is not None:
@@ -202,6 +203,13 @@ class MarketService:
         # An explicit START acknowledges a latched fatal background error. Historical
         # details stay available so an automatic safety pause is never unexplained.
         self.runtime.start()
+        self.acknowledge_service_error()
+
+    async def start_async(self):
+        await self.runtime.start_async()
+        self.acknowledge_service_error()
+
+    def acknowledge_service_error(self):
         if self.scan_status.pop("serviceError", None) is not None:
             self.scan_status["serviceErrorClearedAt"] = datetime.now(timezone.utc).isoformat()
             self.runtime.store.put("scan", self.scan_status)
@@ -514,8 +522,10 @@ class MarketService:
                 self.runtime.refresh_eligibility()
                 self.runtime.drain()
                 await self.sync_subscriptions()
-                if self.on_resolution:
-                    await self.on_resolution()
+                if self.on_resolution and (
+                    self.resolution_task is None or self.resolution_task.done()
+                ):
+                    self.resolution_task = asyncio.create_task(self.run_resolution())
             except Exception as exc:
                 # Keep the service observable and retryable, without silently
                 # leaving a dead task behind a RUNNING UI.
@@ -523,9 +533,21 @@ class MarketService:
                 self.remember_error("serviceError", exc)
             await asyncio.sleep(5)
 
+    async def run_resolution(self):
+        try:
+            await self.on_resolution()
+        except Exception as exc:
+            if not self.closed:
+                self.runtime.pause()
+                self.remember_error("serviceError", exc)
+
     async def close(self):
         self.closed = True
-        tasks = list(self.tasks.values()) + ([self.loop_task] if self.loop_task else [])
+        tasks = (
+            list(self.tasks.values())
+            + ([self.loop_task] if self.loop_task else [])
+            + ([self.resolution_task] if self.resolution_task else [])
+        )
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -621,6 +643,7 @@ class PublicMarketHub(MarketService):
         self._tick_versions = {}
         self._scan_tick_versions = None
         self._next_group = 0
+        self._subscription_monitored = {}
         super().__init__(_PublicRuntime(self), transport=transport)
 
     def consumer_error(self, service, exc):
@@ -769,7 +792,17 @@ class PublicMarketHub(MarketService):
         if self.closed:
             return
         services = [s for s in self.services if not s.closed]
-        monitored = set().union(*(s.runtime.monitored for s in services))
+        consumer_ids = {service: set(service.runtime.monitored) for service in services}
+        monitored = set().union(*consumer_ids.values())
+        # Keep connections still used by an unchanged consumer. A TEST reset or
+        # filter reduction must not invalidate another mode's continuous books.
+        protected_ids = set().union(
+            *(
+                ids
+                for service, ids in consumer_ids.items()
+                if self._subscription_monitored.get(service) == ids
+            )
+        )
         self.runtime.monitored = monitored
         for service in services:
             for tid in tuple(service.runtime.monitored):
@@ -837,17 +870,26 @@ class PublicMarketHub(MarketService):
         minimum_groups = (len(monitored) + 199) // 200
         if removed_any and len(self.active_groups) > minimum_groups:
             ordered = sorted(self.active_groups, key=lambda g: (-len(self.active_groups[g]), g))
-            retained = ordered[:minimum_groups]
-            for group in ordered[minimum_groups:]:
+            protected_groups = {g for g in ordered if self.active_groups[g] & protected_ids}
+            retained = [g for g in ordered if g in protected_groups]
+            retained.extend(
+                [g for g in ordered if g not in protected_groups][
+                    : max(0, minimum_groups - len(retained))
+                ]
+            )
+            retained_groups = set(retained)
+            for group in ordered:
+                if group in retained_groups:
+                    continue
                 moving = sorted(self.active_groups[group])
                 # Stop the old owner before any await can deliver another old
                 # snapshot. Closing the socket also removes its subscriptions.
                 self.active_groups.pop(group, None)
+                self.runtime.disconnect(moving)
                 task = self.tasks.pop(group)
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
                 self.streams.pop(group, None)
-                self.runtime.disconnect(moving)
                 for destination in retained:
                     active = self.active_groups[destination]
                     added = moving[: 200 - len(active)]
@@ -908,6 +950,7 @@ class PublicMarketHub(MarketService):
                 self.consumer_error(service, exc)
         for service in self.consumer_versions.keys() - self.services:
             del self.consumer_versions[service]
+        self._subscription_monitored = consumer_ids
 
     def diagnostics_for(self, service):
         groups = []

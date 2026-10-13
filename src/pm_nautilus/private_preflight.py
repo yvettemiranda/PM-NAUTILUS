@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import httpx
@@ -26,7 +27,7 @@ def ledger_intents(data_dir):
     path = Path(data_dir) / "LIVE" / "state.sqlite"
     if not path.is_file():
         raise ValueError("LIVE ledger is missing")
-    with sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True) as db:
+    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
         if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
             raise ValueError("LIVE ledger failed integrity check")
         rows = db.execute("SELECT order_id,payload FROM intents").fetchall()

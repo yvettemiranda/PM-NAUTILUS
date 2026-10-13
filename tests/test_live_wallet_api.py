@@ -340,7 +340,7 @@ def test_enable_attaches_paused_and_requires_separate_start(tmp_path, monkeypatc
                 self.runtime = runtime
                 self.loop_task = None
 
-            def start(self):
+            async def start_async(self):
                 start_calls.append(True)
                 self.runtime.store.put("status", "RUNNING")
 

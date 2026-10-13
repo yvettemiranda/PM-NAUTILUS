@@ -35,15 +35,16 @@ export function pageHarness() {
     return tab;
   });
   const context = {
-    Date, Map, Set, Number, String, Boolean, Intl, Array, JSON, Math, AbortSignal,
+    Date, Map, Set, Number, String, Boolean, Intl, Array, JSON, Math, AbortSignal, encodeURIComponent,
     fetch() { return new Promise(() => {}); },
     ResizeObserver: class { observe() {} },
     window: {
       location: {protocol: 'https:', hostname: 'localhost'},
-      setTimeout() { return 1; }, clearTimeout() {}, setInterval() {}, confirm() { return true; },
+      setTimeout() { return 1; }, clearTimeout() {}, intervals: [], setInterval(fn) { this.intervals.push(fn); }, confirm() { return true; },
     },
     document: {
-      activeElement: null, querySelector: element,
+      activeElement: null, hidden: false, handlers: {},
+      addEventListener(k, fn) { this.handlers[k] = fn; }, querySelector: element,
       createElementNS(namespace, tag) { return element(`svg/${tag}`); },
       querySelectorAll(selector) {
         return selector === '.view-tabs [role="tab"]' ? tabs : [];
@@ -53,7 +54,7 @@ export function pageHarness() {
   vm.createContext(context);
   const helpers = readFileSync(new URL('ui-state.js', web), 'utf8').replaceAll('export function', 'function');
   const app = readFileSync(new URL('app.js', web), 'utf8').replace(/^import .*\n/, '');
-  vm.runInContext(`${helpers}\n${app}\nglobalThis.pageUi = ui; globalThis.renderCandidatesForTest = renderCandidates;`, context);
+  vm.runInContext(`${helpers}\n${app}\nglobalThis.pageUi = ui; globalThis.renderCandidatesForTest = renderCandidates; globalThis.loadTradeRecordsForTest = loadTradeRecords; globalThis.renderCategoriesForTest = renderCategories; globalThis.applyDashboardForTest = applyDashboard;`, context);
   return {context, element, ui: context.pageUi};
 }
 

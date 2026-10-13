@@ -19,7 +19,7 @@ export function displayStatus(dashboard, { lastSuccess = 0, error = null, now = 
   const fatal = scan.serviceError;
   const feedError = scan.streamError || groups.some(g => g.error || !g.taskRunning || g.state === "STOPPED");
   const ready = groups.length > 0 && groups.every(g => g.state === "READY" && g.readyBookCount === g.tokenCount);
-  const missingPosition = (dashboard.positions || []).some(p => p.currentSellPriceStatus === "NOT_READY");
+  const missingPosition = dashboard.positionBooksReady === false || (dashboard.positions || []).some(p => p.currentSellPriceStatus === "NOT_READY");
   return {
     run: fatal ? "error" : dashboard.strategy.status === "RUNNING" ? "ready" : "off",
     feed: feedError ? "error" : ready && !missingPosition ? "ready" : "waiting",

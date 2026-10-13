@@ -34,6 +34,7 @@ def test_buy_requires_exact_chain_holdings_for_both_outcomes():
     no = SimpleNamespace(token_id="2", condition_id="condition")
     owner = SimpleNamespace(
         tokens={"1": yes, "2": no},
+        condition_token_ids=lambda condition: ("1", "2"),
         business={"cycles": {"event": {"token_id": "1", "quantity": 5_000_000}}},
         store=SimpleNamespace(put=lambda key, value: values.update({key: value})),
         pause=Mock(),
@@ -59,4 +60,4 @@ def test_live_start_requires_all_wallet_open_order_reconciliation():
         mode="LIVE", client=SimpleNamespace(ready=True, open_orders_clear=False)
     )
     with pytest.raises(ValueError, match="开放挂单"):
-        Runtime.start(runtime)
+        Runtime._check_start_readiness(runtime)

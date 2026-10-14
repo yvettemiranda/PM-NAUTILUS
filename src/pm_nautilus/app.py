@@ -5,10 +5,12 @@ import base64
 import fcntl
 import json
 import os
+import re
 import secrets
+import sqlite3
 import tempfile
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 from pathlib import Path
 
 import asyncio
@@ -367,9 +369,100 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 positions[token_id] = positions.get(token_id, 0) + quantity
         return positions
 
-    async def refresh_readiness():
+    def approval_identity_matches(record, metadata):
+        return (
+            isinstance(record, dict)
+            and type(record.get("version")) is int
+            and record["version"] == 1
+            and record.get("identity")
+            == {
+                "signer": metadata["signer"],
+                "funder": metadata["funder"],
+                "signatureType": metadata["signature_type"],
+            }
+            and type(record["identity"].get("signatureType")) is int
+            and isinstance(record.get("remaining"), list)
+            and bool(record["remaining"])
+            and all(type(value) is bool for value in record["remaining"])
+        )
+
+    def unsigned_approval_failure(record, metadata):
+        from .redemption import approval_error_public
+
+        if (
+            not approval_identity_matches(record, metadata)
+            or record.get("status") != "FAILED"
+            or "pending" not in record
+            or record["pending"] is not None
+            or record.get("stage") != "prepare"
+            or not isinstance(record.get("errorCode"), str)
+            or record.get("errorCode")
+            not in {
+                "INSUFFICIENT_POL",
+                "PREPARATION_FAILED",
+                "TRANSACTION_REVERTED",
+                "APPROVAL_CHECK_FAILED",
+            }
+            or ("networkError" in record and record["networkError"] is not False)
+        ):
+            return None
+        return approval_error_public(record)
+
+    def saved_approval_diagnostic(metadata):
+        from web3 import Web3
+
+        from .redemption import ADAPTERS, APPROVAL_KEY, approval_error_public
+
+        try:
+            path = root / "LIVE" / "state.sqlite"
+            with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+                row = db.execute("SELECT value FROM meta WHERE key=?", (APPROVAL_KEY,)).fetchone()
+            record = json.loads(row[0]) if row else None
+            if not approval_identity_matches(record, metadata):
+                return None
+            if record.get("status") == "FAILED":
+                error = unsigned_approval_failure(record, metadata)
+                return (
+                    None if error is None else {"status": "UNKNOWN", "networkError": False, **error}
+                )
+            if record.get("status") != "ACTIVE":
+                return None
+            pending = record.get("pending")
+            if (
+                not isinstance(pending, dict)
+                or pending.get("operation") != "APPROVE"
+                or type(pending.get("neg_risk")) is not bool
+                or pending["neg_risk"] != record["remaining"][0]
+                or type(pending.get("nonce")) is not int
+                or pending["nonce"] < 0
+                or not isinstance(pending.get("operator"), str)
+                or pending["operator"].lower() != ADAPTERS[pending["neg_risk"]].lower()
+                or not isinstance(pending.get("raw_tx"), str)
+                or not re.fullmatch(r"0x(?:[0-9a-fA-F]{2})+", pending["raw_tx"])
+                or not isinstance(pending.get("tx_hash"), str)
+                or not re.fullmatch(r"0x[0-9a-fA-F]{64}", pending["tx_hash"])
+                or Web3.to_hex(Web3.keccak(hexstr=pending["raw_tx"])).lower()
+                != pending["tx_hash"].lower()
+            ):
+                return None
+            error = approval_error_public(record)
+            return {
+                "status": "PENDING",
+                "standardApproved": False,
+                "negRiskApproved": False,
+                "pendingTxHash": pending["tx_hash"],
+                "networkError": error["errorCode"]
+                in {"RPC_RESULT_UNKNOWN", "RPC_RECEIPT_UNAVAILABLE"},
+                **error,
+            }
+        except (OSError, sqlite3.Error, ValueError, TypeError):
+            return None
+
+    async def refresh_readiness(*, known_approval=None):
         if wallet_state["settings"] is None or wallet_state["metadata"] is None:
             raise ValueError("请先解锁钱包")
+        if known_approval is None:
+            known_approval = wallet_state["approval"]
         wallet_state["readiness"] = None
         wallet_state["approval"] = None
         metadata = wallet_state["metadata"]
@@ -403,6 +496,34 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             "pendingTxHash": None,
             "networkError": False,
         }
+        if known_approval is None and wallet_state["approval"].get("status") == "UNKNOWN":
+            known_approval = saved_approval_diagnostic(metadata)
+            if known_approval is not None:
+                result["ready"] = False
+        if known_approval is not None:
+            approval = wallet_state["approval"]
+            known_pending = (
+                known_approval.get("status") == "PENDING"
+                and type(known_approval.get("standardApproved")) is bool
+                and type(known_approval.get("negRiskApproved")) is bool
+                and isinstance(known_approval.get("pendingTxHash"), str)
+                and re.fullmatch(r"0x[0-9a-fA-F]{64}", known_approval["pendingTxHash"])
+            )
+            if approval.get("status") == "UNKNOWN" and known_pending:
+                # A failed account read cannot erase a known saved transaction.
+                # Its existence does not establish account readiness.
+                wallet_state["approval"] = approval = {
+                    key: known_approval[key]
+                    for key in ("status", "standardApproved", "negRiskApproved", "pendingTxHash")
+                }
+                result["ready"] = False
+            if approval.get("status") == "UNKNOWN" or (
+                approval.get("status") == known_approval.get("status")
+                and approval.get("pendingTxHash") == known_approval.get("pendingTxHash")
+            ):
+                for key in ("networkError", "errorCode", "errorMessage", "stage"):
+                    if key in known_approval:
+                        approval[key] = known_approval[key]
         return result
 
     async def verified_vault_settings(password_input):
@@ -607,7 +728,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 # binding only while the ledger has no trading activity.
                 wallet_state["error"] = "钱包已加密保存；账本绑定未完成，请重新解锁核对。"
                 raise ValueError(wallet_state["error"]) from None
-            wallet_state.update(settings=settings, metadata=metadata, error=None)
+            wallet_state.update(settings=settings, metadata=metadata, approval=None, error=None)
             await refresh_readiness()
             return wallet_public()
 
@@ -649,16 +770,24 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             if not vault_path.is_file():
                 raise ValueError("尚未配置加密钱包")
             await verified_vault_settings(payload.get("vaultPassword"))
+            metadata = wallet_state["metadata"] or read_public_metadata(vault_path)
             # Clear the empty ledger binding first. If unlink fails, the
             # existing encrypted wallet remains available for another try.
             with cold["LIVE"].transaction():
-                cold["LIVE"].put("live_wallet_identity", None)
                 approval = cold["LIVE"].get("redemption_approval")
+                unsigned_failure = unsigned_approval_failure(approval, metadata)
+                if (
+                    isinstance(approval, dict)
+                    and approval.get("status") == "FAILED"
+                    and unsigned_failure is None
+                ):
+                    raise ValueError("赎回授权失败记录尚未核对，不能更换钱包")
+                cold["LIVE"].put("live_wallet_identity", None)
                 if (
                     isinstance(approval, dict)
                     and approval.get("status") == "COMPLETE"
                     and approval.get("pending") is None
-                ):
+                ) or unsigned_failure is not None:
                     cold["LIVE"].put("redemption_approval", None)
             try:
                 vault_path.unlink()
@@ -708,9 +837,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 raise ValueError(str(exc)) from None
             except Exception:
                 raise ValueError("赎回授权未完成，请检查网络后重试") from None
-            await refresh_readiness()
-            if approval_result.get("networkError"):
-                wallet_state["approval"]["networkError"] = True
+            await refresh_readiness(known_approval=approval_result)
             return wallet_public()
 
     @app.post("/api/live/wallet/enable")

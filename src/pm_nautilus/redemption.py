@@ -6,6 +6,7 @@ single-owner Safe are supported; no account abstraction or manual positions are 
 
 import asyncio
 import json
+import re
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import closing
@@ -13,7 +14,7 @@ from functools import partial
 from pathlib import Path
 from threading import Lock
 from web3 import Web3
-from web3.exceptions import TransactionNotFound
+from web3.exceptions import ContractLogicError, TransactionNotFound, Web3RPCError
 
 from .config import SCALE
 from .market import GAMMA, resolution
@@ -25,6 +26,10 @@ ADAPTERS = {
     False: "0xAdA100Db00Ca00073811820692005400218FcE1f",
     True: "0xadA2005600Dec949baf300f4C6120000bDB6eAab",
 }
+EXCHANGES = (
+    "0xE111180000d2663C0091e4f400237545B87B996B",
+    "0xe2222d279d744050d28e00520010520000310F59",
+)
 APPROVAL_KEY = "redemption_approval"
 ZERO = "0x" + "00" * 20
 # Stable workers let Web3's per-thread HTTP sessions reuse their connections.
@@ -36,6 +41,94 @@ RESOLUTION_CONCURRENCY = 4
 
 class RedemptionCheckError(ValueError):
     """A static, application-owned message that is safe to persist for the UI."""
+
+    def __init__(self, message, *, code="APPROVAL_CHECK_FAILED"):
+        super().__init__(message)
+        self.code = code
+
+
+_APPROVAL_ERRORS = {
+    "INSUFFICIENT_POL": "签名账户 POL 不足以支付链上手续费，请补足签名账户的 POL 后重试。",
+    "PREPARATION_FAILED": "授权交易准备未完成，请核对钱包和 RPC 后重试；未广播新交易。",
+    "TRANSACTION_REVERTED": "授权交易模拟未通过，请核对钱包和当前链上状态后重试；未广播新交易。",
+    "APPROVAL_CHECK_FAILED": "授权交易核对未通过，请先核对钱包、账户 nonce 和原交易状态后重试。",
+    "RPC_REJECTED": "RPC 拒绝了本次提交；原交易已保留，请先核对原交易状态后继续。",
+    "TX_FEE_REJECTED": "RPC 拒绝了本次交易费用；原交易已保留，不会自动更换费用或创建新交易。",
+    "TX_NONCE_REJECTED": "RPC 拒绝了本次交易 nonce；原交易已保留，须先核对原交易和账户 nonce。",
+    "RPC_RESULT_UNKNOWN": "交易提交结果尚未确认；原交易已保留，继续时只会核对并重发同一交易。",
+    "RPC_RECEIPT_UNAVAILABLE": "暂时无法核对原交易回执；原交易已保留，请稍后继续核对。",
+    "TX_RECEIPT_FAILED": "链上回执确认授权未成功；请核对原因后重新确认授权。",
+}
+
+
+def approval_error_public(record):
+    """Never expose a provider exception or trust a stored free-form message."""
+    code = record.get("errorCode") if isinstance(record, dict) else None
+    stage = record.get("stage") if isinstance(record, dict) else None
+    if code is None:
+        return {"errorCode": None, "errorMessage": None, "stage": None}
+    if (
+        not isinstance(code, str)
+        or code not in _APPROVAL_ERRORS
+        or not isinstance(stage, str)
+        or stage not in {"prepare", "broadcast", "receipt"}
+    ):
+        raise RedemptionCheckError("赎回授权故障记录无效，须先核对原交易")
+    return {"errorCode": code, "errorMessage": _APPROVAL_ERRORS[code], "stage": stage}
+
+
+def _rpc_error_text(error):
+    # Inspect details only to select a fixed code; never persist or return them.
+    response = getattr(error, "rpc_response", None)
+    details = response.get("error") if isinstance(response, dict) else None
+    message = details.get("message") if isinstance(details, dict) else None
+    return (message if isinstance(message, str) else str(error))[:4096].lower()
+
+
+def _approval_error_code(error, stage):
+    if isinstance(error, RedemptionCheckError):
+        return error.code if error.code in _APPROVAL_ERRORS else "APPROVAL_CHECK_FAILED"
+    if isinstance(error, (Web3RPCError, ValueError, ContractLogicError)):
+        text = _rpc_error_text(error)
+        if isinstance(error, ContractLogicError) or "execution reverted" in text:
+            return "TRANSACTION_REVERTED" if stage == "prepare" else "RPC_REJECTED"
+        if any(term in text for term in ("insufficient funds", "insufficient balance for gas")):
+            return "INSUFFICIENT_POL"
+        if stage == "broadcast":
+            if any(
+                term in text
+                for term in ("underpriced", "fee too low", "gas price below", "base fee")
+            ):
+                return "TX_FEE_REJECTED"
+            if any(
+                term in text for term in ("nonce too low", "nonce too high", "nonce has already")
+            ):
+                return "TX_NONCE_REJECTED"
+            if any(
+                term in text
+                for term in (
+                    "intrinsic gas too low",
+                    "exceeds block gas limit",
+                    "invalid sender",
+                    "invalid chain",
+                    "unsupported transaction type",
+                )
+            ):
+                return "RPC_REJECTED"
+    return "PREPARATION_FAILED" if stage == "prepare" else "RPC_RESULT_UNKNOWN"
+
+
+def _set_approval_error(record, code, stage):
+    record.update(
+        errorCode=code,
+        stage=stage,
+        networkError=code in {"RPC_RESULT_UNKNOWN", "RPC_RECEIPT_UNAVAILABLE"},
+    )
+
+
+def _clear_approval_error(record):
+    for key in ("errorCode", "errorMessage", "stage", "networkError"):
+        record.pop(key, None)
 
 
 def _account_lock(path):
@@ -238,8 +331,8 @@ class PolygonWallet:
         elif codes[self.funder]:
             raise RedemptionCheckError("EOA资金地址含有合约代码")
 
-    def adapter_approvals(self):
-        operators = tuple(ADAPTERS.items())
+    def _operator_approvals(self, operators):
+        operators = tuple(operators.items())
         values = self._parallel_reads(
             [
                 self.ctf.functions.isApprovedForAll(
@@ -248,16 +341,22 @@ class PolygonWallet:
                 for _, operator in operators
             ]
         )
-        approvals = {
-            neg_risk: value for (neg_risk, _), value in zip(operators, values, strict=True)
-        }
+        approvals = {key: value for (key, _), value in zip(operators, values, strict=True)}
         if any(type(value) is not bool for value in approvals.values()):
-            raise RedemptionCheckError("赎回授权查询结果无效")
+            raise RedemptionCheckError("份额授权查询结果无效")
         return approvals
+
+    def adapter_approvals(self):
+        return self._operator_approvals(ADAPTERS)
 
     def buy_preflight(self):
         self.preflight()
-        if not all(self.adapter_approvals().values()):
+        approvals = self._operator_approvals(
+            ADAPTERS | {exchange: exchange for exchange in EXCHANGES}
+        )
+        if not all(approvals[exchange] for exchange in EXCHANGES):
+            raise RedemptionCheckError("交易所卖出份额授权尚未确认，不能新买入")
+        if not all(approvals[neg_risk] for neg_risk in ADAPTERS):
             raise RedemptionCheckError("赎回适配器授权尚未确认，不能新买入")
 
     def owned_balances(self, claim):
@@ -334,9 +433,22 @@ class PolygonWallet:
             "nonce": self.w3.eth.get_transaction_count(self.signer.address, "pending"),
             "gasPrice": self.w3.eth.gas_price,
         }
-        tx["gas"] = self.w3.eth.estimate_gas(tx) * 12 // 10
-        if self.w3.eth.get_balance(self.signer.address) < tx["gas"] * tx["gasPrice"]:
-            raise RedemptionCheckError("签名账户POL不足以支付链上手续费")
+        balance = self.w3.eth.get_balance(self.signer.address)
+        if balance == 0:
+            raise RedemptionCheckError(
+                _APPROVAL_ERRORS["INSUFFICIENT_POL"], code="INSUFFICIENT_POL"
+            )
+        try:
+            tx["gas"] = self.w3.eth.estimate_gas(tx) * 12 // 10
+        except (Web3RPCError, ValueError, ContractLogicError) as exc:
+            code = _approval_error_code(exc, "prepare")
+            if code in {"INSUFFICIENT_POL", "TRANSACTION_REVERTED"}:
+                raise RedemptionCheckError(_APPROVAL_ERRORS[code], code=code) from None
+            raise
+        if balance < tx["gas"] * tx["gasPrice"]:
+            raise RedemptionCheckError(
+                _APPROVAL_ERRORS["INSUFFICIENT_POL"], code="INSUFFICIENT_POL"
+            )
         signed = self.signer.sign_transaction(tx)
         return {
             "raw_tx": Web3.to_hex(signed.raw_transaction),
@@ -349,9 +461,9 @@ class PolygonWallet:
         try:
             result = Web3.to_hex(self.w3.eth.send_raw_transaction(claim["raw_tx"]))
             if result.lower() != claim["tx_hash"].lower():
-                raise RedemptionCheckError("RPC返回的交易哈希不一致")
-        except ValueError as exc:
-            if not any(x in str(exc).lower() for x in ("already known", "known transaction")):
+                raise RedemptionCheckError("RPC返回的交易哈希不一致", code="RPC_RESULT_UNKNOWN")
+        except (ValueError, Web3RPCError) as exc:
+            if not re.search(r"\b(?:already known|known transaction)\b", _rpc_error_text(exc)):
                 raise
 
     def receipt(self, claim):
@@ -437,6 +549,9 @@ class RedemptionApprovalService:
                         raise ValueError("Transaction hash mismatch")
                 except (ValueError, TypeError):
                     raise RedemptionCheckError("待确认赎回授权交易无效") from None
+            approval_error_public(record)
+            if "networkError" in record and type(record["networkError"]) is not bool:
+                raise RedemptionCheckError("赎回授权故障记录无效，须先核对原交易")
         return record
 
     def _write(self, record, *, consumed=None):
@@ -472,7 +587,8 @@ class RedemptionApprovalService:
             "standardApproved": approvals[False],
             "negRiskApproved": approvals[True],
             "pendingTxHash": pending["tx_hash"] if pending else None,
-            "networkError": network_error,
+            "networkError": network_error or bool(record and record.get("networkError")),
+            **approval_error_public(record),
         }
 
     def status(self):
@@ -538,22 +654,30 @@ class RedemptionApprovalService:
             try:
                 result = self.wallet.receipt(pending)
             except Exception:
-                return self._public(record, approvals, network_error=True)
+                _set_approval_error(record, "RPC_RECEIPT_UNAVAILABLE", "receipt")
+                self._write(record)
+                return self._public(record, approvals)
             if result is None:
                 self._check_owner(pending=pending)
                 try:
                     self.wallet.broadcast(pending)
-                except Exception:
-                    return self._public(record, approvals, network_error=True)
+                except Exception as exc:
+                    _set_approval_error(record, _approval_error_code(exc, "broadcast"), "broadcast")
+                    self._write(record)
+                    return self._public(record, approvals)
+                _clear_approval_error(record)
+                self._write(record)
                 return self._public(record, approvals)
             if result.get("status") == "FAILED":
                 record["status"] = "FAILED"
+                _set_approval_error(record, "TX_RECEIPT_FAILED", "receipt")
                 self._write(record, consumed=pending)
                 return self._public(record, approvals)
             if result.get("status") != "APPROVED":
                 raise RedemptionCheckError("赎回授权回执无效")
             record["pending"] = None
             record["remaining"].pop(0)
+            _clear_approval_error(record)
             self._write(record, consumed=pending)
             approvals = self.wallet.adapter_approvals()
         while record["remaining"]:
@@ -563,7 +687,13 @@ class RedemptionApprovalService:
                 self._write(record)
                 continue
             self._check_owner(preparing=True)
-            prepared = self.wallet.prepare_approval(neg_risk)
+            try:
+                prepared = self.wallet.prepare_approval(neg_risk)
+            except Exception as exc:
+                record["status"] = "FAILED"
+                _set_approval_error(record, _approval_error_code(exc, "prepare"), "prepare")
+                self._write(record)
+                return self._public(record, approvals)
             if prepared is None:
                 approvals = self.wallet.adapter_approvals()
                 if not approvals[neg_risk]:
@@ -571,16 +701,20 @@ class RedemptionApprovalService:
                 continue
             record["pending"] = prepared
             self._check_owner(preparing=True, pending=prepared)
+            _clear_approval_error(record)
             self._write(record)
             try:
                 self.wallet.broadcast(prepared)
-            except Exception:
-                return self._public(record, approvals, network_error=True)
+            except Exception as exc:
+                _set_approval_error(record, _approval_error_code(exc, "broadcast"), "broadcast")
+                self._write(record)
+                return self._public(record, approvals)
             return self._public(record, approvals)
         approvals = self.wallet.adapter_approvals()
         if not all(approvals.values()):
             raise RedemptionCheckError("赎回授权链上结果不完整")
         record["status"] = "COMPLETE"
+        _clear_approval_error(record)
         self._write(record)
         return self._public(record, approvals)
 

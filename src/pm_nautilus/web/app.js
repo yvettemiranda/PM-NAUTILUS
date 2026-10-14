@@ -1,4 +1,4 @@
-import { displayStatus, curveSegments, modeSwitchDecision, walletOriginSecure, liveWalletAccountVerified, liveRunSummary, redemptionApprovalAction, panelVisible, setMarkupIfChanged } from "./ui-state.js?v=20261013-optimization1";
+import { displayStatus, curveSegments, modeSwitchDecision, walletOriginSecure, liveWalletAccountVerified, liveRunSummary, redemptionApprovalAction, panelVisible, setMarkupIfChanged } from "./ui-state.js?v=20261014-wallet1";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -23,6 +23,7 @@ const ui = {
   walletLoading: false,
   walletPending: false,
   walletError: null,
+  walletActionError: null,
   walletEpoch: 0,
   walletRuleKey: null,
   preferences: null,
@@ -295,6 +296,23 @@ function liveStartAvailable() {
   );
 }
 
+function redemptionApprovalMessage(wallet) {
+  const approval = wallet?.redemptionApproval;
+  if (!approval) return "";
+  let message = typeof approval.errorMessage === "string" ? approval.errorMessage : "";
+  if (!message && approval.status === "PENDING") {
+    message = approval.networkError
+      ? "赎回授权交易的网络结果暂未确认，请稍后点击“继续核对赎回授权”。"
+      : "赎回授权交易尚待链上确认，请稍后点击“继续核对赎回授权”。";
+  } else if (!message && approval.status === "FAILED") {
+    message = "赎回授权未完成，请核对后重试。";
+  }
+  if (typeof approval.pendingTxHash === "string" && /^0x[0-9a-fA-F]{64}$/.test(approval.pendingTxHash)) {
+    message += ` 交易：${approval.pendingTxHash}`;
+  }
+  return message;
+}
+
 function renderLiveWallet() {
   if (ui.displayMode !== "LIVE") return;
   const wallet = ui.wallet;
@@ -306,7 +324,7 @@ function renderLiveWallet() {
   };
   const state = $("#wallet-state");
   state.textContent = ui.walletLoading && !wallet ? "读取中" : ui.walletError && !wallet ? "读取失败" : labels[status] || "待确认";
-  state.dataset.tone = ["READY", "PAUSED", "RUNNING"].includes(status) ? "positive" : ["BLOCKED", "ERROR"].includes(status) || ui.walletError ? "negative" : "neutral";
+  state.dataset.tone = ui.walletActionError || ui.walletError || ["BLOCKED", "ERROR"].includes(status) ? "negative" : ["READY", "PAUSED", "RUNNING"].includes(status) ? "positive" : "neutral";
 
   const messages = {
     UNCONFIGURED: "输入钱包信息，完成后会先检查账户。",
@@ -317,7 +335,9 @@ function renderLiveWallet() {
     RUNNING: "实盘正在运行。",
     ERROR: "实盘状态异常，请查看检查结果。",
   };
-  $("#wallet-message").textContent = ui.walletError || wallet?.error || (ui.walletLoading && !wallet ? "正在读取钱包状态…" : messages[status] || "正在确认钱包状态…");
+  const approvalMessage = redemptionApprovalMessage(wallet);
+  const walletMessage = [ui.walletError || wallet?.error, ui.walletActionError ? `上次操作：${ui.walletActionError}` : ""].filter(Boolean).join(" ");
+  $("#wallet-message").textContent = [walletMessage, approvalMessage].filter(Boolean).join(" ") || (ui.walletLoading && !wallet ? "正在读取钱包状态…" : messages[status] || "正在确认钱包状态…");
   $("#wallet-transport-warning").hidden = secure;
 
   const account = $("#wallet-account");
@@ -427,14 +447,16 @@ async function postLiveWallet(action, payload, button, pendingLabel, successMess
     ui.wallet = wallet;
     ui.walletAt = Date.now();
     ui.walletError = null;
+    ui.walletActionError = null;
     recordMutation();
-    showMessage(successMessage);
+    const approvalMessage = action === "approve-redemption" ? redemptionApprovalMessage(wallet) : "";
+    showMessage(approvalMessage || successMessage, Boolean(approvalMessage && (wallet.redemptionApproval?.errorMessage || wallet.redemptionApproval?.networkError || wallet.redemptionApproval?.status === "FAILED")));
     await loadDashboard();
   } catch (error) {
     failed = true;
     const uncertain = error.name === "TimeoutError" || error.name === "AbortError";
-    ui.walletError = uncertain ? "操作结果暂未确认，请稍后刷新状态" : error.message;
-    showMessage(ui.walletError, true);
+    ui.walletActionError = uncertain ? "操作结果暂未确认，请稍后刷新状态" : error.message;
+    showMessage(ui.walletActionError, true);
   } finally {
     clearWalletSecrets();
     ui.walletPending = false;
@@ -603,13 +625,14 @@ $("#wallet-restore-form").addEventListener("submit", async (event) => {
     ui.wallet = wallet;
     ui.walletAt = Date.now();
     ui.walletError = null;
+    ui.walletActionError = null;
     recordMutation();
     showMessage("已恢复加密备份。请解锁、检查账户，再决定是否启用实盘");
     await loadDashboard();
   } catch (error) {
     failed = true;
-    ui.walletError = error.name === "TimeoutError" ? "恢复结果暂未确认，请刷新钱包状态" : error.message;
-    showMessage(ui.walletError, true);
+    ui.walletActionError = error.name === "TimeoutError" ? "恢复结果暂未确认，请刷新钱包状态" : error.message;
+    showMessage(ui.walletActionError, true);
   } finally {
     clearWalletSecrets();
     $("#wallet-restore-file").value = "";
@@ -671,7 +694,11 @@ function renderRunControls() {
 
 function renderPositions(positions = []) {
   if (!ui.dashboard || ["summary", "market"].includes(ui.dashboard.details)) {
-    $("#tab-position-count").textContent = "—";
+    const count = ui.dashboard?.positionCount;
+    $("#tab-position-count").textContent = ui.dashboard?.executionMode === ui.displayMode &&
+      liveAccountVisible() && Number.isSafeInteger(count) && count >= 0
+      ? formatCount(count)
+      : "—";
     $("#position-count").textContent = "读取中";
     $("#position-list-controls").hidden = true;
     setMarkupIfChanged($("#positions"), '<p class="empty-state">正在读取持仓状态…</p>');
@@ -763,6 +790,7 @@ function renderTradeRecords() {
   const content = $("#trade-records-content");
   const count = $("#trade-records-count");
   $("#more-records").hidden = ui.tradeRecords.length >= ui.tradeRecordTotalCount;
+  $("#more-records").disabled = ui.tradeRecordsLoading;
   toggle.setAttribute("aria-expanded", String(ui.tradeRecordsExpanded));
   toggle.setAttribute(
     "aria-label",
@@ -1491,7 +1519,7 @@ $("#mode-toggle").addEventListener("click", () => {
   if (decision.error) { showMessage(decision.error, true); return; }
   clearWalletSecrets();
   ui.walletEpoch += 1;
-  ui.wallet = null; ui.walletAt = 0; ui.walletError = null; ui.walletRuleKey = null;
+  ui.wallet = null; ui.walletAt = 0; ui.walletError = null; ui.walletActionError = null; ui.walletRuleKey = null;
   recordMutation();
   ui.tradeRecordsLoaded = false; ui.tradeRecordsLoading = false; ui.tradeRecordsLocked = false; ui.tradeRecordsLoadedAt = 0; ui.tradeRecords = [];
   ui.visibleCandidateCount = 20;

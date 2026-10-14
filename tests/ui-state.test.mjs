@@ -158,6 +158,79 @@ test('summary readiness includes hidden positions',()=>{
  assert.equal(displayStatus(dashboard,{lastSuccess:1000,now:2000}).feed,'waiting');
 });
 
+test('summary and market retain verified whole-account position counts without stale details',()=>{
+ for (const mode of ['TEST','LIVE']) {
+  const page=pageHarness();seedTestDashboard(page);
+  const {ui,context,element}=page;
+  ui.displayMode=mode;ui.activeTab='positions';
+  ui.wallet={configured:true,unlocked:true,enabled:true,status:'PAUSED',readiness:{ready:true}};
+  ui.walletAt=Date.now();
+  const dashboard={executionMode:mode,generation:'g',details:'positions',liveExecutionEnabled:true,preferences:{...profile},strategy:{status:'PAUSED',initialCapital:'100',availableCash:'100'},positions:[{tokenId:'owned',marketQuestion:'LOADED_POSITION',quantity:'1',targetSellPrices:[],stopLossThreshold:null}],positionCount:86,positionBooksReady:true,portfolio:{},marketScan:{events:[],diagnostics:{availableCategories:[]}}};
+  context.applyDashboardForTest(dashboard);
+  assert.equal(element('#tab-position-count').textContent,'86');
+  assert.match(element('#positions').innerHTML,/LOADED_POSITION/);
+  for (const details of ['summary','market']) {
+   ui.activeTab=details==='summary'?'records':'market';
+   context.applyDashboardForTest({...dashboard,details,positions:[]});
+   assert.equal(element('#tab-position-count').textContent,'86');
+   assert.equal(element('#position-count').textContent,'读取中');
+   assert.equal(element('#position-list-controls').hidden,true);
+   assert.match(element('#positions').innerHTML,/正在读取持仓状态/);
+   assert.equal(element('#positions').innerHTML.includes('LOADED_POSITION'),false);
+   for (const positionCount of [0,-1,1.5,'86',null,undefined]) {
+    context.applyDashboardForTest({...dashboard,details,positions:[],positionCount});
+    assert.equal(element('#tab-position-count').textContent,positionCount===0?'0':'—');
+   }
+   context.applyDashboardForTest({...dashboard,details,positions:[],executionMode:mode==='LIVE'?'TEST':'LIVE'});
+   assert.equal(element('#tab-position-count').textContent,'—');
+   if (mode==='LIVE') {
+    for (const wallet of [null,{...ui.wallet,unlocked:false},{...ui.wallet,status:'LOCKED'},{...ui.wallet,readiness:{ready:false}}]) {
+     const verified=ui.wallet;ui.wallet=wallet;
+     context.applyDashboardForTest({...dashboard,details,positions:[]});
+     assert.equal(element('#tab-position-count').textContent,'—');
+     ui.wallet=verified;
+    }
+    ui.walletAt=Date.now()-21_000;
+    context.applyDashboardForTest({...dashboard,details,positions:[]});
+    assert.equal(element('#tab-position-count').textContent,'—');
+    ui.walletAt=Date.now();ui.walletError='unavailable';
+    context.applyDashboardForTest({...dashboard,details,positions:[]});
+    assert.equal(element('#tab-position-count').textContent,'—');
+    ui.walletError=null;
+    context.applyDashboardForTest({...dashboard,details,positions:[],liveExecutionEnabled:false,positionCount:0});
+    assert.equal(element('#tab-position-count').textContent,'—');
+   }
+  }
+ }
+});
+
+test('history pagination is disabled during a pending refresh and resumes with its cursor',async()=>{
+ const page=pageHarness();seedTestDashboard(page);
+ const {ui,context,element}=page;ui.activeTab='records';ui.tradeRecordsExpanded=true;
+ const row={id:'first',type:'OPEN',firstSeq:40,quantity:'1'};
+ const reply=body=>({ok:true,headers:{get(){return null;}},async text(){return JSON.stringify(body);}});
+ context.fetch=async()=>reply({generation:'g',head:'g:40',totalCount:40,nextCursor:'g:21',records:[row]});
+ await context.loadTradeRecordsForTest();
+ assert.equal(element('#more-records').hidden,false);
+ assert.equal(element('#more-records').disabled,false);
+ let resolveRefresh,resolveMore;const requests=[];
+ context.fetch=path=>{requests.push(path);return new Promise(resolve=>{if(requests.length===1)resolveRefresh=resolve;else resolveMore=resolve;});};
+ const refresh=context.loadTradeRecordsForTest({silent:true});
+ assert.equal(element('#more-records').disabled,true);
+ resolveRefresh(reply({generation:'g',head:'g:40',totalCount:40,nextCursor:'g:21',records:[row]}));
+ await refresh;
+ assert.equal(element('#more-records').disabled,false);
+ element('#more-records').handlers.click();
+ assert.equal(requests.length,2);
+ assert.match(requests[1],/cursor=g%3A21/);
+ assert.equal(element('#more-records').disabled,true);
+ resolveMore(reply({generation:'g',head:'g:40',totalCount:40,nextCursor:'g:1',records:[{id:'older',type:'OPEN',firstSeq:20,quantity:'1'}]}));
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(ui.tradeRecordsLoading,false);
+ assert.equal(element('#more-records').disabled,false);
+ assert.deepEqual(Array.from(ui.tradeRecords,r=>r.id),['first','older']);
+});
+
 test('unchanged category refresh preserves focused input nodes',()=>{
  const page=pageHarness();seedTestDashboard(page);
  const el=page.element('#category-options');let writes=0, markup='';
@@ -229,4 +302,129 @@ test('an external reset clears history immediately and rejects its late response
  assert.equal(ui.tradeRecords.length,0);assert.equal(ui.recordHead,null);assert.equal(ui.tradeRecordsLoading,false);
  resolve({ok:true,headers:{get(){return null;}},async text(){return JSON.stringify({generation:'old',head:'old:2',totalCount:1,records:[{id:'old-fill',type:'OPEN',firstSeq:1}]});}});
  await pending;assert.equal(ui.tradeRecords.length,0);assert.equal(ui.recordHead,null);
+});
+
+function seedLiveWallet(page,approval={status:'MISSING'}) {
+ seedTestDashboard(page);
+ const {ui,context}=page;
+ ui.displayMode='LIVE';ui.loading=false;
+ ui.dashboard={...ui.dashboard,executionMode:'LIVE',details:'summary',generation:'g',liveExecutionEnabled:false,positionCount:0,positions:[],portfolio:{},marketScan:{events:[],diagnostics:{availableCategories:[]}}};
+ ui.wallet={configured:true,unlocked:true,enabled:false,status:'BLOCKED',readiness:{ready:false,checks:[]},redemptionApproval:approval};
+ ui.walletAt=Date.now();
+ context.renderLiveWallet();
+}
+
+const walletReply=(body,ok=true)=>({ok,headers:{get(){return null;}},async text(){return JSON.stringify(body);}});
+
+test('wallet action errors survive read refreshes and clear after the next successful action',async()=>{
+ const page=pageHarness();seedLiveWallet(page);
+ const {ui,context,element}=page;const wallet=ui.wallet;
+ context.fetch=async path=>path.endsWith('/approve-redemption')
+  ?walletReply({error:'签名钱包 POL 不足，尚未准备授权交易'},false)
+  :walletReply(path.startsWith('/api/dashboard')?ui.dashboard:wallet);
+ await element('#wallet-approve-redemption').handlers.click();
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(ui.walletActionError,'签名钱包 POL 不足，尚未准备授权交易');
+ assert.equal(ui.walletError,null);
+ assert.match(element('#wallet-message').textContent,/上次操作：签名钱包 POL 不足/);
+ // A later successful poll still cannot erase the specific action failure.
+ await context.loadLiveWallet();
+ assert.match(element('#wallet-message').textContent,/上次操作：签名钱包 POL 不足/);
+ context.fetch=async path=>walletReply(path.startsWith('/api/dashboard')?ui.dashboard:wallet);
+ await context.postLiveWallet('check',{},element('#wallet-check'),'检查中','账户检查已更新');
+ assert.equal(ui.walletActionError,null);
+ assert.equal(element('#wallet-message').textContent.includes('POL 不足'),false);
+});
+
+test('historical wallet action errors do not block a fresh verified account, while read errors do',async()=>{
+ const page=pageHarness();seedLiveWallet(page);
+ const {ui,context,element}=page;
+ ui.walletActionError='上次操作失败';
+ ui.dashboard.liveExecutionEnabled=true;
+ const wallet={...ui.wallet,enabled:true,status:'PAUSED',readiness:{ready:true,checks:[]},redemptionApproval:{status:'APPROVED'}};
+ context.fetch=async()=>walletReply(wallet);
+ await context.loadLiveWallet();
+ assert.equal(context.liveAccountVisible(),true);
+ assert.equal(context.liveStartAvailable(),true);
+ assert.match(element('#wallet-message').textContent,/上次操作失败/);
+ context.fetch=async()=>walletReply({error:'controlled read failure'},false);
+ await context.loadLiveWallet();
+ assert.equal(context.liveAccountVisible(),false);
+ assert.equal(context.liveStartAvailable(),false);
+ assert.match(element('#wallet-message').textContent,/钱包状态读取失败：controlled read failure/);
+ assert.match(element('#wallet-message').textContent,/上次操作失败/);
+ element('#mode-toggle').handlers.click();
+ assert.equal(ui.walletActionError,null);
+});
+
+test('pending authorization displays its safe network result and public transaction identity',async()=>{
+ for (const networkError of [false,true]) {
+  const page=pageHarness();seedLiveWallet(page);
+  const {ui,context,element}=page;ui.walletActionError='previous failure';
+  const hash='0x'+'a'.repeat(64);
+  const wallet={...ui.wallet,redemptionApproval:{status:'PENDING',networkError,pendingTxHash:hash}};
+  context.fetch=async path=>walletReply(path.startsWith('/api/dashboard')?ui.dashboard:wallet);
+  await element('#wallet-approve-redemption').handlers.click();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(ui.walletActionError,null);
+  assert.match(element('#wallet-message').textContent,networkError?/网络结果暂未确认/:/尚待链上确认/);
+  assert.match(element('#wallet-message').textContent,new RegExp(hash));
+  assert.match(element('#message').textContent,networkError?/网络结果暂未确认/:/尚待链上确认/);
+  assert.equal(element('#message').className,networkError?'error':'success');
+  assert.equal(element('#wallet-approve-redemption').hidden,false);
+  assert.equal(element('#wallet-approve-redemption').textContent,'继续核对赎回授权');
+  assert.equal(element('#wallet-enable').disabled,true);
+  assert.equal(context.liveStartAvailable(),false);
+  ui.wallet.redemptionApproval.pendingTxHash='invalid-private-marker';
+  context.renderLiveWallet();
+  assert.equal(element('#wallet-message').textContent.includes('invalid-private-marker'),false);
+ }
+});
+
+test('safe authorization preparation failure is displayed even with an HTTP success response',async()=>{
+ const page=pageHarness();seedLiveWallet(page);
+ const {ui,context,element}=page;
+ const message='签名钱包 Polygon POL 不足，无法准备赎回授权交易。';
+ const wallet={...ui.wallet,redemptionApproval:{status:'FAILED',networkError:false,pendingTxHash:null,errorCode:'INSUFFICIENT_POL',errorMessage:message,stage:'prepare'}};
+ context.fetch=async path=>walletReply(path.startsWith('/api/dashboard')?ui.dashboard:wallet);
+ await element('#wallet-approve-redemption').handlers.click();
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(element('#wallet-message').textContent,message);
+ assert.equal(element('#message').textContent,message);
+ assert.equal(element('#message').className,'error');
+ assert.equal(element('#wallet-approve-redemption').textContent,'重试赎回授权');
+ assert.equal(element('#wallet-enable').disabled,true);
+});
+
+test('successful backup restoration clears historical wallet action errors',async()=>{
+ const page=pageHarness();seedLiveWallet(page);
+ const {ui,context,element}=page;
+ context.TextEncoder=TextEncoder;context.Blob=Blob;
+ ui.wallet={configured:false,unlocked:false,enabled:false,status:'UNCONFIGURED'};
+ ui.walletActionError='previous restoration failure';
+ element('#wallet-restore-file').files=[new Blob(['controlled encrypted backup'])];
+ element('#wallet-restore-password').value='controlled-backup-password';
+ const wallet={configured:true,unlocked:false,enabled:false,status:'LOCKED',redemptionApproval:null};
+ context.fetch=async path=>path.endsWith('/restore')
+  ?{...walletReply(wallet),async json(){return wallet;}}
+  :walletReply(path.startsWith('/api/dashboard')?ui.dashboard:wallet);
+ await element('#wallet-restore-form').handlers.submit({preventDefault(){}});
+ assert.equal(ui.walletActionError,null);
+ assert.equal(ui.walletError,null);
+ assert.equal(ui.wallet.status,'LOCKED');
+ assert.equal(element('#wallet-message').textContent.includes('previous restoration failure'),false);
+});
+
+test('obsolete wallet reads cannot replace the result or error of a newer action',async()=>{
+ const page=pageHarness();seedLiveWallet(page);
+ const {ui,context}=page;let resolveRead;
+ context.fetch=()=>new Promise(resolve=>{resolveRead=resolve;});
+ const pending=context.loadLiveWallet();
+ const wallet={...ui.wallet,redemptionApproval:{status:'PENDING',pendingTxHash:'0x'+'a'.repeat(64)}};
+ ui.walletEpoch++;ui.wallet=wallet;ui.walletActionError='new action failure';
+ resolveRead(walletReply({...wallet,status:'READY',readiness:{ready:true}}));
+ await pending;
+ assert.equal(ui.wallet,wallet);
+ assert.equal(ui.walletActionError,'new action failure');
+ assert.equal(ui.wallet.readiness.ready,false);
 });

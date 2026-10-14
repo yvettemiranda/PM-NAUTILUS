@@ -369,7 +369,46 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 positions[token_id] = positions.get(token_id, 0) + quantity
         return positions
 
-    def saved_pending_approval(metadata):
+    def approval_identity_matches(record, metadata):
+        return (
+            isinstance(record, dict)
+            and type(record.get("version")) is int
+            and record["version"] == 1
+            and record.get("identity")
+            == {
+                "signer": metadata["signer"],
+                "funder": metadata["funder"],
+                "signatureType": metadata["signature_type"],
+            }
+            and type(record["identity"].get("signatureType")) is int
+            and isinstance(record.get("remaining"), list)
+            and bool(record["remaining"])
+            and all(type(value) is bool for value in record["remaining"])
+        )
+
+    def unsigned_approval_failure(record, metadata):
+        from .redemption import approval_error_public
+
+        if (
+            not approval_identity_matches(record, metadata)
+            or record.get("status") != "FAILED"
+            or "pending" not in record
+            or record["pending"] is not None
+            or record.get("stage") != "prepare"
+            or not isinstance(record.get("errorCode"), str)
+            or record.get("errorCode")
+            not in {
+                "INSUFFICIENT_POL",
+                "PREPARATION_FAILED",
+                "TRANSACTION_REVERTED",
+                "APPROVAL_CHECK_FAILED",
+            }
+            or ("networkError" in record and record["networkError"] is not False)
+        ):
+            return None
+        return approval_error_public(record)
+
+    def saved_approval_diagnostic(metadata):
         from web3 import Web3
 
         from .redemption import ADAPTERS, APPROVAL_KEY, approval_error_public
@@ -379,22 +418,14 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
                 row = db.execute("SELECT value FROM meta WHERE key=?", (APPROVAL_KEY,)).fetchone()
             record = json.loads(row[0]) if row else None
-            if (
-                not isinstance(record, dict)
-                or type(record.get("version")) is not int
-                or record["version"] != 1
-                or record.get("status") != "ACTIVE"
-                or record.get("identity")
-                != {
-                    "signer": metadata["signer"],
-                    "funder": metadata["funder"],
-                    "signatureType": metadata["signature_type"],
-                }
-                or type(record["identity"].get("signatureType")) is not int
-                or not isinstance(record.get("remaining"), list)
-                or not record["remaining"]
-                or any(type(value) is not bool for value in record["remaining"])
-            ):
+            if not approval_identity_matches(record, metadata):
+                return None
+            if record.get("status") == "FAILED":
+                error = unsigned_approval_failure(record, metadata)
+                return (
+                    None if error is None else {"status": "UNKNOWN", "networkError": False, **error}
+                )
+            if record.get("status") != "ACTIVE":
                 return None
             pending = record.get("pending")
             if (
@@ -466,7 +497,9 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             "networkError": False,
         }
         if known_approval is None and wallet_state["approval"].get("status") == "UNKNOWN":
-            known_approval = saved_pending_approval(metadata)
+            known_approval = saved_approval_diagnostic(metadata)
+            if known_approval is not None:
+                result["ready"] = False
         if known_approval is not None:
             approval = wallet_state["approval"]
             known_pending = (
@@ -737,16 +770,24 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             if not vault_path.is_file():
                 raise ValueError("尚未配置加密钱包")
             await verified_vault_settings(payload.get("vaultPassword"))
+            metadata = wallet_state["metadata"] or read_public_metadata(vault_path)
             # Clear the empty ledger binding first. If unlink fails, the
             # existing encrypted wallet remains available for another try.
             with cold["LIVE"].transaction():
-                cold["LIVE"].put("live_wallet_identity", None)
                 approval = cold["LIVE"].get("redemption_approval")
+                unsigned_failure = unsigned_approval_failure(approval, metadata)
+                if (
+                    isinstance(approval, dict)
+                    and approval.get("status") == "FAILED"
+                    and unsigned_failure is None
+                ):
+                    raise ValueError("赎回授权失败记录尚未核对，不能更换钱包")
+                cold["LIVE"].put("live_wallet_identity", None)
                 if (
                     isinstance(approval, dict)
                     and approval.get("status") == "COMPLETE"
                     and approval.get("pending") is None
-                ):
+                ) or unsigned_failure is not None:
                     cold["LIVE"].put("redemption_approval", None)
             try:
                 vault_path.unlink()

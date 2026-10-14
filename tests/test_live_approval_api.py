@@ -423,6 +423,43 @@ def test_preparation_failure_returns_safe_durable_error_without_any_transaction(
         assert response.json()["readiness"]["ready"] is False
         assert client.get("/api/health").json()["liveExecutionEnabled"] is False
 
+    def unavailable(*_args, **_kwargs):
+        raise ConnectionError("controlled RPC unavailable on reboot")
+
+    def no_wallet(*_args, **_kwargs):
+        pytest.fail("Saved preparation diagnostics must not initialize an onchain wallet")
+
+    monkeypatch.setattr("pm_nautilus.app.run_readiness", unavailable)
+    monkeypatch.setattr("pm_nautilus.redemption.PolygonWallet", no_wallet)
+    with TestClient(create_app(tmp_path, public_data=False)) as client:
+        csrf = {"x-pm-csrf": client.get("/api/dashboard").headers["x-pm-csrf"]}
+        rebooted = client.post(
+            "/api/live/wallet/unlock",
+            json={"vaultPassword": _payload()["vaultPassword"]},
+            headers=csrf,
+        )
+        assert rebooted.status_code == 200, rebooted.text
+        result = rebooted.json()
+        diagnostic = result["redemptionApproval"]
+        assert diagnostic["status"] == "UNKNOWN" and diagnostic["pendingTxHash"] is None
+        assert diagnostic["standardApproved"] is None and diagnostic["negRiskApproved"] is None
+        assert diagnostic["errorCode"] == "INSUFFICIENT_POL" and diagnostic["stage"] == "prepare"
+        assert diagnostic["errorMessage"] == approval["errorMessage"]
+        assert "private provider marker" not in rebooted.text
+        assert result["status"] == "BLOCKED" and result["enabled"] is False
+        assert result["readiness"]["ready"] is False
+        checked = client.post("/api/live/wallet/check", json={}, headers=csrf)
+        assert checked.json()["redemptionApproval"] == diagnostic
+        assert (
+            client.post(
+                "/api/live/wallet/enable", json={"confirmation": "ENABLE LIVE"}, headers=csrf
+            ).status_code
+            == 400
+        )
+        assert client.get("/api/live/wallet").json()["redemptionApproval"] == diagnostic
+        assert saved(tmp_path / "LIVE" / "state.sqlite") == record
+        assert wallet.prepared == [] and wallet.broadcasts == []
+
 
 @pytest.mark.parametrize(
     "invalid",
@@ -517,3 +554,115 @@ def test_reboot_unlock_reads_only_valid_saved_pending_when_rpc_is_unavailable(
         assert client.get("/api/live/wallet").json()["redemptionApproval"] == approval
         assert saved(tmp_path / "LIVE" / "state.sqlite") == record
         assert wallet.prepared == [False] and len(wallet.broadcasts) == 1
+
+
+@pytest.mark.parametrize("failure", ["prepare", "receipt", "version", "stage", "code", "remaining"])
+def test_replacement_clears_only_unsigned_prepare_failure_and_keeps_nonce_floor(
+    tmp_path, monkeypatch, failure
+):
+    from test_live_wallet_api import _payload, _settings
+    from test_redemption_approval import ControlledWallet, saved
+    from web3.exceptions import Web3RPCError
+
+    wallet = ControlledWallet()
+    wallet.signer.address = wallet.funder = ADDRESS
+    wallet.signature_type = 0
+
+    def fail_prepare(_neg_risk):
+        raise Web3RPCError("insufficient funds: controlled preparation failure")
+
+    if failure != "receipt":
+        wallet.prepare_approval = fail_prepare
+    monkeypatch.delenv("PM_LIVE_ENABLED", raising=False)
+    monkeypatch.setattr("pm_nautilus.live_web_setup.build_live_settings", _settings)
+    monkeypatch.setattr("pm_nautilus.redemption.PolygonWallet", lambda _settings: wallet)
+    monkeypatch.setattr(
+        "pm_nautilus.app.run_readiness", lambda *_args, **_kwargs: {"ready": False, "checks": []}
+    )
+    with TestClient(create_app(tmp_path, public_data=False)) as client:
+        csrf = {"x-pm-csrf": client.get("/api/dashboard").headers["x-pm-csrf"]}
+        assert (
+            client.post("/api/live/wallet/import", json=_payload(), headers=csrf).status_code == 200
+        )
+        response = client.post(
+            "/api/live/wallet/approve-redemption",
+            json={"confirmation": "APPROVE REDEMPTION"},
+            headers=csrf,
+        )
+        assert response.status_code == 200
+        if failure == "receipt":
+            wallet.receipt_result = {"status": "FAILED", "amount": 0}
+            response = client.post(
+                "/api/live/wallet/approve-redemption",
+                json={"confirmation": "APPROVE REDEMPTION"},
+                headers=csrf,
+            )
+            assert response.status_code == 200
+    path = tmp_path / "LIVE" / "state.sqlite"
+    record = saved(path)
+    assert record["status"] == "FAILED"
+    assert (record["pending"] is not None) is (failure == "receipt")
+    if failure == "version":
+        record["version"] = True
+    elif failure == "stage":
+        record["stage"] = "receipt"
+    elif failure == "code":
+        record["errorCode"] = ["INSUFFICIENT_POL"]
+    elif failure == "remaining":
+        record["remaining"] = [1, True]
+    floor_key = f"polygon_nonce_floor:{ADDRESS.lower()}"
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE meta SET value=? WHERE key='redemption_approval'", (json.dumps(record),))
+        db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", (floor_key, "9"))
+        assert db.execute("SELECT COUNT(*) FROM intents").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM native_events").fetchone()[0] == 0
+    with TestClient(create_app(tmp_path, public_data=False)) as client:
+        csrf = {"x-pm-csrf": client.get("/api/dashboard").headers["x-pm-csrf"]}
+        removed = client.post(
+            "/api/live/wallet/remove",
+            json={
+                "vaultPassword": _payload()["vaultPassword"],
+                "confirmation": "REPLACE EMPTY WALLET",
+            },
+            headers=csrf,
+        )
+        assert removed.status_code == (200 if failure == "prepare" else 400), removed.text
+        with sqlite3.connect(path) as db:
+            assert (
+                db.execute("SELECT value FROM meta WHERE key=?", (floor_key,)).fetchone()[0] == "9"
+            )
+            approval_row = json.loads(
+                db.execute("SELECT value FROM meta WHERE key='redemption_approval'").fetchone()[0]
+            )
+            bound = json.loads(
+                db.execute("SELECT value FROM meta WHERE key='live_wallet_identity'").fetchone()[0]
+            )
+        if failure != "prepare":
+            assert approval_row == record and bound["funder"] == ADDRESS
+            assert (tmp_path / "wallet" / "live.vault").is_file()
+            return
+        assert approval_row is None and bound is None
+        assert removed.json()["redemptionApproval"] is None
+        other_key = "0x" + "2" * 64
+        other_address = Account.from_key(other_key).address
+        wallet.signer.address = wallet.funder = other_address
+        imported = client.post(
+            "/api/live/wallet/import",
+            json={**_payload(), "secret": other_key, "publicAddress": other_address},
+            headers=csrf,
+        )
+        assert imported.status_code == 200, imported.text
+        approved = client.post(
+            "/api/live/wallet/approve-redemption",
+            json={"confirmation": "APPROVE REDEMPTION"},
+            headers=csrf,
+        )
+        assert approved.status_code == 200, approved.text
+        assert approved.json()["redemptionApproval"]["errorCode"] == "INSUFFICIENT_POL"
+        assert saved(path)["identity"]["funder"] == other_address
+        assert wallet.prepared == [] and wallet.broadcasts == []
+        assert client.get("/api/health").json()["liveExecutionEnabled"] is False
+        with sqlite3.connect(path) as db:
+            assert (
+                db.execute("SELECT value FROM meta WHERE key=?", (floor_key,)).fetchone()[0] == "9"
+            )

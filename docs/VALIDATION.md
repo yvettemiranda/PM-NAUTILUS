@@ -2,11 +2,38 @@
 
 本页按日期保留当时的实测记录。旧章节中的“当前”“最近 1440 个样本”等表述只描述对应日期的版本；新版本的行为和部署状态以本页最新章节及 [HANDOFF.md](../HANDOFF.md) 为准。
 
-## 2026-10-13 全面优化验收（本地完成，待发布部署）
+## 2026-10-14 已有 Safe 连接修复（已发布部署验收）
 
-本地 `codex/full-optimization-20261013` 从 `3db8d5834524ddee0fa64b239cfc58c933f04319` 开始实现。新代码待发布至 main 与部署；下面记录本地最终结果及新增验收范围，固定提交、PR/CI 和服务器证据将在实际取得后补记。下方日期更早的服务器验收不能算作本轮结果。
+公开只读核对确认签名 EOA 与已有平台单 owner Safe 资金账户不同；不公开用户地址、资产金额或现场映射。新版本不会自动改旧绑定，地区、资金、手续费及外部旧仓核对仍须通过，真实链上全流程仍待实际验收。
 
-本地最终完整回归：**Python 486 项通过（17.00 秒、两条既有第三方弃用警告），Node 页面 24/24 通过，JS 语法、Ruff check 与 format --check（83 个 Python 文件）通过。**独立复核已结束，发现的启动钱包核对并发竞态已修复；本轮结果尚未对应已发布 Git 提交、CI 或服务器部署。
+[PR #10](https://github.com/yvettemiranda/PM-NAUTILUS/pull/10) 的应用代码 `fefcdb3963f57ceaea8f0eba93686c6024dc1f0f` 实现资金地址留空时的严格发现：官方 Gamma profile、factory 派生地址、已部署 Safe、唯一 owner 与阈值 1 必须一致，缺失、不支持或异常拒绝，不猜测 EOA。明确填地址仍走原核对路径。无任何 LIVE 交易且未启用时，用户密码加明确确认可取消规范 ACTIVE/pending=None 的未签名准备，或清理合法 FAILED/prepare 未形成待确认交易的记录，随空白钱包清除旧绑定；已消费 nonce 下限保留，未知提交及不可信记录继续拒绝。
+
+本地 **591 项 Python、33 项 Node 页面**及 Ruff（**85 个 Python 文件**）通过，覆盖严格 Safe 发现、手填兼容、异常/不支持拒绝、导入失败不落钱包、未签名准备取消及未知状态拒绝。[PR CI 38494911007](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/38494911007) 与 [main CI 38495374302](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/38495374302) 的 x86_64/ARM64 及 Docker verify 均通过。生产公开资料的发现 helper 只读核对通过；未在正式钱包删除/重导或验收真实交易闭环。操作见 [首次实盘指南](START_FRESH_LIVE.md)。
+
+**服务器最终 proof（2026-10-14 13:36 CST / 05:36 UTC）：**源码、镜像、env 与运行 revision 均为 `fefcdb3963f57ceaea8f0eba93686c6024dc1f0f`，容器 healthy、restarts=0、OOM=false、后台错误为空，TEST 恢复 RUNNING、LIVE=false、钱包 LOCKED；05:36:52 UTC 公网健康接口再次确认。完整在线 TEST validation PASS，**59.319 秒**；真实离线副本 Runtime full validation 与停机 Store 两库全部旧逻辑数据精确保留均通过。参数、代次、native/equity 历史、钱包、依赖/配置/安全设置保留；全仓摘要及分页历史（当时 **658 条**）、部署 JS 哈希、HTTPS 证书/认证及未认证钱包接口 401 通过。新备份一致性回滚比对、recipient 加密与哈希验证通过，目录和密文 SHA 见 [HANDOFF](../HANDOFF.md)；未演练解密恢复。
+
+## 2026-10-14 钱包授权与页面后续修复（512 已部署验收）
+
+已只读确认前次授权失败发生在链上交易准备阶段，该次未签名或广播授权交易。新容器启动时钱包 LOCKED、LIVE 未启用；用户随后解锁，账户 BLOCKED，资金地址连接问题见上一节。08:49 CST 和 10-13 的 LOCKED 都是当时快照。用户地址、资产金额、钱包诊断和私有 RPC 信息不发布到仓库。
+
+[PR #9](https://github.com/yvettemiranda/PM-NAUTILUS/pull/9) 已合并，固定代码 `512c8a2b0147bd12321f07fa3a008d57adf8c166`。本地 **545 项 Python、32 项 Node 页面**及 JS 语法、Ruff check/format（**83 个 Python 文件**）通过；[PR CI 38490241684](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/38490241684) 与 [main CI 38490656664](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/38490656664) 的 x86_64/ARM64 及 Docker verify 均通过。服务器 verify 构建、TEST/LIVE Store 全逻辑数据精确保留、真实 TEST 离线副本 Runtime 完整 validation 均通过。现场最终容器 healthy、restarts=0、OOM=false、TEST/RUNNING、LIVE=false、用户解锁后钱包 BLOCKED、后台错误为空；完整 TEST validation PASS，58.614 秒。参数、代次、native/equity 历史、钱包、依赖及安全设置保留，全仓摘要/分页历史（当时 656 条）、部署 JS 哈希、HTTPS 证书与认证门控通过。08:49 CST 的 LOCKED 是重启初始快照，不能当作当前解锁状态。备份及回滚一致性、加密/哈希验证通过，目录与密文哈希见 [HANDOFF](../HANDOFF.md)，未做解密恢复演练。
+
+已查 [官方钱包说明](https://docs.polymarket.com/trading/wallets-auth)：本程序完整支持 EOA(0)/单签 Safe(2)，但没有实测 EOA 允许交易名单资格，Deposit Wallet(3) 不在支持范围；准备资金及首次实盘须先解决类型与官方准入。
+
+新增回归覆盖签名前 POL 与当次 gas 检查、准备失败持久化与安全错误分类、未知提交保留原交易、两类 Exchange 的 CTF 交易权限准入及每笔新买重新核对四项 CTF 授权、同钱包 PENDING 不被查询 UNKNOWN 覆盖、页面错误跨自动读取保留、同时展示全部账户阻碍，以及摘要持仓标签。`test_live_approval_api.py` 另覆盖 FAILED 准备诊断重启后保留；无活动账本只允许清除身份匹配、prepare 未形成待确认交易、pending=None 且错误码可信的失败授权及旧钱包绑定，nonce 消费下限保留，未知或不可信 FAILED 拒绝删除。以上使用受控账户/RPC，并未完成正式钱包删除、真实订单或链上授权闭环；不以部署验收代替真实账户闭环。授权范围及操作见 [实盘准备检查](LIVE_READINESS.md)。
+
+## 2026-10-13 全面优化验收（已发布部署）
+
+固定应用代码 `b805c4f11bffe09c0bc5dc610e106223a94025aa` 已经 [PR #8](https://github.com/yvettemiranda/PM-NAUTILUS/pull/8) 合并到 main；[PR CI](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/38383623330)、[main CI](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/38384005105) 的 Ubuntu x86_64/ARM64 测试及 Docker verify 全部成功。服务器已更新到该固定代码；本节记录本轮结果，下方旧章节保留有日期的历史验收。
+
+本地最终完整回归：**Python 486 项通过（17.00 秒、两条既有第三方弃用警告），Node 页面 24/24 通过，JS 语法、Ruff check 与 format --check（83 个 Python 文件）通过。**独立复核已结束，发现的启动钱包核对并发竞态已修复；固定发布提交与双架构 CI 已核对，服务器验收见下一段。
+
+**服务器现场验收（2026-10-13 18:51 CST / 10:51 UTC）：**
+
+- `43.159.133.129` 的源码/镜像/runtime revision 均为 `b805c4f11bffe09c0bc5dc610e106223a94025aa`；healthy、零重启、未 OOM、后台错误为空。TEST 已恢复原 RUNNING，LIVE 未启用、钱包 LOCKED。升级前完整 validation 通过，部署后现场完整 validation 再次通过，耗时 57.653 秒。
+- 私有回滚两库完整比对通过；新 Store 打开实际 TEST/LIVE 两库后，v2 全部逻辑数据、规则参数、generation、native/equity 历史、钱包、依赖/配置/安全设置精确保留。真实 TEST 账本离线副本的 Runtime 完整验证、全仓 summary=full 及 history 数量检查通过。
+- 现场全仓摘要与分页历史通过，当时 649 条记录；页面 JS 哈希匹配部署源码；HTTPS 证书/认证与未认证钱包接口 401 通过。维护前后两份核对脚本最终 PASS。
+- 停机备份目录及密文 SHA 见 [HANDOFF](../HANDOFF.md)。已检查加密头和哈希，未解密并演练恢复。后续仅同步文档时，源码 main SHA 可更新，应用镜像及运行 revision 保持固定代码，无需重建或重启。
 
 已取得的局部验收：Chrome headless 使用受控 API，在 1280px 与 320px 下无页面错误或横向溢出；1,000 个持仓初始只展示 20 个、总数仍为 1,000，分类焦点在 500ms 自动刷新后保持，10,005 条交易记录可继续“更多”，未接钱包的 LIVE START 禁用。这是本地浏览器实测，不是生产页面或真实账户现场结果。
 
@@ -20,7 +47,7 @@
 - **行情与规则：**`test_market_full_optimization.py` 验证旧 socket 关闭等待期间已不可交易、TEST 缩范围/重置不影响仍被 LIVE 使用的订阅、公开结算不延迟定时控制且停止时被等待。`test_rules_full_optimization.py` 覆盖整数预算、首个 SELL 批次/共享深度/尾仓、Bid 哈希与止损版本、进度边界；`test_store_historical_tokens.py` 验证历史身份 SQL 查询保留。
 - **START 与页面：**`test_strategy_full_optimization.py` 验证完整异步校验与返回后当前状态检查；`test_full_optimization_views.py` 和实际 `app.js` 页面回归覆盖全仓深度估值/未知状态、摘要与明细隔离、格式器/焦点、隐藏页停止轮询/返回更新，以及超过 10,000 条后的稳定分页、迟到成交、代次和模式隔离。收益采样不构造页面明细，但保留全部资金计算。
 
-既有策略设置与发布安全条件保留。局部基准、离线模拟或服务器 TEST 结果均不能证明真实成交延迟和滑点改善；真实钱包 BUY/SELL、实际费用与份额、正额赎回及故障恢复仍待独立授权验收。最新状态见 [HANDOFF.md](../HANDOFF.md)。
+既有策略设置与发布安全条件保留。局部基准、离线模拟或服务器 TEST 结果均不能证明真实成交延迟和滑点改善；真实钱包 BUY/SELL、实际费用与份额、正额赎回及故障恢复仍待实际验收。最新状态见 [HANDOFF.md](../HANDOFF.md)。
 
 ## 2026-10-12 代码与服务器验收（历史）
 

@@ -1,10 +1,12 @@
 # PM-SMALL → NautilusTrader 迁移设计与当前架构
 
-## 文档范围（2026-10-13）
+## 文档范围（2026-10-14）
 
 本页保留原迁移依据与规则对应表，并说明当前实现。版本、服务器采样、发布证据和待完成的实盘验收以 [HANDOFF.md](../HANDOFF.md) 和 [VALIDATION.md](VALIDATION.md) 最新章节为准；[原始迁移要求](../PM-SMALL_Nautilus_Codex_Instructions.md) 保留为历史需求来源。
 
-2026-10-13 新一轮优化已完成本地实现、独立复核与最终回归，待发布部署；本文的新增实现描述不代表服务器已经更新。上一轮 2026-10-12 的应用 `dbf36d40`、405/17 项回归和双架构 CI 保留在最新交接及验证文档的历史章节。既有策略参数、筛选、预算、目标和止损条件保留；BUY 精度修复对齐锁定 SDK，会纠正部分旧模拟数量。代码和受控响应测试通过不能替代新服务器、真实钱包及首次实盘验收。
+2026-10-13 新一轮优化已由 [PR #8](https://github.com/yvettemiranda/PM-NAUTILUS/pull/8) 发布部署，固定应用代码为 `b805c4f11bffe09c0bc5dc610e106223a94025aa`，双架构 CI 与服务器完整 TEST 验收通过；账本和规则保留。10-14 `512c8a2` 后续修复亦已部署验收，当前已有 Safe 连接修复亦已发布部署验收。最新状态见交接及验证文档。既有策略参数、筛选、预算、目标和止损条件保留；BUY 精度修复对齐锁定 SDK，会纠正部分旧模拟数量。代码和受控响应测试不能替代真实钱包首次实盘验收。
+
+10-14 [PR #10](https://github.com/yvettemiranda/PM-NAUTILUS/pull/10) 已发布部署代码 `fefcdb3963f57ceaea8f0eba93686c6024dc1f0f`，591 项 Python/33 项页面与 Ruff（85 文件）、PR/main 双架构 CI/Docker verify 和服务器完整验收通过。13:36 CST 状态 TEST/RUNNING、LIVE 未启用、钱包 LOCKED，原规则/账本保留；旧 `512c8a2` 证据留在有日期历史。新代码资金地址留空只读发现已有 canonical 单签 Safe，失败拒绝，不猜测 EOA。没有交易或在途时，用户密码确认清除规范未签名准备及旧绑定后重导，nonce 下限保留，不自动改已有 vault。完整路径仍只支持 EOA(0)/单签 Safe(2)，EOA 允许交易名单资格未验证，Deposit Wallet(3) 不支持。
 
 ## 原迁移版本与依据（2026-09-06）
 

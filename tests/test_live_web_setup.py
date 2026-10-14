@@ -160,3 +160,184 @@ def test_incomplete_api_credentials_are_rejected():
             http_client=object(),
         )
     assert error.value.stage == "clob"
+
+
+_DEFAULT_PROFILE = object()
+
+
+class DiscoveryHTTP:
+    def __init__(self, profile=_DEFAULT_PROFILE, *, status=200, error=None):
+        self.profile = (
+            {"proxyWallet": SAFE, "name": SECRET} if profile is _DEFAULT_PROFILE else profile
+        )
+        self.status, self.error = status, error
+        self.requests = []
+
+    def get(self, url, *, params, headers):
+        self.requests.append((url, params, headers))
+        if self.error:
+            raise self.error
+        return SimpleNamespace(status_code=self.status, json=lambda: self.profile)
+
+
+class DiscoveryRPC:
+    def __init__(self, **changes):
+        self.values = {
+            "chain": "0x89",
+            "block": "0x123",
+            "signer_code": "0x",
+            "factory_code": "0x01",
+            "safe_code": "0x02",
+            "expected": SAFE,
+            "owners": [MATERIAL.address],
+            "threshold": 1,
+            **changes,
+        }
+        self.block = "latest"
+        self.calls = []
+
+    def query(self, method, params):
+        self.calls.append((method, params))
+        if method == "eth_chainId":
+            return self.values["chain"]
+        if method == "eth_blockNumber":
+            return self.values["block"]
+        assert method == "eth_getCode" and params[1] == self.values["block"]
+        return self.values[
+            "signer_code"
+            if params[0] == MATERIAL.address
+            else "factory_code"
+            if params[0] == setup.SAFE_FACTORY
+            else "safe_code"
+        ]
+
+    def call(self, address, signature, args=(), types=(), outputs=("uint256",)):
+        self.calls.append(("eth_call", address, signature, self.block))
+        assert self.block == self.values["block"]
+        if signature == "computeProxyAddress(address)":
+            assert address == setup.SAFE_FACTORY
+            assert args == (MATERIAL.address,) and types == outputs == ("address",)
+            return self.values["expected"]
+        assert address == SAFE
+        if signature == "getOwners()":
+            assert outputs == ("address[]",)
+            return self.values["owners"]
+        assert signature == "getThreshold()"
+        return self.values["threshold"]
+
+
+def test_discovery_reads_profile_and_canonical_safe_at_one_block_without_auth():
+    transport, rpc = DiscoveryHTTP(), DiscoveryRPC()
+    funder = setup.discover_funder(
+        MATERIAL.address,
+        http_client=transport,
+        rpc_factory=lambda client, url: rpc
+        if client is transport and url == setup.DEFAULT_POLYGON_RPC
+        else None,
+    )
+    assert funder == SAFE
+    assert transport.requests == [
+        (setup.PUBLIC_PROFILE_URL, {"address": MATERIAL.address}, {"Accept": "application/json"})
+    ]
+    assert [call[0] for call in rpc.calls] == [
+        "eth_chainId",
+        "eth_blockNumber",
+        "eth_getCode",
+        "eth_getCode",
+        "eth_getCode",
+        "eth_call",
+        "eth_call",
+        "eth_call",
+    ]
+    assert MATERIAL.private_key not in repr(transport.requests)
+
+
+@pytest.mark.parametrize(
+    "profile,status,code",
+    [
+        ({}, 404, "PROFILE_NOT_FOUND"),
+        ({}, 200, "PROFILE_NOT_FOUND"),
+        (None, 200, "PROFILE_NOT_FOUND"),
+        ([], 200, "PROFILE_NOT_FOUND"),
+        ({"name": SECRET}, 200, "UNSUPPORTED_PROFILE_WALLET"),
+        ({"proxyWallet": SECRET}, 200, "UNSUPPORTED_PROFILE_WALLET"),
+        ({"proxyWallet": "0x" + "00" * 20}, 200, "UNSUPPORTED_PROFILE_WALLET"),
+        ({"proxyWallet": MATERIAL.address}, 200, "UNSUPPORTED_PROFILE_WALLET"),
+        ({"proxyWallet": SAFE}, 302, "PROFILE_LOOKUP_FAILED"),
+        ({"proxyWallet": SAFE}, 503, "PROFILE_LOOKUP_FAILED"),
+    ],
+)
+def test_profile_discovery_fails_closed_without_choosing_eoa(profile, status, code):
+    with pytest.raises(setup.LiveSetupError) as error:
+        setup.discover_funder(
+            MATERIAL.address,
+            http_client=DiscoveryHTTP(profile, status=status),
+            rpc_factory=lambda *_: pytest.fail("No RPC after unsupported profile"),
+        )
+    assert error.value.as_public() == {"stage": "discovery", "errorType": code}
+    assert SECRET not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"chain": "0x1"},
+        {"block": SECRET},
+        {"signer_code": "0x01"},
+        {"factory_code": "0x"},
+        {"safe_code": "0x"},
+        {"expected": "0x" + "33" * 20},
+        {"owners": []},
+        {"owners": ["0x" + "33" * 20]},
+        {"owners": [MATERIAL.address, SAFE]},
+        {"threshold": 2},
+        {"threshold": True},
+    ],
+)
+def test_discovery_rejects_wrong_factory_deployment_chain_or_ownership(changes):
+    with pytest.raises(setup.LiveSetupError) as error:
+        setup.discover_funder(
+            MATERIAL.address,
+            http_client=DiscoveryHTTP(),
+            rpc_factory=lambda *_: DiscoveryRPC(**changes),
+        )
+    assert error.value.as_public() == {
+        "stage": "discovery",
+        "errorType": "SAFE_VERIFICATION_FAILED",
+    }
+    assert SECRET not in str(error.value)
+
+
+@pytest.mark.parametrize("stage", ["profile", "rpc"])
+def test_discovery_network_errors_never_expose_rpc_or_profile_details(stage):
+    def unavailable(*_args):
+        raise RuntimeError(SECRET)
+
+    with pytest.raises(setup.LiveSetupError) as error:
+        setup.discover_funder(
+            MATERIAL.address,
+            http_client=DiscoveryHTTP(error=RuntimeError(SECRET) if stage == "profile" else None),
+            rpc_factory=unavailable,
+        )
+    assert error.value.stage == "discovery"
+    assert SECRET not in str(error.value) + repr(error.value.as_public())
+
+
+def test_default_discovery_transport_has_bounded_timeout_and_no_redirect_or_env_proxy(monkeypatch):
+    options, closed = [], []
+
+    class Transport(DiscoveryHTTP):
+        def __init__(self, **kwargs):
+            options.append(kwargs)
+            super().__init__()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            closed.append(True)
+
+    monkeypatch.setattr(setup.httpx, "Client", Transport)
+    assert setup.discover_funder(MATERIAL.address, rpc_factory=lambda *_: DiscoveryRPC()) == SAFE
+    assert options == [{"timeout": 20, "follow_redirects": False, "trust_env": False}]
+    assert closed == [True]

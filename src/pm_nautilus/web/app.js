@@ -1,4 +1,4 @@
-import { displayStatus, curveSegments, modeSwitchDecision, walletOriginSecure, liveWalletAccountVerified, liveRunSummary, redemptionApprovalAction, panelVisible, setMarkupIfChanged } from "./ui-state.js?v=20261014-wallet1";
+import { displayStatus, curveSegments, modeSwitchDecision, walletOriginSecure, liveWalletAccountVerified, liveRunSummary, redemptionApprovalAction, panelVisible, setMarkupIfChanged } from "./ui-state.js?v=20261014-wallet2";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -508,7 +508,7 @@ $("#wallet-import-form").addEventListener("submit", (event) => {
   if (kind === "mnemonic" && words.some((word) => !word || /\s/.test(word))) { showMessage("请按顺序填满 12 个助记词", true); return; }
   if (!secret) { showMessage("请填写钱包私钥", true); return; }
   const publicAddress = $("#wallet-public-address").value.trim();
-  if (!/^0x[0-9a-fA-F]{40}$/.test(publicAddress)) { showMessage("请填写 Polymarket 页面显示的 0x 钱包地址", true); return; }
+  if (publicAddress && !/^0x[0-9a-fA-F]{40}$/.test(publicAddress)) { showMessage("请填写 Polymarket 页面显示的 0x 钱包地址", true); return; }
   const accountIndex = Number($("#wallet-account-index").value);
   if (!Number.isSafeInteger(accountIndex) || accountIndex < 0) { showMessage("钱包账户序号应为非负整数", true); return; }
   const vaultPassword = $("#wallet-vault-password").value;

@@ -312,7 +312,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 configured
                 and not enabled
                 and cold.get("LIVE")
-                and not ledger_has_activity(cold["LIVE"])
+                and not ledger_has_activity(cold["LIVE"], cancellable_metadata=metadata)
             ),
             "status": status,
             "signer": metadata["signer"] if metadata else None,
@@ -325,17 +325,24 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             or ("实盘账户需要重新核对" if status == "ERROR" else None),
         }
 
-    def ledger_has_activity(store):
+    def ledger_has_activity(store, *, cancellable_metadata=None):
         for table in ("intents", "native_events"):
             if store.db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
                 return True
         business = store.get("business")
         approval = store.get("redemption_approval")
+        bound = store.get("live_wallet_identity")
+        cancellable = (
+            isinstance(bound, dict)
+            and bound == cancellable_metadata
+            and type(bound.get("signature_type")) is int
+            and unsigned_approval_preparation(approval, cancellable_metadata)
+        )
         return any(business.get(key) for key in ("cycles", "claims", "settled")) or (
             approval is not None
             and (
                 not isinstance(approval, dict)
-                or approval.get("status") == "ACTIVE"
+                or (approval.get("status") == "ACTIVE" and not cancellable)
                 or approval.get("pending") is not None
             )
         )
@@ -407,6 +414,18 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         ):
             return None
         return approval_error_public(record)
+
+    def unsigned_approval_preparation(record, metadata):
+        # Only the canonical record saved before creating a transaction can be
+        # cancelled by the user's explicit password-confirmed empty-wallet removal.
+        return (
+            isinstance(metadata, dict)
+            and approval_identity_matches(record, metadata)
+            and set(record) == {"version", "status", "identity", "remaining", "pending"}
+            and record["status"] == "ACTIVE"
+            and record["pending"] is None
+            and record["remaining"] in ([False], [True], [False, True])
+        )
 
     def saved_approval_diagnostic(metadata):
         from web3 import Web3
@@ -690,10 +709,13 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 raise ValueError("LIVE 正在运行，不能更换钱包")
             from web3 import Web3
             from .live import validate_settings
-            from .live_web_setup import build_live_settings, LiveSetupError
+            from .live_web_setup import build_live_settings, discover_funder, LiveSetupError
 
             public_address = payload.get("publicAddress")
-            if not isinstance(public_address, str) or not Web3.is_address(public_address):
+            if public_address is not None and (
+                not isinstance(public_address, str)
+                or (public_address.strip() and not Web3.is_address(public_address))
+            ):
                 raise ValueError("请填写有效的 Polymarket 公开钱包地址")
             password_input = payload.get("vaultPassword")
             if not isinstance(password_input, str) or len(password_input) < 12:
@@ -704,6 +726,16 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 mnemonic_passphrase=payload.get("mnemonicPassphrase", ""),
                 account_index=payload.get("accountIndex", 0),
             )
+            rpc_url = os.getenv("PM_POLYGON_RPC_URL", "https://polygon-bor-rpc.publicnode.com")
+            if public_address is None or not public_address.strip():
+                try:
+                    public_address = await asyncio.to_thread(
+                        discover_funder, material.address, rpc_url=rpc_url
+                    )
+                except LiveSetupError:
+                    raise ValueError(
+                        "无法自动确认已部署的单签 Safe，请核对网络或填写官方资金地址"
+                    ) from None
             public_address = Web3.to_checksum_address(public_address)
             proposed = {
                 "signer": material.address,
@@ -711,7 +743,6 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 "signature_type": 0 if material.address == public_address else 2,
             }
             ensure_wallet_identity(proposed)
-            rpc_url = os.getenv("PM_POLYGON_RPC_URL", "https://polygon-bor-rpc.publicnode.com")
             try:
                 settings = await asyncio.to_thread(
                     build_live_settings, material, public_address, rpc_url=rpc_url
@@ -765,10 +796,11 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         async with wallet_lock:
             if "LIVE" in runtimes or legacy_live_enabled:
                 raise ValueError("LIVE 已启用，不能直接更换钱包")
-            if ledger_has_activity(cold["LIVE"]):
-                raise ValueError("LIVE 已有交易记录，不能更换钱包")
             if not vault_path.is_file():
                 raise ValueError("尚未配置加密钱包")
+            removal_metadata = wallet_state["metadata"] or read_public_metadata(vault_path)
+            if ledger_has_activity(cold["LIVE"], cancellable_metadata=removal_metadata):
+                raise ValueError("LIVE 已有交易记录，不能更换钱包")
             await verified_vault_settings(payload.get("vaultPassword"))
             metadata = wallet_state["metadata"] or read_public_metadata(vault_path)
             # Clear the empty ledger binding first. If unlink fails, the
@@ -776,6 +808,9 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             with cold["LIVE"].transaction():
                 approval = cold["LIVE"].get("redemption_approval")
                 unsigned_failure = unsigned_approval_failure(approval, metadata)
+                unsigned_preparation = unsigned_approval_preparation(approval, metadata)
+                if ledger_has_activity(cold["LIVE"], cancellable_metadata=metadata):
+                    raise ValueError("LIVE 已有交易记录，不能更换钱包")
                 if (
                     isinstance(approval, dict)
                     and approval.get("status") == "FAILED"
@@ -784,10 +819,14 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                     raise ValueError("赎回授权失败记录尚未核对，不能更换钱包")
                 cold["LIVE"].put("live_wallet_identity", None)
                 if (
-                    isinstance(approval, dict)
-                    and approval.get("status") == "COMPLETE"
-                    and approval.get("pending") is None
-                ) or unsigned_failure is not None:
+                    (
+                        isinstance(approval, dict)
+                        and approval.get("status") == "COMPLETE"
+                        and approval.get("pending") is None
+                    )
+                    or unsigned_failure is not None
+                    or unsigned_preparation
+                ):
                     cold["LIVE"].put("redemption_approval", None)
             try:
                 vault_path.unlink()

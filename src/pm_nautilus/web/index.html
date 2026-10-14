@@ -40,7 +40,7 @@
           </div>
           <label id="wallet-key-view" class="wallet-field" hidden><span>私钥</span><input id="wallet-private-key" type="password" data-wallet-secret autocomplete="new-password" autocapitalize="none" spellcheck="false" placeholder="0x…" /></label>
           <button id="wallet-reveal" class="wallet-text-button" type="button" aria-pressed="false">显示输入</button>
-          <label class="wallet-field"><span>Polymarket 页面显示的钱包地址</span><input id="wallet-public-address" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="0x…" required /></label>
+          <label class="wallet-field"><span>Polymarket 资金钱包地址</span><input id="wallet-public-address" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="留空自动查找已有 Safe 账户" /></label>
           <details id="wallet-advanced" class="wallet-advanced">
             <summary>高级选项（一般不用填写）</summary>
             <label class="wallet-field"><span>助记词额外密码</span><input id="wallet-mnemonic-passphrase" type="password" data-wallet-secret autocomplete="new-password" /></label>
@@ -417,6 +417,6 @@
 
       <p id="message" role="status" aria-live="polite"></p>
     </main>
-    <script type="module" src="/app.js?v=20261014-wallet1"></script>
+    <script type="module" src="/app.js?v=20261014-wallet2"></script>
   </body>
 </html>

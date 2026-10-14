@@ -4,11 +4,13 @@ PM-NAUTILUS 是基于 [NautilusTrader](https://github.com/nautechsystems/nautilu
 
 程序只管理自身产生的订单、仓位和赎回权利，不导入 PM-SMALL 的历史账本，也不接管手动仓位。TEST 与 LIVE 使用同一套策略算法，但各自保存参数，成交、手续费、资金和结算路径不同；TEST 的结果不能当作 LIVE 会同样成交或产生同样收益的证明。
 
-**2026-10-13：本地优化与正确性修复已完成，待发布部署。**现有策略参数、筛选、预算、目标和止损规则保留；BUY 精度修复会纠正此前与锁定 SDK 不一致的模拟份额。此前服务器部署记录是 2026-10-12 的 `dbf36d4`，不能把新代码当成已在服务器生效。最新版本、验证和部署证据统一见 [HANDOFF.md](HANDOFF.md)。真实钱包买卖至赎回的闭环仍未实测，新服务器须重新核对地区与账户。
+**2026-10-14：钱包与页面修复已部署，最终现场验收待确认。**[PR #9](https://github.com/yvettemiranda/PM-NAUTILUS/pull/9) 已合并，固定应用代码 `512c8a2b0147bd12321f07fa3a008d57adf8c166`，545 项 Python/32 项页面回归及 PR/main 双架构 CI 通过。08:49 CST 公网健康接口读回该版本、TEST/RUNNING、LIVE 未启用、钱包 LOCKED、后台错误为空；完整最终现场结果尚待读取。原策略参数保留，备份、验收及账户核对证据见 [HANDOFF.md](HANDOFF.md)。真实交易闭环及真实延迟/滑点仍未实测。
 
 ## 换电脑、换服务器后从零开始
 
 不保留旧 TEST 模拟记录、准备在新服务器首次使用本程序实盘时，先看 [从 GitHub 到首次实盘](docs/START_FRESH_LIVE.md)。初次服务器安装仍需配置 Docker、HTTPS 和网页登录；之后可在网页 LIVE 页导入并解锁钱包、查看只读检查、启用为 PAUSED，再由本人按 START。TEST 不需要钱包。
+
+**先确认钱包类型和官方资格。**当前完整路径仅支持 EOA（签名类型 0）和单签 Safe（类型 2、唯一 owner、阈值 1）。[官方钱包说明](https://docs.polymarket.com/trading/wallets-auth#set-up-eoa-trading)要求 EOA 列入允许交易名单，本程序尚未验证此项；新建官方账号默认的 Deposit Wallet（类型 3）当前不支持。新钱包和新服务器不等于已就绪，确认兼容和准入后再准备资金。
 
 GitHub 保存程序、说明和你同意公开的 [策略设置文件](config/strategy-profile.json)；新服务器安装时须将这份文件中的规则应用到独立的 TEST、LIVE 账本并读回核对。该文件不会自动追踪旧服务器日后的改动，也不保存钱包秘密、密码或交易记录。只克隆仓库不会交易。若本程序后来已经产生真实订单或持仓，就不能再把旧 LIVE 记录当作可丢弃的模拟历史；应按 [部署与运维手册](docs/DEPLOY.md)迁移并对账。
 

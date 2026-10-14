@@ -1,10 +1,12 @@
 # PM-SMALL → NautilusTrader 迁移设计与当前架构
 
-## 文档范围（2026-10-13）
+## 文档范围（2026-10-14）
 
 本页保留原迁移依据与规则对应表，并说明当前实现。版本、服务器采样、发布证据和待完成的实盘验收以 [HANDOFF.md](../HANDOFF.md) 和 [VALIDATION.md](VALIDATION.md) 最新章节为准；[原始迁移要求](../PM-SMALL_Nautilus_Codex_Instructions.md) 保留为历史需求来源。
 
-2026-10-13 新一轮优化已完成本地实现、独立复核与最终回归，待发布部署；本文的新增实现描述不代表服务器已经更新。上一轮 2026-10-12 的应用 `dbf36d40`、405/17 项回归和双架构 CI 保留在最新交接及验证文档的历史章节。既有策略参数、筛选、预算、目标和止损条件保留；BUY 精度修复对齐锁定 SDK，会纠正部分旧模拟数量。代码和受控响应测试通过不能替代新服务器、真实钱包及首次实盘验收。
+2026-10-13 新一轮优化已由 [PR #8](https://github.com/yvettemiranda/PM-NAUTILUS/pull/8) 发布部署，固定应用代码为 `b805c4f11bffe09c0bc5dc610e106223a94025aa`，[双架构 CI](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/38384005105) 与服务器完整 TEST 验收通过；账本和规则保留，验收时 TEST/RUNNING、LIVE 未启用且 LOCKED。10-14 钱包及页面修复已部署，最终现场验收输出待确认，最新状态见交接及验证文档。既有策略参数、筛选、预算、目标和止损条件保留；BUY 精度修复对齐锁定 SDK，会纠正部分旧模拟数量。代码和受控响应测试通过不能替代新服务器、真实钱包及首次实盘验收。
+
+10-14 [PR #9](https://github.com/yvettemiranda/PM-NAUTILUS/pull/9) 的代码 `512c8a2b0147bd12321f07fa3a008d57adf8c166` 已运行，545 项 Python/32 项页面回归与 PR/main 双架构 CI 通过。离线两库逻辑数据及 TEST Runtime 完整核对通过；08:49 CST 公网状态为 TEST/RUNNING、LIVE 未启用、钱包 LOCKED，完整最终现场输出待确认。新代码保留 FAILED 准备诊断，严格核对身份及未签名证据才允许清除无活动空白钱包的旧绑定/失败授权，保留 nonce 下限。当前完整钱包路径只支持 EOA(0) 与单签 Safe(2)；EOA 官方允许交易名单资格尚未验证，默认新建 Deposit Wallet(3) 不支持。迁移或新接入仍须先核对账户类型和官方资格，不能靠改变签名类型绕过限制。
 
 ## 原迁移版本与依据（2026-09-06）
 

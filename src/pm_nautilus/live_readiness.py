@@ -1,7 +1,7 @@
 """Read-only checks for a proposed LIVE wallet, before enabling trading.
 
-This module only calls the existing authenticated preflight and two official
-public GET endpoints. A failed or incomplete check never means ``ready``.
+This module calls authenticated preflight, official public GET endpoints and
+read-only Polygon custody queries. Incomplete checks never mean ``ready``.
 """
 
 from decimal import Decimal, InvalidOperation
@@ -14,6 +14,8 @@ import httpx
 from web3 import Web3
 
 from .private_preflight import run_preflight
+from .position_custody import PositionCustody, UINT256_MAX, token_id as custody_token_id
+from .preflight import PublicRPC
 from .redemption import RedemptionCheckError, approval_error_public
 
 
@@ -151,10 +153,7 @@ def _position_micros(row: Any, funder: str) -> int:
 
 
 def _token_id(row: dict) -> str:
-    token_id = row.get("token_id")
-    if type(token_id) is not str or not re.fullmatch(r"[0-9]+", token_id):
-        raise ValueError("Invalid position token")
-    return token_id
+    return custody_token_id(row.get("token_id"))
 
 
 def _positions_check(
@@ -162,6 +161,7 @@ def _positions_check(
     funder: str,
     known_token_ids: Collection[str] | None,
     known_positions: Mapping[str, int] | None,
+    position_reader,
 ) -> dict[str, str]:
     # The V2 OPEN set includes settled but unredeemed positions. The explicit
     # zero floor avoids the API's default 0.1-share dust filter. Follow the
@@ -175,7 +175,7 @@ def _positions_check(
         "include_archived": "true",
     }
     seen_cursors: set[str] = set()
-    observed: dict[str, int] = {}
+    observed: dict[str, list[dict]] = {}
     try:
         if not Web3.is_address(funder):
             raise ValueError("Invalid wallet")
@@ -187,24 +187,17 @@ def _positions_check(
             ):
                 raise ValueError("Invalid owned token set")
             known = frozenset(known_token_ids)
-            if any(
-                type(token_id) is not str or not re.fullmatch(r"[0-9]+", token_id)
-                for token_id in known
-            ):
-                raise ValueError("Invalid owned token ID")
+            for token_id in known:
+                custody_token_id(token_id)
         expected = None
         if known_positions is not None:
             if not isinstance(known_positions, Mapping):
                 raise ValueError("Invalid owned positions")
             expected = dict(known_positions)
-            if any(
-                type(token_id) is not str
-                or not re.fullmatch(r"[0-9]+", token_id)
-                or type(quantity) is not int
-                or quantity < 0
-                for token_id, quantity in expected.items()
-            ):
-                raise ValueError("Invalid owned position quantity")
+            for token_id, quantity in expected.items():
+                custody_token_id(token_id)
+                if type(quantity) is not int or not 0 <= quantity <= UINT256_MAX:
+                    raise ValueError("Invalid owned position quantity")
             if known_token_ids is not None and known != expected.keys():
                 raise ValueError("Owned token inputs disagree")
         for _ in range(100):
@@ -217,28 +210,43 @@ def _positions_check(
             if type(page.get("has_more")) is not bool:
                 raise ValueError("Invalid positions pagination")
             for row in rows:
-                amount = _position_micros(row, funder)
-                if amount == 0:
-                    continue
+                _position_micros(row, funder)
                 token_id = _token_id(row)
-                observed[token_id] = observed.get(token_id, 0) + amount
+                observed.setdefault(token_id, []).append(row)
             if not page["has_more"]:
                 if expected is not None:
-                    positive_expected = {
-                        token_id: amount for token_id, amount in expected.items() if amount > 0
+                    required = {
+                        tid: amount
+                        for tid, amount in expected.items()
+                        if amount > 0 or tid in observed
                     }
-                    if observed != positive_expected:
+                    actual = position_reader.balances(required)
+                    if (
+                        not isinstance(actual, Mapping)
+                        or actual.keys() != required.keys()
+                        or any(
+                            type(amount) is not int or not 0 <= amount <= UINT256_MAX
+                            for amount in actual.values()
+                        )
+                    ):
+                        raise ValueError("Incomplete custody quantities")
+                    if actual != required:
                         return _check(
                             "positions", "blocked", "实际持仓与程序记录不一致，需先核对。"
                         )
-                    return _check("positions", "pass", "实际持仓与程序记录一致。")
-                if observed and not known:
-                    return _check("positions", "blocked", "钱包里已有持仓，需先核对归属。")
-                if observed.keys() - known:
-                    return _check("positions", "blocked", "钱包里有程序未记录的持仓，需先核对。")
+                    known = expected.keys()
+                for token_id in observed.keys() - known:
+                    if not all(
+                        position_reader.is_resolved_zero(row) is True for row in observed[token_id]
+                    ):
+                        return _check(
+                            "positions", "blocked", "钱包里有程序未记录的持仓，需先核对。"
+                        )
+                if expected is not None:
+                    return _check("positions", "pass", "本程序持仓与链上份额一致。")
                 if known:
                     return _check("positions", "pass", "未发现程序记录以外的持仓。")
-                return _check("positions", "pass", "未发现钱包原有持仓。")
+                return _check("positions", "pass", "钱包持仓核对通过。")
             cursor = page.get("next_cursor")
             if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
                 raise ValueError("Invalid positions cursor")
@@ -261,6 +269,7 @@ def run_readiness(
     http_client=None,
     known_token_ids: Collection[str] | None = None,
     known_positions: Mapping[str, int] | None = None,
+    position_reader=None,
 ) -> dict[str, Any]:
     """Return a sanitized pre-LIVE checklist; never submit/sign an order.
 
@@ -270,13 +279,20 @@ def run_readiness(
     actual trading environment so the geoblock GET reflects that egress IP.
     ``known_token_ids`` may be supplied from the read-only LIVE business ledger
     during restart. Only tokens with those IDs can pass the public positions
-    check; first activation defaults to blocking every pre-existing position.
+    check; external positions pass only with a chain proof of an already
+    resolved, zero-payout binary CTF loss.
     ``known_positions`` is stronger: expected 1e-6 share counts per token from
-    the ledger must equal the full paginated public wallet inventory.
+    the ledger must equal CTF custody exactly, even if the public API rounds or
+    omits the display row. ``position_reader`` is an explicit offline test seam.
     """
     preflight = private_check if private_check is not None else run_preflight
 
     def checks_with(client):
+        reader = position_reader
+        if reader is None:
+            # This object reads lazily in the positions worker. Configuration or
+            # RPC failures remain UNKNOWN there, never fall back to API amounts.
+            reader = PositionCustody(PublicRPC(client, settings.get("rpc_url")), expected_funder)
         # No results survive this invocation. All workers are joined before the
         # HTTP client is closed, and every original activation gate still runs.
         with ThreadPoolExecutor(max_workers=3, thread_name_prefix="pm-readiness") as pool:
@@ -285,7 +301,7 @@ def run_readiness(
             )
             region_future = pool.submit(_geoblock_check, client)
             positions_future = pool.submit(
-                _positions_check, client, expected_funder, known_token_ids, known_positions
+                _positions_check, client, expected_funder, known_token_ids, known_positions, reader
             )
             account, approval = account_future.result()
             return account, approval, region_future.result(), positions_future.result()

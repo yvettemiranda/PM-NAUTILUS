@@ -18,6 +18,9 @@ from .wallet_vault import SignerMaterial
 
 DEFAULT_POLYGON_RPC = "https://polygon-bor-rpc.publicnode.com"
 SDK_VERSION = "1.0.1"
+PUBLIC_PROFILE_URL = "https://gamma-api.polymarket.com/public-profile"
+# Official Polymarket/proxy-factories Polygon deployment and view ABI.
+SAFE_FACTORY = "0xaacFeEa03eb1561C4e67d661e40682Bd20E3541b"
 
 
 class LiveSetupError(ValueError):
@@ -30,6 +33,92 @@ class LiveSetupError(ValueError):
 
     def as_public(self) -> dict[str, str]:
         return {"stage": self.stage, "errorType": self.error_type}
+
+
+def discover_funder(
+    signer: str,
+    *,
+    rpc_url: str = DEFAULT_POLYGON_RPC,
+    http_client=None,
+    rpc_factory=PublicRPC,
+) -> str:
+    """Find an existing canonical single-owner Safe using only public reads.
+
+    An absent or unsupported profile never implies an EOA funding account.
+    This does not derive credentials, deploy a wallet, or establish readiness.
+    """
+    try:
+        if not isinstance(signer, str) or not Web3.is_address(signer):
+            raise ValueError("Invalid address")
+        signer = Web3.to_checksum_address(signer)
+        rpc_url_parts = urlsplit(rpc_url)
+        if rpc_url_parts.scheme != "https" or not rpc_url_parts.hostname:
+            raise ValueError("Invalid RPC")
+    except Exception:
+        raise LiveSetupError("input", "INVALID_DISCOVERY_INPUT") from None
+
+    def discover_with(transport):
+        try:
+            response = transport.get(
+                PUBLIC_PROFILE_URL,
+                params={"address": signer},
+                headers={"Accept": "application/json"},
+            )
+            if response.status_code == 404:
+                raise LiveSetupError("discovery", "PROFILE_NOT_FOUND")
+            if response.status_code != 200:
+                raise ValueError("Unexpected profile status")
+            profile = response.json()
+        except LiveSetupError:
+            raise
+        except Exception:
+            raise LiveSetupError("discovery", "PROFILE_LOOKUP_FAILED") from None
+        if not isinstance(profile, dict) or not profile:
+            raise LiveSetupError("discovery", "PROFILE_NOT_FOUND")
+        proxy = profile.get("proxyWallet")
+        if (
+            not isinstance(proxy, str)
+            or not Web3.is_address(proxy)
+            or int(proxy, 16) == 0
+            or proxy.lower() == signer.lower()
+        ):
+            raise LiveSetupError("discovery", "UNSUPPORTED_PROFILE_WALLET")
+        funder = Web3.to_checksum_address(proxy)
+        try:
+            rpc = rpc_factory(transport, rpc_url)
+            if int(rpc.query("eth_chainId", []), 16) != 137:
+                raise ValueError("Wrong chain")
+            rpc.block = rpc.query("eth_blockNumber", [])
+            int(rpc.block, 16)
+            if (
+                rpc.query("eth_getCode", [signer, rpc.block]) != "0x"
+                or rpc.query("eth_getCode", [SAFE_FACTORY, rpc.block]) == "0x"
+                or rpc.query("eth_getCode", [funder, rpc.block]) == "0x"
+            ):
+                raise ValueError("Unsupported deployment")
+            expected = rpc.call(
+                SAFE_FACTORY, "computeProxyAddress(address)", (signer,), ("address",), ("address",)
+            )
+            if Web3.to_checksum_address(expected) != funder:
+                raise ValueError("Not the canonical Safe")
+            owners = rpc.call(funder, "getOwners()", outputs=("address[]",))
+            threshold = rpc.call(funder, "getThreshold()")
+            if (
+                not isinstance(owners, (list, tuple))
+                or len(owners) != 1
+                or Web3.to_checksum_address(owners[0]) != signer
+                or type(threshold) is not int
+                or threshold != 1
+            ):
+                raise ValueError("Unsupported Safe ownership")
+        except Exception:
+            raise LiveSetupError("discovery", "SAFE_VERIFICATION_FAILED") from None
+        return funder
+
+    if http_client is not None:
+        return discover_with(http_client)
+    with httpx.Client(timeout=20, follow_redirects=False, trust_env=False) as transport:
+        return discover_with(transport)
 
 
 def _validate_input(material, funder, rpc_url, auto_approve_redemption):
@@ -117,7 +206,8 @@ def build_live_settings(
 
     ``create_or_derive_api_key`` signs a CLOB authentication request, not an
     order. ``inspect`` performs read-only RPC calls and checks signer ownership.
-    The caller must have separately confirmed the displayed signer and funder.
+    The caller confirms the signer and either supplies the funder or accepts
+    the existing canonical Safe checked by ``discover_funder``.
     Dependencies can be injected to run complete offline tests.
     """
     signer, checked_funder, signature_type = _validate_input(

@@ -428,3 +428,30 @@ test('obsolete wallet reads cannot replace the result or error of a newer action
  assert.equal(ui.walletActionError,'new action failure');
  assert.equal(ui.wallet.readiness.ready,false);
 });
+
+test('wallet import submits a blank address for Safe discovery and rejects malformed explicit input',async()=>{
+ for (const address of ['', 'bad-address', '0x'+'2'.repeat(40)]) {
+  const page=pageHarness();seedLiveWallet(page);
+  const {ui,context,element}=page;
+  ui.wallet={configured:false,unlocked:false,enabled:false,status:'UNCONFIGURED'};
+  element('input[name="wallet-kind"]:checked').value='private_key';
+  element('#wallet-private-key').value='0x'+'1'.repeat(64);
+  element('#wallet-public-address').value=address;
+  element('#wallet-account-index').value='0';
+  element('#wallet-vault-password').value=element('#wallet-vault-confirm').value='controlled-test-password';
+  const writes=[];
+  context.fetch=async(path,options={})=>{
+   if(options.method==='POST')writes.push({path,body:JSON.parse(options.body)});
+   return walletReply(path.startsWith('/api/dashboard')?ui.dashboard:{configured:true,unlocked:true,enabled:false,status:'BLOCKED',signatureType:2,readiness:{ready:false,checks:[]}});
+  };
+  element('#wallet-import-form').handlers.submit({preventDefault(){}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(writes.length,address==='bad-address'?0:1);
+  if (writes.length) {
+   assert.equal(writes[0].path,'/api/live/wallet/import');
+   assert.equal(writes[0].body.publicAddress,address);
+   assert.equal(ui.wallet.enabled,false);
+   assert.equal(element('#wallet-enable').disabled,true);
+  }
+ }
+});

@@ -371,9 +371,10 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             quantity = cycle["quantity"]
             if type(quantity) is not int or quantity < 0:
                 raise ValueError("LIVE 持仓账本无效")
-            if quantity:
-                token_id = cycle["token_id"]
-                positions[token_id] = positions.get(token_id, 0) + quantity
+            token_id = cycle["token_id"]
+            # Closed cycles remain program identities. A remaining balance in
+            # one must still be reconciled, including a resolved losing token.
+            positions[token_id] = positions.get(token_id, 0) + quantity
         return positions
 
     def approval_identity_matches(record, metadata):

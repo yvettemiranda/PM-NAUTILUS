@@ -2,6 +2,7 @@
 
 import asyncio
 from threading import Event
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import msgspec
@@ -36,9 +37,10 @@ def test_activation_final_custody_checks_recovered_quantity_before_ready(
                 assert custody_fetched.wait(2)
                 return [msgspec.to_builtins(second)] if recover_second_fill else []
 
-            async def custody(**kwargs):
+            def custody(token_ids):
+                assert token_ids == (tok.token_id,)
                 custody_fetched.set()
-                return [{"asset": tok.token_id, "size": "5" if recover_second_fill else "10"}]
+                return {tok.token_id: 5_000_000 if recover_second_fill else 10_000_000}
 
             client = runtime.client
             client._connect = AsyncMock()
@@ -54,7 +56,10 @@ def test_activation_final_custody_checks_recovered_quantity_before_ready(
             )
             client._http_client.get_balance_allowance = Mock(return_value={"balance": "0"})
             client._http_client.get_open_orders = Mock(return_value=[])
-            client._fetch_user_positions = AsyncMock(side_effect=custody)
+            client.wallet = SimpleNamespace(token_balances=Mock(side_effect=custody))
+            client._fetch_user_positions = AsyncMock(
+                side_effect=AssertionError("Data API forbidden")
+            )
             try:
                 if recover_second_fill:
                     with pytest.raises(ValueError, match="账户实际份额不足以覆盖本程序持仓"):
@@ -66,7 +71,8 @@ def test_activation_final_custody_checks_recovered_quantity_before_ready(
                     # Capture before activate's newly scheduled maintenance starts.
                     assert client.ready and client.open_orders_clear
                     assert client.reconciliation_task is not None
-                assert client._fetch_user_positions.await_count == 2
+                assert client.wallet.token_balances.call_count == 2
+                client._fetch_user_positions.assert_not_awaited()
                 assert client._http_client.get_balance_allowance.call_count == 2
                 assert runtime.business["cycles"][tok.event_id]["quantity"] == 10_000_000
                 assert runtime.validate()["ok"]

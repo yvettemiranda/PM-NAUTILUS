@@ -1308,31 +1308,59 @@ class LiveExecution(PolymarketExecutionClient):
     async def generate_position_status_reports(self, command):
         # The wallet may contain manual assets. Verify custody of our rights without
         # publishing whole-wallet quantities as our strategy's positions.
-        positions = await self._fetch_user_positions(size_threshold=0)
-        actual = {str(p["asset"]): micros(p["size"]) for p in positions}
+        def owned_rights():
+            rights = {}
+            for c in self.owner.business["cycles"].values():
+                held = c["quantity"]
+                if type(held) is not int or not 0 <= held < 2**256:
+                    raise ValueError("本程序持仓份额无效")
+                t = self.owner.tokens[c["token_id"]]
+                if t.token_id != c["token_id"]:
+                    raise ValueError("本程序持仓标的身份无效")
+                if held == 0 or t.condition_id in self.owner.business["settled"]:
+                    continue  # Pending redemption rights are checked separately.
+                rights[t.token_id] = rights.get(t.token_id, 0) + held
+            return rights
+
+        requested = owned_rights()
+        if not requested:
+            return []
+        if self.wallet is None:
+            raise ValueError("无法确认账户实际份额")
+        # The Data API truncates share sizes to four decimal places. CTF balances
+        # preserve all six raw-unit digits, and one fresh fixed-block batch covers
+        # only our positive, unsettled rights.
+        actual = await asyncio.to_thread(self.wallet.token_balances, tuple(requested))
+        if (
+            not isinstance(actual, dict)
+            or actual.keys() != requested.keys()
+            or any(type(value) is not int or not 0 <= value < 2**256 for value in actual.values())
+        ):
+            raise ValueError("账户实际份额查询结果无效")
+        # A confirmed fill can change quantity or introduce a new token during
+        # the RPC await. Verify the current complete rights, never the snapshot.
+        current = owned_rights()
+        if any(tid not in actual or actual[tid] < held for tid, held in current.items()):
+            raise ValueError("账户实际份额不足以覆盖本程序持仓")
         reports = []
         wanted = getattr(command, "instrument_id", None)
-        for c in self.owner.business["cycles"].values():
-            t = self.owner.tokens[c["token_id"]]
-            if t.condition_id in self.owner.business["settled"]:
-                continue  # Pending redemption rights are not freshly checked CLOB custody.
-            if actual.get(t.token_id, 0) < c["quantity"]:
-                raise ValueError("账户实际份额不足以覆盖本程序持仓")
+        for tid, held in current.items():
+            t = self.owner.tokens[tid]
             iid = instrument_id(t)
-            if c["quantity"] > 0 and (wanted is None or wanted == iid):
+            if wanted is None or wanted == iid:
                 now = self._clock.timestamp_ns()
                 reports.append(
                     PositionStatusReport(
                         account_id=self.account_id,
                         instrument_id=iid,
                         position_side=PositionSide.LONG,
-                        quantity=quantity(c["quantity"]),
+                        quantity=quantity(held),
                         report_id=UUID4(),
                         ts_last=now,
                         ts_init=now,
                     )
                 )
-        # Custody was freshly checked for every reported cycle. Reporting only those
+        # Custody was freshly checked for all current rights. Reporting only those
         # rights lets the native startup batch skip N redundant wallet reads;
         # manual wallet assets never become program positions, and no cache lives
         # beyond this call.

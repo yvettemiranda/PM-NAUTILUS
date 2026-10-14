@@ -624,17 +624,21 @@ def test_startup_twelve_owned_positions_one_fresh_wallet_read_per_batch(tmp_path
             assert len(r.native.cache.positions_open()) == 12
             assert not r._test_queue_errors
             r.client.sync_owned = AsyncMock()
+            balances = Mock(return_value={row["asset"]: 10_000_000 for row in rows})
+            r.client.wallet = SimpleNamespace(token_balances=balances)
             r.client._fetch_user_positions = AsyncMock(
-                return_value=rows + [{"asset": "manual", "size": "999"}]
+                side_effect=AssertionError("Data API forbidden")
             )
             assert await r.native.execution.reconcile_execution_state(timeout_secs=5)
-            assert r.client._fetch_user_positions.await_count == 1
+            assert balances.call_count == 1
+            assert balances.call_args.args[0] == tuple(str(n) for n in range(1, 13))
             assert len(r.native.cache.positions_open()) == 12
             # A later batch must check fresh custody, never reuse the first read.
-            r.client._fetch_user_positions.return_value = rows[1:]
+            balances.return_value["1"] = 0
             with pytest.raises(ValueError, match="实际份额不足"):
                 await r.client.generate_position_status_reports(SimpleNamespace(instrument_id=None))
-            assert r.client._fetch_user_positions.await_count == 2
+            assert balances.call_count == 2
+            r.client._fetch_user_positions.assert_not_awaited()
             assert not r._test_queue_errors
 
     asyncio.run(run())
@@ -649,12 +653,15 @@ def test_settled_rights_and_manual_wallet_assets_are_not_position_reports(tmp_pa
             assert_owned_fill(r, t)
             r.business["settled"].append(t.condition_id)
             r.client._fetch_user_positions = AsyncMock(
-                return_value=[{"asset": "manual", "size": "999"}]
+                side_effect=AssertionError("Data API forbidden")
             )
+            balances = Mock(return_value={t.token_id: 0})
+            r.client.wallet = SimpleNamespace(token_balances=balances)
             reports = await r.client.generate_position_status_reports(
                 SimpleNamespace(instrument_id=None)
             )
             assert reports == []
+            balances.assert_not_called()
             assert r.business["cycles"][t.event_id]["quantity"] == 10_000_000
             assert len(r.native.cache.positions_open()) == 1
             assert not r._test_queue_errors
@@ -662,7 +669,8 @@ def test_settled_rights_and_manual_wallet_assets_are_not_position_reports(tmp_pa
             r.business["settled"].clear()
             with pytest.raises(ValueError, match="实际份额不足"):
                 await r.client.generate_position_status_reports(SimpleNamespace(instrument_id=None))
-            assert r.client._fetch_user_positions.await_count == 2
+            assert balances.call_count == 1
+            r.client._fetch_user_positions.assert_not_awaited()
 
     asyncio.run(run())
 

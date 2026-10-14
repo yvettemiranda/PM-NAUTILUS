@@ -1,6 +1,7 @@
 """The pre-LIVE checklist must fail closed without exposing wallet secrets."""
 
 import json
+from decimal import Decimal
 
 import pytest
 
@@ -57,7 +58,46 @@ def position(size, *, wallet=FUNDER, token_id="123"):
     return {"proxy_wallet": wallet, "current_size": size, "token_id": token_id, "title": SECRET}
 
 
-def check(client, *, private_check=private_pass, known_token_ids=None, known_positions=None):
+class ControlledCustody:
+    def __init__(self, balances=None, zero_tokens=()):
+        self.exact = dict(balances or {})
+        self.zero_tokens = set(zero_tokens)
+        self.calls = []
+
+    def balances(self, token_ids):
+        ids = tuple(token_ids)
+        self.calls.append(("balances", ids))
+        return {tid: self.exact.get(tid, 0) for tid in ids}
+
+    def is_resolved_zero(self, row):
+        self.calls.append(("zero", row["token_id"]))
+        return row["token_id"] in self.zero_tokens
+
+
+def check(
+    client,
+    *,
+    private_check=private_pass,
+    known_token_ids=None,
+    known_positions=None,
+    position_reader=None,
+):
+    if position_reader is None:
+        # Existing fixtures deliberately supply controlled chain quantities. The
+        # production reader never derives balances from these display responses.
+        amounts = {}
+        for response in client.responses:
+            if not isinstance(response.payload, dict):
+                continue
+            for row in response.payload.get("data", []):
+                if isinstance(row, dict) and row.get("token_id"):
+                    try:
+                        amount = int(Decimal(str(row["current_size"])) * 1_000_000)
+                    except (ArithmeticError, ValueError, TypeError):
+                        continue
+                    tid = row["token_id"]
+                    amounts[tid] = amounts.get(tid, 0) + amount
+        position_reader = ControlledCustody(amounts)
     return readiness.run_readiness(
         SETTINGS,
         SIGNER,
@@ -67,6 +107,7 @@ def check(client, *, private_check=private_pass, known_token_ids=None, known_pos
         http_client=client,
         known_token_ids=known_token_ids,
         known_positions=known_positions,
+        position_reader=position_reader,
     )
 
 
@@ -215,7 +256,7 @@ def test_token_only_and_quantity_aware_inputs_must_agree_when_both_provided():
 def test_position_cursor_is_followed_until_exhausted():
     client = Client(
         Response({"blocked": False}),
-        Response(page([position("0")], has_more=True, next_cursor="opaque-cursor")),
+        Response(page([], has_more=True, next_cursor="opaque-cursor")),
         Response(page([])),
     )
     result = check(client)
@@ -373,3 +414,114 @@ def test_readiness_preserves_only_safe_durable_approval_diagnostics(error_code):
         assert approval["errorCode"] == error_code
         assert approval["stage"] == "broadcast"
         assert approval["networkError"] is (error_code == "RPC_RESULT_UNKNOWN")
+
+
+@pytest.mark.parametrize("rows", [[position("1.0000")], [position("0")], []])
+def test_custody_exact_quantity_passes_despite_api_rounding_or_missing_display_row(rows):
+    reader = ControlledCustody({"123": 1_000_025})
+    result = check(
+        Client(Response({"blocked": False}), Response(page(rows))),
+        known_positions={"123": 1_000_025},
+        position_reader=reader,
+    )
+    assert result["ready"] is True
+    assert statuses(result)["positions"] == "pass"
+    assert reader.calls == [("balances", ("123",))]
+
+
+@pytest.mark.parametrize("actual", [999_999, 1_000_001])
+def test_even_one_micro_chain_custody_mismatch_blocks_when_api_displays_expected(actual):
+    result = check(
+        Client(Response({"blocked": False}), Response(page([position("1")]))),
+        known_positions={"123": 1_000_000},
+        position_reader=ControlledCustody({"123": actual}),
+    )
+    assert result["ready"] is False
+    assert statuses(result)["positions"] == "blocked"
+
+
+def test_program_zero_quantity_token_cannot_be_filtered_as_external_loss():
+    reader = ControlledCustody({"123": 1}, zero_tokens={"123"})
+    result = check(
+        Client(Response({"blocked": False}), Response(page([position("0")]))),
+        known_positions={"123": 0},
+        position_reader=reader,
+    )
+    assert statuses(result)["positions"] == "blocked"
+    assert reader.calls == [("balances", ("123",))]
+
+
+def test_unobserved_closed_program_tokens_do_not_force_large_chain_inventory_scan():
+    expected = {str(tid): 0 for tid in range(10_000)} | {"10000": 1_000_025}
+    reader = ControlledCustody({"10000": 1_000_025})
+    result = check(
+        Client(Response({"blocked": False}), Response(page([]))),
+        known_positions=expected,
+        position_reader=reader,
+    )
+    assert result["ready"] is True
+    assert reader.calls == [("balances", ("10000",))]
+
+
+def test_external_zero_loss_proof_does_not_hide_unrecognized_position_on_later_page():
+    reader = ControlledCustody(zero_tokens={"123"})
+    client = Client(
+        Response({"blocked": False}),
+        Response(page([position("1")], has_more=True, next_cursor="next")),
+        Response(page([position("0.000001", token_id="456")])),
+    )
+    result = check(client, known_positions={}, position_reader=reader)
+    assert statuses(result)["positions"] == "blocked"
+    assert client.calls[2][1] == {"user": FUNDER, "cursor": "next"}
+
+
+def test_external_zero_loss_proof_passes_without_changing_owned_quantities():
+    reader = ControlledCustody({"123": 1_000_025}, zero_tokens={"456"})
+    result = check(
+        Client(
+            Response({"blocked": False}),
+            Response(page([position("1.0000"), position("0", token_id="456")])),
+        ),
+        known_positions={"123": 1_000_025},
+        position_reader=reader,
+    )
+    assert result["ready"] is True
+    assert ("zero", "123") not in reader.calls
+    assert ("zero", "456") in reader.calls
+
+
+@pytest.mark.parametrize(
+    "expected,rows", [({"123": 1_000_000}, [position("1")]), ({}, [position("1")])]
+)
+def test_chain_query_failure_never_falls_back_to_api_custody_or_zero_prices(expected, rows):
+    class FailedCustody:
+        def balances(self, token_ids):
+            if token_ids:
+                raise TimeoutError(SECRET)
+            return {}
+
+        def is_resolved_zero(self, row):
+            raise TimeoutError(SECRET)
+
+    result = check(
+        Client(Response({"blocked": False}), Response(page(rows))),
+        known_positions=expected,
+        position_reader=FailedCustody(),
+    )
+    assert result["ready"] is False
+    assert statuses(result)["positions"] == "unknown"
+    assert SECRET not in json.dumps(result)
+
+
+def test_production_dependency_requires_chain_reader_without_implicit_api_fallback():
+    result = readiness.run_readiness(
+        SETTINGS,
+        SIGNER,
+        FUNDER,
+        "/unused",
+        private_check=private_pass,
+        http_client=Client(Response({"blocked": False}), Response(page([position("1")]))),
+        known_positions={"123": 1_000_000},
+    )
+    assert result["ready"] is False
+    assert statuses(result)["positions"] == "unknown"

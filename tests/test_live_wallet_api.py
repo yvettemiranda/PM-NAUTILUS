@@ -199,6 +199,39 @@ def test_remote_wallet_import_requires_https(tmp_path, monkeypatch):
         assert not (tmp_path / "wallet" / "live.vault").exists()
 
 
+def test_readiness_keeps_closed_program_token_identities(tmp_path, monkeypatch):
+    monkeypatch.delenv("PM_LIVE_ENABLED", raising=False)
+    monkeypatch.setattr("pm_nautilus.live_web_setup.build_live_settings", _settings)
+    observed = []
+
+    def readiness(*_args, **kwargs):
+        observed.append(kwargs["known_positions"])
+        return {"ready": False, "checks": []}
+
+    monkeypatch.setattr("pm_nautilus.app.run_readiness", readiness)
+    with TestClient(create_app(tmp_path, public_data=False)) as client:
+        response = client.post("/api/live/wallet/import", json=_payload(), headers=_csrf(client))
+        assert response.status_code == 200, response.text
+    store = Store(tmp_path / "LIVE" / "state.sqlite", "LIVE")
+    business = store.get("business")
+    business["cycles"] = {
+        "closed": {"token_id": "123", "quantity": 0},
+        "open": {"token_id": "456", "quantity": 1_000_025},
+        "other-cycle": {"token_id": "456", "quantity": 2_000_034},
+    }
+    store.put("business", business)
+    store.close()
+    with TestClient(create_app(tmp_path, public_data=False)) as client:
+        response = client.post(
+            "/api/live/wallet/unlock",
+            json={"vaultPassword": _payload()["vaultPassword"]},
+            headers=_csrf(client),
+        )
+        assert response.status_code == 200, response.text
+        assert observed == [{}, {"123": 0, "456": 3_000_059}]
+        assert response.json()["enabled"] is False
+
+
 def test_empty_wallet_can_be_replaced_in_the_web_page(tmp_path, monkeypatch):
     monkeypatch.delenv("PM_LIVE_ENABLED", raising=False)
     monkeypatch.setattr("pm_nautilus.live_web_setup.build_live_settings", _settings)

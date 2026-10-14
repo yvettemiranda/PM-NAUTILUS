@@ -499,6 +499,7 @@ def test_safe_preflight_reads_owner_and_threshold_in_parallel():
 def test_approval_and_outcome_balances_are_fresh_parallel_reads_that_fail_closed():
     wallet = PolygonWallet.__new__(PolygonWallet)
     wallet.funder = FUNDER
+    wallet.w3 = SimpleNamespace(eth=SimpleNamespace(block_number=123))
     wallet.preflight = Mock()
     approval_barrier = Barrier(4)
     balance_barrier = Barrier(2)
@@ -521,7 +522,11 @@ def test_approval_and_outcome_balances_are_fresh_parallel_reads_that_fail_closed
             isApprovedForAll=lambda _funder, operator: SimpleNamespace(
                 call=lambda: approval(operator)
             ),
-            balanceOf=lambda _funder, token_id: SimpleNamespace(call=lambda: balance(token_id)),
+            balanceOf=lambda _funder, token_id: SimpleNamespace(
+                call=lambda *, block_identifier: balance(token_id)
+                if block_identifier == 123
+                else pytest.fail("balance read used a different block")
+            ),
         )
     )
     wallet.buy_preflight()

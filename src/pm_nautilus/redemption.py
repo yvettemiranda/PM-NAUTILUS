@@ -363,11 +363,37 @@ class PolygonWallet:
         return self.token_balances(claim["payouts"])
 
     def token_balances(self, token_ids):
-        """Read both outcomes from the CTF contract before a new LIVE buy."""
-        ids = tuple(token_ids)
+        """Read exact raw CTF balances freshly at one fixed Polygon block."""
+        if isinstance(token_ids, (str, bytes)):
+            raise RedemptionCheckError("份额余额查询对象无效")
+        try:
+            ids = tuple(token_ids)
+        except TypeError:
+            raise RedemptionCheckError("份额余额查询对象无效") from None
+        if any(
+            not isinstance(tid, str)
+            or len(tid) > 78
+            or re.fullmatch(r"0|[1-9][0-9]*", tid) is None
+            or int(tid) >= 2**256
+            for tid in ids
+        ) or len(set(ids)) != len(ids):
+            raise RedemptionCheckError("份额余额查询对象无效")
+        if not ids:
+            return {}
+        block = self.w3.eth.block_number
+        if type(block) is not int or not 0 <= block < 2**256:
+            raise RedemptionCheckError("份额余额查询区块无效")
         balances = self._parallel_reads(
-            [self.ctf.functions.balanceOf(self.funder, int(tid)).call for tid in ids]
+            [
+                partial(
+                    self.ctf.functions.balanceOf(self.funder, int(tid)).call,
+                    block_identifier=block,
+                )
+                for tid in ids
+            ]
         )
+        if any(type(value) is not int or not 0 <= value < 2**256 for value in balances):
+            raise RedemptionCheckError("份额余额查询结果无效")
         return dict(zip(ids, balances, strict=True))
 
     def prepare(self, claim):

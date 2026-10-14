@@ -4,7 +4,11 @@
 
 如果目的是买新服务器、放弃旧 TEST 模拟记录、首次启用本程序实盘，请先读 [从 GitHub 到首次实盘](START_FRESH_LIVE.md)。下面的 Python/uv 步骤是开发环境重建细节，不是用户需要独自逐条完成的实盘清单。
 
-重建环境不改变钱包支持范围：完整路径仅 EOA(0)/单签 Safe(2)，EOA 官方允许交易名单资格未验证，默认新建 Deposit Wallet(3) 不支持。先确认类型与准入再准备资金；[PR #10](https://github.com/yvettemiranda/PM-NAUTILUS/pull/10) 的应用代码 `fefcdb3963f57ceaea8f0eba93686c6024dc1f0f` 经本地 591/33 项回归、PR/main 双架构 CI 和服务器完整验收通过；13:36 CST 状态 TEST/RUNNING、LIVE 未启用、钱包 LOCKED。旧 `512c8a2` 部署验收见历史记录。新代码留空发现已有 Safe 不代替账户准入，也不自动改已有 vault；无交易钱包由用户确认清除后重导。
+重建环境不改变钱包支持范围：完整路径仅 EOA(0)/单签 Safe(2)，EOA 官方允许交易名单资格未验证，默认新建 Deposit Wallet(3) 不支持。先确认类型与准入再准备资金；已有 Safe 自动发现不代替账户准入，也不自动改已有 vault，无交易钱包由用户确认清除后重导。
+
+**2026-10-14 本轮核对修复：**[修复 PR](https://github.com/yvettemiranda/PM-NAUTILUS/pull/12)，应用代码 `3e765ccb067c8012af5f4ea4f23c3bda91d7372f`；回归：705 项 Python / 33 项页面回归、Ruff/JS 与 PR/main 双架构 CI 通过，明细见 [最新验证](VALIDATION.md)；服务器验收：2026-10-14 19:03 CST 通过，TEST/RUNNING、LIVE 未启用、钱包 LOCKED；实际持仓与授权只读核对通过，资金/POL 与地区仍未满足条件。持仓使用本次固定区块的 CTF 原子余额，API 全分页仅发现 token；已知零数量 token 保留身份，严格链上零收益的外部标准二元残仓不再误拦截，不烧毁、赎回或接管旧仓。完整证明及失败关闭条件见 [LIVE_READINESS.md](LIVE_READINESS.md)。已有 Safe 已正确重连，升级前交易所及两个赎回适配器权限只读核对通过，资金/POL 和地区仍须满足条件；真实买卖及正额赎回尚未完成实盘闭环验收。
+
+历史 [PR #10](https://github.com/yvettemiranda/PM-NAUTILUS/pull/10) 应用代码 `fefcdb3963f57ceaea8f0eba93686c6024dc1f0f` 的本地 591/33 项回归、PR/main 双架构 CI 和服务器完整验收通过；2026-10-14 13:36 CST 当时状态 TEST/RUNNING、LIVE 未启用、钱包 LOCKED。旧 `512c8a2` 及本轮最新证据见交接/验证记录，历史状态不能代替当前核对。
 
 ## 1. 克隆项目
 

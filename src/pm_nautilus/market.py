@@ -154,6 +154,8 @@ class MarketService:
         self.categories = runtime.store.get("categories", [])
         self.closed = False
         self.loop_task = None
+        self.scan_task = None
+        self._scan_finished_at = None
         self.on_resolution = None
         self.resolution_task = None
         self.subscription_lock = asyncio.Lock()
@@ -513,15 +515,25 @@ class MarketService:
                 self.stream_state(group, "STOPPED", self.streams[group].get("error"))
 
     async def run(self):
-        last_scan = 0
         while not self.closed:
             try:
-                if asyncio.get_running_loop().time() - last_scan >= 300:
-                    await self.scan()
-                    last_scan = asyncio.get_running_loop().time()
+                if self.scan_task is not None and self.scan_task.done():
+                    completed, self.scan_task = self.scan_task, None
+                    completed.result()
+                if self.scan_task is None and (
+                    self._scan_finished_at is None
+                    or asyncio.get_running_loop().time() - self._scan_finished_at >= 300
+                ):
+                    # Public discovery may await hundreds of cursor pages. Keep
+                    # control checks independent without overlapping scans or
+                    # shortening the interval measured from scan completion.
+                    self.scan_task = asyncio.create_task(self.run_scan())
                 self.runtime.refresh_eligibility()
                 self.runtime.drain()
-                await self.sync_subscriptions()
+                if self._scan_finished_at is not None:
+                    # Preserve startup ordering: do not subscribe persisted open
+                    # discovery before the first full scan attempt has finished.
+                    await self.sync_subscriptions()
                 if self.on_resolution and (
                     self.resolution_task is None or self.resolution_task.done()
                 ):
@@ -532,6 +544,16 @@ class MarketService:
                 self.runtime.pause()
                 self.remember_error("serviceError", exc)
             await asyncio.sleep(5)
+
+    async def run_scan(self):
+        try:
+            await self.scan()
+        except Exception as exc:
+            if not self.closed:
+                self.runtime.pause()
+                self.remember_error("serviceError", exc)
+        finally:
+            self._scan_finished_at = asyncio.get_running_loop().time()
 
     async def run_resolution(self):
         try:
@@ -546,6 +568,7 @@ class MarketService:
         tasks = (
             list(self.tasks.values())
             + ([self.loop_task] if self.loop_task else [])
+            + ([self.scan_task] if self.scan_task else [])
             + ([self.resolution_task] if self.resolution_task else [])
         )
         for task in tasks:

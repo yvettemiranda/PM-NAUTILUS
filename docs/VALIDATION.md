@@ -1,5 +1,13 @@
 # 验证结果与边界
 
+## 2026-10-19 元数据与扫描优化（应用 CI 通过，待部署）
+
+固定应用代码 `10304185f588f39f8ccb0fc67b9c984500890d6f`，见 [PR #14](https://github.com/yvettemiranda/PM-NAUTILUS/pull/14)。[PR CI 39214114469](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39214114469) 和 [Push CI 39214056357](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39214056357) 的 x86_64/ARM64 与 Docker verify 全部通过。服务器终端待用户完成微信扫码认证，线上仍未执行本轮维护，以下为本地、合成及升级前证据。
+
+752 项 Python 回归（26.12 秒）、33 项页面回归、Ruff 检查/格式（93 文件）、JS/shell 语法通过，独立复核无确定 P1/P2。新增 47 项覆盖编解码/旧包/历史身份、损坏拒绝、锁/双库备份/事务、全部逻辑值污染检测、Native 重放、TEST 深度、慢扫描与关闭/共享竞态。两条既有第三方弃用警告保留。
+
+936,800 行合成基准负载减少 36.3%、可选 VACUUM 后库文件减少 31.2%、active 查询解码约 3.38 倍；未证明完整 integrity 提速。完整格式、离线维护、回滚和基准边界见 [本轮记录](METADATA_OPTIMIZATION_2026-10-19.md)。10-19 升级前 TEST/RUNNING、LIVE disabled、765/765 盘口 READY，完整 validation PASS（28.958 秒）、SQLite quick_check=ok，应用仍 `3e765cc`。以上尚非本轮 CI/正式部署验收，真实买卖与正额赎回仍待实测。
+
 本页按日期保留当时的实测记录。旧章节中的“当前”“最近 1440 个样本”等表述只描述对应日期的版本；新版本的行为和部署状态以本页最新章节及 [HANDOFF.md](../HANDOFF.md) 为准。
 
 ## 2026-10-14 精确持仓核对与零收益旧仓修复（已发布部署验收）

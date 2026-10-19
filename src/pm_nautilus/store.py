@@ -1,9 +1,12 @@
 """Durable native event journal and replayable PM business projection, per mode."""
 
 import asyncio
+import base64
+import binascii
 import json
 import msgspec
 import sqlite3
+import zlib
 from contextlib import closing, contextmanager
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
@@ -20,6 +23,61 @@ from .rules import Token, Fees
 
 _INTEGRITY_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pm-integrity")
 _BUSINESS_COLLECTIONS = ("cycles", "targets", "claims")
+# This bounds one stored metadata payload, never the number of markets/tokens.
+# Oversized input is rejected, not truncated or dropped during migration.
+_TOKEN_JSON_MAX_BYTES = 1024 * 1024
+# Immutable public JSON vocabulary for codec version 1. Changing these bytes
+# requires a new version; old bundles must remain decodable without the network.
+_TOKEN_ZDICT_V1 = (
+    b'{"token_id":"","event_id":"","market_id":"","condition_id":"","direction":"",'
+    b'"result_count":0,"neg_risk":false,"opened_ns":0,"ends_ns":0,'
+    b'"fees":{"enabled":false,"rate":0,"exponent":1},"min_size":0,"tick":0,'
+    b'"event_title":"","question":"","slug":"","category_ids":[],"category_labels":[],'
+    b'"game_start_ns":null,"open":false}'
+)
+_ACTIVE_TOKENS_SQL = (
+    "SELECT token_id,payload FROM tokens "
+    "WHERE json_extract(payload,'$.open') IS NOT 0 "
+    "UNION ALL SELECT token_id,payload FROM tokens "
+    "WHERE token_id IN (SELECT token_id FROM intents) "
+    "AND json_extract(payload,'$.open') IS 0"
+)
+
+
+def _token_json(raw):
+    def unique(pairs):
+        data = {}
+        for key, value in pairs:
+            if key in data:
+                raise ValueError("代币元数据包含重复字段")
+            data[key] = value
+        return data
+
+    def invalid_constant(_):
+        raise ValueError("代币元数据包含非法数值")
+
+    return json.loads(raw, object_pairs_hook=unique, parse_constant=invalid_constant)
+
+
+def _canonical_token_data(data):
+    if not isinstance(data, dict):
+        raise ValueError("代币元数据结构无效")
+    values = dict(data)
+    values["fees"] = Fees(**values["fees"])
+    for key in ("category_ids", "category_labels"):
+        categories = values.get(key, ())
+        if not isinstance(categories, (list, tuple)) or not all(
+            isinstance(value, str) for value in categories
+        ):
+            raise ValueError("代币分类元数据无效")
+        values[key] = tuple(categories)
+    token = Token(**values)
+    if type(token.open) is not bool:
+        raise ValueError("代币开放状态无效")
+    result = asdict(token)
+    for key in ("category_ids", "category_labels"):
+        result[key] = list(result[key])
+    return result
 
 
 class BookCache(dict):
@@ -78,6 +136,7 @@ class Store:
           WHERE json_extract(payload,'$.terminal')=0;
         CREATE INDEX IF NOT EXISTS native_fill_order ON native_events(kind,json_extract(CAST(payload AS TEXT),'$.client_order_id'));
         """)
+        self.ensure_token_index(self.db)
         self.serializer = MsgSpecSerializer(encoding=msgspec.json)
         if self.get("mode") not in (None, mode):
             raise ValueError("禁止复用其他模式数据库")
@@ -341,19 +400,129 @@ class Store:
 
     def save_token(self, token):
         self.db.execute(
-            "INSERT INTO tokens VALUES(?,?) ON CONFLICT(token_id) DO UPDATE SET payload=excluded.payload",
-            (token.token_id, json.dumps(asdict(token))),
+            "INSERT INTO tokens VALUES(?,?) ON CONFLICT(token_id) DO UPDATE SET payload=excluded.payload "
+            "WHERE tokens.payload != excluded.payload",
+            (token.token_id, self.encode_token_payload(asdict(token))),
         )
+
+    @staticmethod
+    def ensure_token_index(db):
+        """Build the optional hot-row index, including after an old bundle restore."""
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS tokens_open ON tokens(token_id) "
+            "WHERE json_extract(payload,'$.open') IS NOT 0"
+        )
+
+    @staticmethod
+    def decode_token_payload(raw):
+        """Read legacy flat JSON or a lossless versioned token envelope."""
+        try:
+            if not isinstance(raw, (str, bytes, bytearray)):
+                raise ValueError("代币元数据类型无效")
+            raw_size = len(raw.encode("utf-8")) if isinstance(raw, str) else len(raw)
+            # Even incompressible 1MiB JSON fits this base64-envelope bound.
+            if raw_size > 2 * _TOKEN_JSON_MAX_BYTES:
+                raise ValueError("代币元数据编码过大")
+            data = _token_json(raw)
+            if isinstance(data, dict) and "_token_storage" in data:
+                if (
+                    set(data) != {"_token_storage", "open", "size", "data"}
+                    or type(data["_token_storage"]) is not int
+                    or data["_token_storage"] != 1
+                    or type(data["open"]) is not bool
+                    or type(data["size"]) is not int
+                    or not 0 < data["size"] <= _TOKEN_JSON_MAX_BYTES
+                    or not isinstance(data["data"], str)
+                ):
+                    raise ValueError("代币元数据编码版本或结构无效")
+                packed = base64.b64decode(data["data"], validate=True)
+                decoder = zlib.decompressobj(zdict=_TOKEN_ZDICT_V1)
+                decoded = decoder.decompress(packed, data["size"] + 1)
+                if (
+                    len(decoded) != data["size"]
+                    or not decoder.eof
+                    or decoder.unused_data
+                    or decoder.unconsumed_tail
+                ):
+                    raise ValueError("代币元数据压缩内容无效")
+                expanded = _canonical_token_data(_token_json(decoded))
+                if expanded["open"] is not data["open"]:
+                    raise ValueError("代币元数据开放状态不一致")
+                return expanded
+            if raw_size > _TOKEN_JSON_MAX_BYTES:
+                raise ValueError("代币元数据JSON过大")
+            return _canonical_token_data(data)
+        except (KeyError, TypeError, ValueError, zlib.error, binascii.Error, OverflowError):
+            raise ValueError("代币元数据编码无效") from None
+
+    @staticmethod
+    def encode_token_payload(data):
+        """Preserve every Token field, with a queryable open flag outside zlib."""
+        data = _canonical_token_data(data)
+        raw = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(raw) > _TOKEN_JSON_MAX_BYTES:
+            raise ValueError("代币元数据JSON过大")
+        compressor = zlib.compressobj(6, zdict=_TOKEN_ZDICT_V1)
+        packed = compressor.compress(raw) + compressor.flush()
+        return json.dumps(
+            {
+                "_token_storage": 1,
+                "open": data["open"],
+                "size": len(raw),
+                "data": base64.b64encode(packed).decode("ascii"),
+            },
+            separators=(",", ":"),
+        )
+
+    @staticmethod
+    def compact_tokens(db, batch_size=256, progress=None):
+        """Transcode existing rows inside the caller's offline transaction.
+
+        The caller owns process locking, backup, logical comparisons, COMMIT and
+        any later optional VACUUM. This method never opens Store or changes meta.
+        Every original row remains, including inactive discovery-only metadata.
+        """
+        if not db.in_transaction:
+            raise ValueError("代币元数据压缩需要调用方事务")
+        if type(batch_size) is not int or not 1 <= batch_size <= 10_000:
+            raise ValueError("代币元数据批次大小无效")
+        result = {"rows": 0, "changed": 0, "before_bytes": 0, "after_bytes": 0}
+        cursor = None
+        while True:
+            query = "SELECT rowid,token_id,payload FROM tokens"
+            query += " WHERE rowid>?" if cursor is not None else ""
+            query += " ORDER BY rowid LIMIT ?"
+            rows = db.execute(
+                query, (cursor, batch_size) if cursor is not None else (batch_size,)
+            ).fetchall()
+            if not rows:
+                break
+            for row_id, token_id, payload in rows:
+                data = Store.decode_token_payload(payload)
+                if data["token_id"] != token_id:
+                    raise ValueError("代币元数据身份与主键不一致")
+                encoded = Store.encode_token_payload(data)
+                result["rows"] += 1
+                result["before_bytes"] += len(payload.encode("utf-8"))
+                result["after_bytes"] += len(encoded.encode("utf-8"))
+                if payload != encoded:
+                    db.execute("UPDATE tokens SET payload=? WHERE rowid=?", (encoded, row_id))
+                    result["changed"] += 1
+            cursor = rows[-1][0]
+            if progress is not None:
+                progress(dict(result))
+        Store.ensure_token_index(db)
+        return result
 
     def tokens(self, active_only=False):
         out = {}
-        query = "SELECT payload FROM tokens"
-        if active_only:
-            # Retain every execution identity, including closed historical markets.
-            # Inactive discovery-only metadata remains durable, not resident in RAM.
-            query += " WHERE json_extract(payload,'$.open') IS NOT 0 OR token_id IN (SELECT token_id FROM intents)"
+        # The partial index reads only open metadata; separate historical lookups
+        # retain all execution identities without scanning cold discovery JSON.
+        query = _ACTIVE_TOKENS_SQL if active_only else "SELECT token_id,payload FROM tokens"
         for row in self.db.execute(query):
-            data = json.loads(row[0])
+            data = self.decode_token_payload(row[1])
+            if data["token_id"] != row[0]:
+                raise ValueError("代币元数据身份与主键不一致")
             data["fees"] = Fees(**data["fees"])
             data["category_ids"] = tuple(data["category_ids"])
             data["category_labels"] = tuple(data["category_labels"])

@@ -6,7 +6,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 COPY src ./src
 COPY config/strategy-profile.json ./config/strategy-profile.json
-COPY scripts/apply_preferences.py ./scripts/apply_preferences.py
+COPY scripts/apply_preferences.py scripts/compact_metadata.py ./scripts/
 COPY LICENSES ./LICENSES
 COPY NOTICE.md ./NOTICE.md
 RUN chmod -R a+rX src config scripts LICENSES NOTICE.md && uv sync --frozen --no-dev && useradd --uid 10001 --create-home pm && mkdir /data && chown pm:pm /data

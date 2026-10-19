@@ -668,9 +668,28 @@ class LiveExecution(PolymarketExecutionClient):
 
     def _finish_failed_submit(self, order, exc, *, submitted=None):
         """Release only when the retry manager never reached the POST boundary."""
+        from .storage_guard import StoragePressure
+
         r = self.owner
         oid = str(order.client_order_id)
         intent = r.store.intent(oid)
+        if (
+            isinstance(exc, StoragePressure)
+            and order.side == OrderSide.BUY
+            and oid not in self._post_possible
+        ):
+            # Capacity deferral is not an account failure. Only a proven
+            # unposted BUY can be released; existing exits remain supervised.
+            if intent and not intent.get("terminal"):
+                reason = "存储保护：此买单尚未向交易所提交"
+                was_submitted = self._submitting.get(oid) if submitted is None else submitted
+                if was_submitted:
+                    self.generate_order_rejected(
+                        order.strategy_id, order.instrument_id, order.client_order_id, reason, r.now
+                    )
+                else:
+                    self.deny(order, reason)
+            return
         self.ready = False
         self.open_orders_clear = False
         # A failed submit must stop new buys without issuing cancel requests for
@@ -701,6 +720,7 @@ class LiveExecution(PolymarketExecutionClient):
         cycle = r.business["cycles"].get(t.event_id)
         basic = (
             r.status == "RUNNING"
+            and getattr(r, "storage_can_open", True)
             and r.books[t.token_id].ready
             and static_reason(t, r.preferences, r.now, r.official_tags) is None
             and t.event_id not in r.business["banned"]
@@ -1009,6 +1029,10 @@ class LiveExecution(PolymarketExecutionClient):
             or o.is_pending_cancel
         ):
             raise ValueError("LIVE账本/订单状态已变化，不能提交订单")
+        guard = getattr(r, "storage_guard", None)
+        if o.side == OrderSide.BUY and guard is not None:
+            # Also runs after signing, pool waits and each HTTP retry.
+            guard.require_safe()
         if o.side == OrderSide.BUY and (not self.open_orders_clear or not self.buy_valid(o, i)):
             raise ValueError("提交前资格/资金/暂停状态已变化")
         token = r.tokens[i["token_id"]]

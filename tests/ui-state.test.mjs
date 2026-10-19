@@ -4,6 +4,19 @@ import {pageHarness,profile,seedTestDashboard} from './ui-app-harness.mjs';
 import {displayStatus,curveSegments,modeSwitchDecision,walletOriginSecure,liveWalletAccountVerified,liveRunSummary,redemptionApprovalAction,panelVisible,setMarkupIfChanged} from '../src/pm_nautilus/web/ui-state.js';
 const base=()=>({executionMode:'TEST',strategy:{status:'RUNNING'},positions:[{currentSellPriceStatus:'NO_BID'}],marketScan:{lastScanAt:'2026-09-22',diagnostics:{streams:{groups:[{taskRunning:true,state:'READY',readyBookCount:2,tokenCount:2}]}}}});
 const opts={lastSuccess:1000,now:2000};
+test('storage protection is visible and blocks START while preserving PAUSE',()=>{
+ const page=pageHarness();seedTestDashboard(page);
+ page.ui.dashboard.storage={status:'CRITICAL',canOpen:false};
+ page.context.renderRunControls();page.context.renderStatus();
+ assert.equal(page.element('#run-toggle').disabled,true);
+ assert.equal(page.element('#storage-warning').hidden,false);
+ assert.match(page.element('#storage-warning').textContent,/存储保护/);
+ page.ui.strategyStatus='RUNNING';page.ui.dashboard.strategy.status='RUNNING';
+ page.context.renderRunControls();
+ assert.equal(page.element('#run-toggle').disabled,false);
+ page.ui.dashboard.storage={status:'OK',canOpen:true};page.context.renderStatus();
+ assert.equal(page.element('#storage-warning').hidden,true);
+});
 test('only the visible panel needs list rendering',()=>{
  for (const active of ['positions','market','records']) {
   for (const panel of ['positions','market','records']) assert.equal(panelVisible(active,panel),active===panel);

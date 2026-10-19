@@ -661,8 +661,9 @@ function renderRunControls() {
   if (!runToggle.classList.contains("is-pending")) {
     runToggle.textContent = running ? "Ⅱ" : "▶";
   }
-  runToggle.disabled = !ui.dashboard || !ui.dashboardAt || Boolean(ui.dashboardError) || ui.controlPending || (liveView && !running && (!liveStartAvailable() || ui.walletPending));
-  runToggle.title = runToggle.disabled && liveView ? "请先在下方连接、检查并启用实盘钱包" : "";
+  const storageBlocked = ui.dashboard?.storage?.canOpen === false;
+  runToggle.disabled = !ui.dashboard || !ui.dashboardAt || Boolean(ui.dashboardError) || ui.controlPending || (!running && storageBlocked) || (liveView && !running && (!liveStartAvailable() || ui.walletPending));
+  runToggle.title = !running && storageBlocked ? "存储保护中，暂不能开始新增买入" : runToggle.disabled && liveView ? "请先在下方连接、检查并启用实盘钱包" : "";
   runToggle.setAttribute(
     "aria-label",
     liveView && !running && !liveStartAvailable()
@@ -1611,6 +1612,12 @@ function renderStatus() {
   }
   $("#connection-warning").textContent = state.warning;
   $("#connection-warning").hidden = !state.warning;
+  const storage = ui.dashboard?.storage;
+  const storageWarning = storage?.canOpen === false
+    ? "存储保护已生效：暂缓新增买入和全量扫描，优先处理已有交易与持仓。请查看服务器存储状态。"
+    : storage?.status === "WARNING" ? "服务器存储空间偏低，正在按保留规则回收可清理文件；交易账本和钱包会保留。" : "";
+  $("#storage-warning").textContent = storageWarning;
+  $("#storage-warning").hidden = !storageWarning;
   $(".equity-panel").classList.toggle("is-stale", Boolean(ui.dashboardAt && (ui.dashboardError || Date.now() - ui.dashboardAt > 10000)));
   const s = ui.dashboard?.marketScan || {}, groups = s.diagnostics?.streams?.groups || [];
   const runText = state.run === "error" ? state.warning : !ui.dashboardAt ? "运行状态未确认" : ui.displayMode === "LIVE" && !ui.wallet?.configured ? "实盘钱包未连接" : ui.displayMode === "LIVE" && !ui.wallet?.unlocked ? "实盘钱包已锁定" : ui.displayMode === "LIVE" && !ui.wallet?.enabled ? "实盘尚未启用" : ui.strategyStatus === "RUNNING" ? "运行中" : "已暂停新买入；已有仓位仍继续退出和赎回。";

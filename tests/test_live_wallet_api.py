@@ -355,7 +355,8 @@ def test_enable_attaches_paused_and_requires_separate_start(tmp_path, monkeypatc
                 pass
 
         class FakeRuntime:
-            def __init__(self, path, mode, live_factory):
+            def __init__(self, path, mode, live_factory, storage_guard=None):
+                self.storage_guard = storage_guard
                 self.store = Store(path, mode)
                 self.mode = mode
                 self.client = FakeClient()

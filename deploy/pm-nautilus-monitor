@@ -7,7 +7,7 @@ export PATH
 app_dir=/opt/pm-nautilus
 
 printf '%s\n' '=== PM-NAUTILUS READ-ONLY SNAPSHOT ==='
-printf '%s\n' 'monitor_version=2'
+printf '%s\n' 'monitor_version=3'
 printf 'checked_at='; date -Is
 printf 'host='; hostname
 printf 'uptime='; uptime -p
@@ -17,7 +17,7 @@ free -h
 df -h / "$app_dir"
 
 printf '%s\n' '--- services ---'
-for unit in docker nginx snap.certbot.renew.timer; do
+for unit in docker nginx snap.certbot.renew.timer pm-nautilus-storage.timer; do
     printf '%s=' "$unit"
     sudo -n systemctl is-active "$unit" 2>/dev/null || true
 done
@@ -58,6 +58,20 @@ import urllib.request
 from pathlib import Path
 
 app_dir = Path(sys.argv[1])
+maintenance = Path("/var/lib/pm-nautilus-maintenance/status.json")
+try:
+    if not maintenance.exists():
+        print("storage_maintenance=not_installed")
+    elif maintenance.stat().st_size > 1024 * 1024:
+        print("storage_maintenance=invalid_status")
+    else:
+        report = json.loads(maintenance.read_text())
+        print("storage_maintenance=" + json.dumps({key: report.get(key) for key in (
+            "checked_at", "status", "level", "apply", "ok", "reserve_recovered",
+            "operator_action_required", "safe_reclaim_available", "errors",
+        )}, sort_keys=True))
+except Exception as exc:
+    print("storage_maintenance_unavailable=" + type(exc).__name__)
 values = {}
 for raw_line in (app_dir / ".env").read_text(encoding="utf-8").splitlines():
     line = raw_line.strip()

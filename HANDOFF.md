@@ -2,6 +2,12 @@
 
 第一节是最新实现、验收及部署状态；后文为按各节日期保留的历史记录，其中“当前”或“待部署”只代表当时的版本。纯文档提交不会改变已运行的代码镜像。
 
+## 自动空间维护与运行时保护（2026-10-20，待发布部署）
+
+实现 [自动存储维护](docs/STORAGE_MAINTENANCE.md)：Docker 日志 10 MiB×3、每 15 分钟受限主机清理、运行时磁盘/inode 保护、WARNING 时每分钟最多检查 128 条且结束超过 90 天的无归属公共缓存。保留钱包、账本、全部交易与持仓身份、未明结果和回滚备份；不在线 VACUUM、自动停机或启用 LIVE。空间不足时阻止 START/新增 BUY 和扫描批量落库，已有交易仍按持久化规则处理；页面和健康接口可见保护状态。长期不可删除数据增长仍可能需要扩容，不能承诺硬件故障时无中断。
+
+本地 847 项 Python、34 项页面、Ruff（101 文件）及 JS/shell 语法通过。服务器 2026-10-20 00:58 CST 只读预检：仍运行 `6dac94b`、源码 `4d9ec1a`，TEST/RUNNING、LIVE=false、wallet LOCKED、healthy/零重启、后台错误为空；约 22 GB 可用，旧日志仍未设大小限制。尚未部署新机制或执行自动删除，CI 与现场完成状态将在验收后更新。
+
 ## 元数据与扫描优化（2026-10-19，已发布部署验收）
 
 [PR #14](https://github.com/yvettemiranda/PM-NAUTILUS/pull/14) 已合并，正式应用固定为 `6dac94bf6bc9cbc954a22e112a52dd49a798d2a6`；[main CI 39224291130](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39224291130) 的 x86_64/ARM64 回归与 Docker verify 全部通过。后续纯文档提交可更新服务器源码，镜像/env/runtime 继续固定该应用 SHA，无须为文档暂停或重启。

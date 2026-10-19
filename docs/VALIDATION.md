@@ -1,6 +1,8 @@
 # 验证结果与边界
 
-## 2026-10-19 元数据与扫描优化（本地完成，待 CI/部署）
+## 2026-10-19 元数据与扫描优化（应用 CI 通过，待部署）
+
+固定应用代码 `10304185f588f39f8ccb0fc67b9c984500890d6f`，见 [PR #14](https://github.com/yvettemiranda/PM-NAUTILUS/pull/14)。[PR CI 39214114469](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39214114469) 和 [Push CI 39214056357](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39214056357) 的 x86_64/ARM64 与 Docker verify 全部通过。服务器终端待用户完成微信扫码认证，线上仍未执行本轮维护，以下为本地、合成及升级前证据。
 
 752 项 Python 回归（26.12 秒）、33 项页面回归、Ruff 检查/格式（93 文件）、JS/shell 语法通过，独立复核无确定 P1/P2。新增 47 项覆盖编解码/旧包/历史身份、损坏拒绝、锁/双库备份/事务、全部逻辑值污染检测、Native 重放、TEST 深度、慢扫描与关闭/共享竞态。两条既有第三方弃用警告保留。
 

@@ -2,14 +2,21 @@
 
 第一节是最新实现、验收及部署状态；后文为按各节日期保留的历史记录，其中“当前”或“待部署”只代表当时的版本。纯文档提交不会改变已运行的代码镜像。
 
-## 元数据与扫描优化（2026-10-19，应用 CI 通过，待部署）
+## 元数据与扫描优化（2026-10-19，已发布部署验收）
 
-- 实现、合成基准和维护边界见 [本轮记录](docs/METADATA_OPTIMIZATION_2026-10-19.md)。保留全部 Token/交易历史、策略参数、代次、钱包及 TEST 消费深度，不启用 LIVE。
-- 无损压缩兼容旧 JSON/旧备份；索引查询保留历史交易身份。显式离线整理先锁应用并备份两库，再比较全部逻辑数据和完整校验，可选 VACUUM；启动不自动批量转码。旧镜像回滚必须配旧数据库快照。
-- 扫描改为单实例受管理任务，5 秒维护不等待网络分页；完整成功应用、共享隔离、首次订阅顺序、异常暂停及关闭等待保留。巡检完整 validation 单独等待 180 秒，超时为结果未知。
-- 本地 752 项 Python/33 项页面、Ruff/格式（93 文件）、JS/shell 语法通过，独立复核无确定 P1/P2。93.68 万合成 Token 负载减少 36.3%、可选重建后库文件减少 31.2%、active 读取约 3.38 倍，尚不是生产结果。本条不代表 CI/服务器已升级；升级前仍 `3e765cc`、TEST/RUNNING、LIVE disabled。
-- 应用代码 `10304185f588f39f8ccb0fc67b9c984500890d6f` 已推送 [PR #14](https://github.com/yvettemiranda/PM-NAUTILUS/pull/14)；[PR CI](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39214114469) 与 [准确应用 SHA 的 Push CI](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39214056357) 的 x86_64/ARM64、全部回归和 Docker verify 均成功（15:11 CST）。此后文档提交不改变上述应用代码。
-- 服务器终端重连要求用户微信扫码认证，尚未停服务、执行离线整理或更新线上数据库/镜像；须认证恢复后完成现场备份、升级及原 TEST 状态恢复验收。不能把上述合成节省比例写作服务器实测。
+[PR #14](https://github.com/yvettemiranda/PM-NAUTILUS/pull/14) 已合并，正式应用固定为 `6dac94bf6bc9cbc954a22e112a52dd49a798d2a6`；[main CI 39224291130](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39224291130) 的 x86_64/ARM64 回归与 Docker verify 全部通过。后续纯文档提交可更新服务器源码，镜像/env/runtime 继续固定该应用 SHA，无须为文档暂停或重启。
+
+服务器实际整理 941,620 条 TEST Token，文件 1,073,287,168→730,410,672 字节，减少 342,876,496 字节（31.95%）；LIVE 无 Token，69,632→73,728 字节，增加的 4 KiB 来自新索引。两库全表逻辑摘要及完整 integrity_check 通过，没有删除历史。此比例是本次停机整理结果，恢复扫描后文件仍会随新增数据增长。
+
+2026-10-19 20:40:33 CST 最终服务器验收 PASS：源码/镜像/env/runtime 在验收时一致，容器 healthy、restarts=0、OOM=false、后台错误为空；已恢复原 TEST/RUNNING，LIVE=false、钱包因重启 LOCKED。在线完整 TEST validation PASS（57.873 秒），真实 TEST 副本离线 Runtime full validation、全仓摘要和分页历史核对通过。原参数、代次、两库全部停机逻辑数据、native/equity 历史、加密钱包及依赖/配置/安全设置保留；部署 JS 哈希、HTTPS/认证及未认证钱包接口 401 通过。
+
+恢复后的公开行情采样：748/748 盘口、4/4 连接组 READY，扫描/分类/当前流与服务错误为空；lastScanAt=2026-10-19T12:38:08.486703+00:00。这是本次短时验收，不构成长时间稳定性或收益保证。只读巡检已同步新版，完整 validation 单独等待 180 秒；旧脚本在私有备份内保留，权限未扩大。
+
+一致性私有回滚及完整 age 加密备份保存在 `/opt/pm-nautilus/backups/pre-metadataopt-20261019T120207Z`；密文 SHA-256 `40dfa36bd7e1acba8c3a04379e9289a1afc84983a0c8123519d534102e2998d0`。两库回滚副本、recipient 加密及密文哈希通过；未演练解密恢复。旧镜像回滚必须配维护前完整旧库/配置/钱包快照，恢复交易后不得用旧快照丢失新增记录。
+
+实现为 lossless v1 Token 外壳、活跃/历史身份索引、单实例扫描任务与 5 秒控制维护解耦。完整分页成功应用、共享源隔离、首次扫描顺序、tick 保护、异常暂停和关闭等待保留。752 项 Python、33 项页面、Ruff（93 文件）及 JS/shell 语法通过；合成基准与格式边界见 [本轮记录](docs/METADATA_OPTIMIZATION_2026-10-19.md)。
+
+本轮没有解锁钱包、启用 LIVE、签订单或链上交易。地区限制、pUSD/POL 与真实买卖/正额赎回闭环仍未在本轮解决或实测；不能以 TEST/CI 通过认定实盘就绪。
 
 ## 精确持仓核对与零收益旧仓修复（2026-10-14，已发布部署验收）
 

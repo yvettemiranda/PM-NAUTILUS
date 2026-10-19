@@ -1,5 +1,7 @@
 # 新开发环境配置
 
+**2026-10-19 最新部署：**元数据压缩与扫描调度优化已发布，应用 `6dac94bf6bc9cbc954a22e112a52dd49a798d2a6`，752 项程序/33 项页面及双架构 CI、服务器完整验收通过；原 TEST/RUNNING 已恢复，LIVE 未启用、钱包 LOCKED，参数及历史保留。实际库文件减少 31.95%；新格式库不能直接配旧镜像回滚，见 [本轮格式、维护与验收](METADATA_OPTIMIZATION_2026-10-19.md)。本次维护不代表真实资金闭环已验证。
+
 本指南适用于新电脑、全新系统或独立开发目录。项目公开仓库为 [yvettemiranda/PM-NAUTILUS](https://github.com/yvettemiranda/PM-NAUTILUS)。它是长期有效的开发环境恢复说明，不记录某一次电脑重装或服务器部署阶段；当前运行状态以根目录 [HANDOFF.md](../HANDOFF.md) 为准。
 
 如果目的是买新服务器、放弃旧 TEST 模拟记录、首次启用本程序实盘，请先读 [从 GitHub 到首次实盘](START_FRESH_LIVE.md)。下面的 Python/uv 步骤是开发环境重建细节，不是用户需要独自逐条完成的实盘清单。

@@ -1,5 +1,7 @@
 # PM-NAUTILUS
 
+**2026-10-19 最新部署：**元数据压缩与扫描调度优化已发布，应用 `6dac94bf6bc9cbc954a22e112a52dd49a798d2a6`，752 项程序/33 项页面及双架构 CI、服务器完整验收通过；原 TEST/RUNNING 已恢复，LIVE 未启用、钱包 LOCKED，参数及历史保留。实际库文件减少 31.95%；新格式库不能直接配旧镜像回滚，见 [本轮格式、维护与验收](docs/METADATA_OPTIMIZATION_2026-10-19.md)。本次维护不代表真实资金闭环已验证。
+
 PM-NAUTILUS 是基于 [NautilusTrader](https://github.com/nautechsystems/nautilus_trader) 的 Polymarket 自动交易程序。项目将 PM-SMALL 已确定的扫描、筛选、Event 仲裁、FAK、周期预算、分批目标、主动止损和结算规则迁移到独立的 Python/NautilusTrader 应用，并保留手机与桌面共用的网页操作界面。
 
 程序只管理自身产生的订单、仓位和赎回权利，不导入 PM-SMALL 的历史账本，也不接管手动仓位。TEST 与 LIVE 使用同一套策略算法，但各自保存参数，成交、手续费、资金和结算路径不同；TEST 的结果不能当作 LIVE 会同样成交或产生同样收益的证明。

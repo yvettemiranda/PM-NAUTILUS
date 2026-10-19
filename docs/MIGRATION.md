@@ -1,5 +1,9 @@
 # PM-SMALL → NautilusTrader 迁移设计与当前架构
 
+## 2026-10-19 存储与调度增量
+
+保留 `tokens(token_id,payload)`、全部历史及策略规则，新增兼容旧平面 JSON 的 v1 压缩外壳、活跃部分索引与独立扫描任务。已有库转码仅通过显式离线工具执行，不在正常启动隐式重写。格式、冻结字典、旧包/旧镜像边界、双库备份/逻辑核对及合成基准见 [本轮记录](METADATA_OPTIMIZATION_2026-10-19.md)；此项尚不代表正式升级已验收。
+
 ## 文档范围（2026-10-14）
 
 本页保留原迁移依据与规则对应表，并说明当前实现。版本、服务器采样、发布证据和待完成的实盘验收以 [HANDOFF.md](../HANDOFF.md) 和 [VALIDATION.md](VALIDATION.md) 最新章节为准；[原始迁移要求](../PM-SMALL_Nautilus_Codex_Instructions.md) 保留为历史需求来源。

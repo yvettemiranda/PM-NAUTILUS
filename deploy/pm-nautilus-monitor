@@ -52,6 +52,7 @@ import base64
 import json
 import sqlite3
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -68,12 +69,12 @@ for raw_line in (app_dir / ".env").read_text(encoding="utf-8").splitlines():
 password = values.get("PM_UI_PASSWORD", "")
 authorization = "Basic " + base64.b64encode(f"pm:{password}".encode()).decode()
 
-def get_json(path, authenticated=False):
+def get_json(path, authenticated=False, timeout=20):
     headers = {"Host": "127.0.0.1"}
     if authenticated:
         headers["Authorization"] = authorization
     request = urllib.request.Request(f"http://127.0.0.1:8765{path}", headers=headers)
-    with urllib.request.urlopen(request, timeout=20) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.load(response)
 
 try:
@@ -116,8 +117,15 @@ except Exception as exc:
     print(f"dashboard_error={type(exc).__name__}: {exc}")
 
 try:
-    validation = get_json("/api/TEST/validation", authenticated=True)
+    # A full integrity scan is deliberately more expensive than a health read.
+    # Keep fresh full validation, with a separate budget rather than substituting
+    # a cached result or treating a short client timeout as ledger corruption.
+    started = time.monotonic()
+    validation = get_json("/api/TEST/validation", authenticated=True, timeout=180)
     print("validation=" + json.dumps(validation, ensure_ascii=False, sort_keys=True))
+    print(f"validation_seconds={time.monotonic() - started:.3f}")
+except TimeoutError:
+    print("validation_unavailable=client timeout after 180s; full result unknown")
 except Exception as exc:
     print(f"validation_error={type(exc).__name__}: {exc}")
 

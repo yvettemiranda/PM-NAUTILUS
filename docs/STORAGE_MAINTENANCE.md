@@ -10,7 +10,7 @@
 | 主机可回收文件 | systemd 每 15 分钟，随机延迟最多 60 秒 | 只处理专属登记目录的过期文件；保留最新两份及 pinned 文件 |
 | 旧程序镜像 | 使用率达到 80% 或可用空间不超过 6 GiB 时 | 只删除超过 14 天、无任何容器引用、未固定的 `pm-nautilus:<40位SHA>` 镜像；保留当前、最新两份回滚镜像及显式固定版本 |
 | 运行时容量检查 | 每 30 秒，文件系统探测在线程执行 | 检查应用账户真正可用的字节和 inode；健康接口及页面显示当前保护状态 |
-| 冷公共市场缓存 | WARNING 状态、每分钟至多一批 | 检查最多 128 行，协作工作预算 25 ms；仅删除结束超过 90 天且没有任何所有权引用的关闭市场元数据 |
+| 冷公共市场缓存 | WARNING 状态、每个已运行模式每分钟至多一批 | 每个模式检查最多 128 行，协作工作预算 25 ms；仅删除结束超过 90 天且没有任何所有权引用的关闭市场元数据 |
 
 主机清理使用独占锁，单次最多处理 2 项、45 秒预算，并以低 CPU/IO 优先级运行。容量恢复到使用率不超过 70% 且可用空间至少 8 GiB 后解除主机清理滞回。使用率达到 90% 或可用不超过 2 GiB 时标记严重；没有可安全回收内容时明确记录需处理，不扩大删除范围。
 
@@ -71,3 +71,17 @@ python3 /usr/local/libexec/pm-nautilus-storage.py register disposable.log.gz --e
 ## 验证
 
 本地 847 项 Python、34 项页面、Ruff 检查/格式（101 文件）、JS/shell 语法通过。新增测试以受控 statvfs、真实 Runtime/SQLite 与模拟网络验证阈值滞回、过期/失败探测、START/签名后 BUY、已有 SELL 和迟到成交、共享扫描隔离、只删无归属公共缓存、锁/回滚/时间预算及路径和镜像保护。未填满实际用户磁盘，没有用 LIVE 真实交易验证压力场景。CI、服务器定时任务及现场结果另记最新验收。
+
+## 2026-10-20 服务器安装验收
+
+[PR #15](https://github.com/yvettemiranda/PM-NAUTILUS/pull/15) 已合并，固定应用代码 `640d1b1dbc58f2e61ef9cf3e131cd37a1e163de9`；[main CI 39292103375](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39292103375) 的 x86_64/ARM64 回归及 Docker verify 全部通过。本地 847 项 Python、34 项页面、Ruff 检查/格式（101 文件）及 JS/shell 语法通过，保留两条既有第三方弃用警告。独立复核及真实外层 submit 回归覆盖尚未 POST 的 BUY 保护不影响已有 SELL，可能已 POST 的未知结果继续隔离。纯文档同步可推进服务器源码，镜像/env/runtime 保持上述固定应用版本，无需重启。
+
+2026-10-20 01:27:53 CST 服务器部署验收采样：容器 healthy、restarts=0、OOM=false，TEST/RUNNING、LIVE=false、钱包因升级重启 LOCKED，后台错误为空；存储 guard=OK、canOpen=true，采样新鲜。在线完整 TEST validation PASS（12.097 秒），真实账本隔离副本 Runtime full validation、停机 Store 两库全部逻辑值精确比对、原生/权益历史前缀及参数/代次保留通过；加密钱包、绑定及依赖/配置/安全设置保留。HTTPS/认证、未认证钱包 401、JS 哈希及全仓摘要/分页历史核对通过。
+
+systemd timer 已 enabled/active，首次 service Result=success，实际 apply=true、level=normal、errors/actions 均为空，无需删除；Docker 实际日志配置为 10m/3。已固定 `6dac94b` 与 `3e765cc` 两个回滚镜像，现有私有回滚备份不在自动清理目录内。当前正常余量下冷缓存未删除，压力阈值、失败/过期与交易边界由受控回归验证，未人为填满实际磁盘。
+
+恢复后的公开行情为 748/748 盘口、4/4 连接组 READY，扫描/分类/当前流/服务错误为空，lastScanAt=2026-10-19T17:26:08.540528+00:00；本次重启后已完成新的公开市场扫描。这仅为本次短时采样，不宣称跨夜稳定性或真实收益/成交保证。
+
+一致性私有回滚与 age 加密归档保存在 `/opt/pm-nautilus/backups/pre-storageguard-20261019T171727Z`；密文 SHA-256 `9f825ca518d5f0b9c60c75f0ba8716a17ebf52ab583797da464a7d178063b3ff`。两库回滚副本、recipient 加密与哈希通过，未演练解密恢复。本次未变更 Token 编码；上一应用 `6dac94b` 兼容现有格式，`3e765cc` 等压缩格式前镜像仍须配对应旧格式完整快照。恢复交易后不得用旧快照丢失新增记录。
+
+本轮没有解锁钱包、启用 LIVE、签订单或链上交易，也未重新验收地区/资金/POL。真实资金买卖、正额赎回及完整 LIVE 闭环仍未实测，不能以 TEST/CI 通过认定实盘就绪。

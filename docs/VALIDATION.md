@@ -1,8 +1,22 @@
 # 验证结果与边界
 
-## 2026-10-20 自动空间维护（待发布部署）
+## 2026-10-20 自动空间维护（已发布部署验收）
 
-本地 847 项 Python、34 项页面、Ruff（101 文件）及 JS/shell 语法通过；保留两条既有第三方弃用警告。新增控制场景包括磁盘/inode 阈值及滞回、采样失败/过期、最终 POST 前保护、已有 SELL 与迟到回报、共享扫描隔离、冷元数据全部所有权保护、锁/SQL 回滚、路径与镜像保护、页面 START/PAUSE 状态。机制、阈值及非无限容量边界见 [自动存储维护](STORAGE_MAINTENANCE.md)。CI 与服务器部署仍待实测，原运行应用 `6dac94b` 未变。
+[PR #15](https://github.com/yvettemiranda/PM-NAUTILUS/pull/15) 已合并，固定应用代码 `640d1b1dbc58f2e61ef9cf3e131cd37a1e163de9`；[main CI 39292103375](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39292103375) 的 x86_64/ARM64 回归及 Docker verify 全部通过。本地 847 项 Python、34 项页面、Ruff 检查/格式（101 文件）及 JS/shell 语法通过，保留两条既有第三方弃用警告。独立复核及真实外层 submit 回归覆盖尚未 POST 的 BUY 保护不影响已有 SELL，可能已 POST 的未知结果继续隔离。纯文档同步可推进服务器源码，镜像/env/runtime 保持上述固定应用版本，无需重启。
+
+新增回归覆盖磁盘/inode 阈值与滞回、失败/过期采样、START 与签名后最终 POST 边界、已有 SELL/迟到回报、未知提交资金占用、共享扫描隔离、冷元数据所有权、锁/SQL 回滚/预算、目录与镜像保留及页面 START/PAUSE。机制与边界见 [自动存储维护](STORAGE_MAINTENANCE.md)。
+
+2026-10-20 01:27:53 CST 服务器部署验收采样：容器 healthy、restarts=0、OOM=false，TEST/RUNNING、LIVE=false、钱包因升级重启 LOCKED，后台错误为空；存储 guard=OK、canOpen=true，采样新鲜。在线完整 TEST validation PASS（12.097 秒），真实账本隔离副本 Runtime full validation、停机 Store 两库全部逻辑值精确比对、原生/权益历史前缀及参数/代次保留通过；加密钱包、绑定及依赖/配置/安全设置保留。HTTPS/认证、未认证钱包 401、JS 哈希及全仓摘要/分页历史核对通过。
+
+systemd timer 已 enabled/active，首次 service Result=success，实际 apply=true、level=normal、errors/actions 均为空，无需删除；Docker 实际日志配置为 10m/3。已固定 `6dac94b` 与 `3e765cc` 两个回滚镜像，现有私有回滚备份不在自动清理目录内。当前正常余量下冷缓存未删除，压力阈值、失败/过期与交易边界由受控回归验证，未人为填满实际磁盘。
+
+恢复后的公开行情为 748/748 盘口、4/4 连接组 READY，扫描/分类/当前流/服务错误为空，lastScanAt=2026-10-19T17:26:08.540528+00:00；本次重启后已完成新的公开市场扫描。这仅为本次短时采样，不宣称跨夜稳定性或真实收益/成交保证。
+
+一致性私有回滚与 age 加密归档保存在 `/opt/pm-nautilus/backups/pre-storageguard-20261019T171727Z`；密文 SHA-256 `9f825ca518d5f0b9c60c75f0ba8716a17ebf52ab583797da464a7d178063b3ff`。两库回滚副本、recipient 加密与哈希通过，未演练解密恢复。本次未变更 Token 编码；上一应用 `6dac94b` 兼容现有格式，`3e765cc` 等压缩格式前镜像仍须配对应旧格式完整快照。恢复交易后不得用旧快照丢失新增记录。
+
+钱包、账本、全部交易意图/原生事件/收益历史、持仓/赎回权利和旧备份不自动删除。正常 Token 继续压缩存储，冷缓存删除只形成可复用 SQLite 空页，不在线 VACUUM，不自动停机或重启。若不可删除数据长期增长或其他服务占满磁盘，仍可能需要扩容；机制不能保证无限容量或硬件故障时无中断。
+
+本轮没有解锁钱包、启用 LIVE、签订单或链上交易，也未重新验收地区/资金/POL。真实资金买卖、正额赎回及完整 LIVE 闭环仍未实测，不能以 TEST/CI 通过认定实盘就绪。
 
 ## 2026-10-19 元数据与扫描优化（已发布部署验收）
 

@@ -1,6 +1,8 @@
 # PM-NAUTILUS
 
-**2026-10-19 最新部署：**元数据压缩与扫描调度优化已发布，应用 `6dac94bf6bc9cbc954a22e112a52dd49a798d2a6`，752 项程序/33 项页面及双架构 CI、服务器完整验收通过；原 TEST/RUNNING 已恢复，LIVE 未启用、钱包 LOCKED，参数及历史保留。实际库文件减少 31.95%；新格式库不能直接配旧镜像回滚，见 [本轮格式、维护与验收](docs/METADATA_OPTIMIZATION_2026-10-19.md)。本次维护不代表真实资金闭环已验证。
+**2026-10-20 最新部署：**自动空间维护与运行时保护已发布，应用 `640d1b1dbc58f2e61ef9cf3e131cd37a1e163de9`；847 项程序/34 项页面及双架构 CI、服务器完整验收通过。日志自动轮转、15 分钟主机清理和磁盘/inode 保护已实际安装；TEST/RUNNING、LIVE 未启用、钱包 LOCKED，原参数/账本/钱包保留。清理范围、阈值及容量边界见 [自动存储维护](docs/STORAGE_MAINTENANCE.md)。新服务器须安装并验收定时任务；真实资金闭环仍未验证。
+
+**2026-10-19 历史维护：**元数据压缩与扫描调度优化已发布，应用 `6dac94bf6bc9cbc954a22e112a52dd49a798d2a6`，752 项程序/33 项页面及双架构 CI、服务器完整验收通过；原 TEST/RUNNING 已恢复，LIVE 未启用、钱包 LOCKED，参数及历史保留。实际库文件减少 31.95%；新格式库不能直接配旧镜像回滚，见 [本轮格式、维护与验收](docs/METADATA_OPTIMIZATION_2026-10-19.md)。本次维护不代表真实资金闭环已验证。
 
 PM-NAUTILUS 是基于 [NautilusTrader](https://github.com/nautechsystems/nautilus_trader) 的 Polymarket 自动交易程序。项目将 PM-SMALL 已确定的扫描、筛选、Event 仲裁、FAK、周期预算、分批目标、主动止损和结算规则迁移到独立的 Python/NautilusTrader 应用，并保留手机与桌面共用的网页操作界面。
 

@@ -34,6 +34,10 @@ class PerformanceSampler:
 
     def sample(self, at_ms=None):
         r = self.runtime
+        if not getattr(r, "storage_can_open", True):
+            # Leave an honest curve gap and reserve writes for financial events.
+            self.error = "storage_pressure"
+            return
         _, portfolio = portfolio_view(r, position_limit=0)
         total = portfolio["totalFunds"]
         unrealized = portfolio["unrealizedPnl"]

@@ -1,5 +1,9 @@
 # 验证结果与边界
 
+## 2026-10-20 自动空间维护（待发布部署）
+
+本地 847 项 Python、34 项页面、Ruff（101 文件）及 JS/shell 语法通过；保留两条既有第三方弃用警告。新增控制场景包括磁盘/inode 阈值及滞回、采样失败/过期、最终 POST 前保护、已有 SELL 与迟到回报、共享扫描隔离、冷元数据全部所有权保护、锁/SQL 回滚、路径与镜像保护、页面 START/PAUSE 状态。机制、阈值及非无限容量边界见 [自动存储维护](STORAGE_MAINTENANCE.md)。CI 与服务器部署仍待实测，原运行应用 `6dac94b` 未变。
+
 ## 2026-10-19 元数据与扫描优化（已发布部署验收）
 
 [PR #14](https://github.com/yvettemiranda/PM-NAUTILUS/pull/14) 已合并，正式应用固定为 `6dac94bf6bc9cbc954a22e112a52dd49a798d2a6`；[main CI 39224291130](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39224291130) 的 x86_64/ARM64 回归与 Docker verify 全部通过。后续纯文档提交可更新服务器源码，镜像/env/runtime 继续固定该应用 SHA，无须为文档暂停或重启。

@@ -7,6 +7,11 @@ services:
         GIT_REVISION: ${PM_GIT_REVISION:?Set the exact git commit}
     image: pm-nautilus:${PM_GIT_REVISION}
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     init: true
     stop_grace_period: 45s
     ports:

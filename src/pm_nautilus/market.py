@@ -221,13 +221,23 @@ class MarketService:
         response.raise_for_status()
         return response.json()
 
+    @property
+    def storage_available(self):
+        return getattr(self.runtime, "storage_can_open", True)
+
     async def categories_refresh(self):
+        if not self.storage_available:
+            return
         tags = await self.get(TAGS, status="active", omit_empty="true")
+        if not self.storage_available:
+            return
         if not isinstance(tags, list) or not all(isinstance(tag, dict) for tag in tags):
             raise ValueError("首页栏目响应格式变化")
         tags = [t for t in tags if t.get("slug") not in {"all", "perps", "art"}]
         for slug in ("esports", "art"):
             tag = await self.get(f"{GAMMA}/tags/slug/{slug}", include_template="false")
+            if not self.storage_available:
+                return
             if not isinstance(tag, dict):
                 raise ValueError("首页栏目标签响应格式变化")
             if not any(str(t.get("id")) == str(tag.get("id")) for t in tags):
@@ -239,16 +249,21 @@ class MarketService:
                 else:
                     tags.append(tag)
         self.categories = [{"id": str(t["id"]), "label": t.get("label") or t["slug"]} for t in tags]
-        self.runtime.store.put("categories", self.categories)
+        if self.storage_available:
+            self.runtime.store.put("categories", self.categories)
 
     async def scan(self):
+        if not self.storage_available:
+            self.scan_status.update(scanning=False, storageDeferred=True)
+            return
+        self.scan_status.pop("storageDeferred", None)
         if self.hub is not None:
             self.scan_status.update(scanning=True, lastError=None)
             try:
                 await self.hub.discover(self)
             finally:
                 self.scan_status["scanning"] = False
-                if not self.closed:
+                if not self.closed and self.storage_available:
                     self.runtime.store.put("scan", self.scan_status)
             return
         r = self.runtime
@@ -264,6 +279,9 @@ class MarketService:
             except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
                 self.scan_status["categoryError"] = type(exc).__name__
             while not self.closed:
+                if not self.storage_available:
+                    self.scan_status["storageDeferred"] = True
+                    return
                 params = {
                     "active": "true",
                     "closed": "false",
@@ -297,7 +315,9 @@ class MarketService:
                     raise ValueError("公开 Event keyset 游标没有前进")
                 cursors.add(cursor)
                 after_cursor = cursor
-            if self.closed:
+            if self.closed or not self.storage_available:
+                if not self.closed:
+                    self.scan_status["storageDeferred"] = True
                 return
             # Commit discovery only after all pages succeed. Missing old tokens remain
             # available for held-position identity, but cannot open new cycles.
@@ -310,7 +330,8 @@ class MarketService:
             self.scan_status["lastError"] = f"{type(exc).__name__}: {str(exc)[:180]}"
         finally:
             self.scan_status["scanning"] = False
-            r.store.put("scan", self.scan_status)
+            if self.storage_available:
+                r.store.put("scan", self.scan_status)
 
     async def sync_subscriptions(self):
         if self.hub is not None:
@@ -683,9 +704,14 @@ class PublicMarketHub(MarketService):
         except Exception:
             pass
 
+    @property
+    def storage_available(self):
+        # Discovery is shared, but each consumer commits only to its own ledger.
+        return any(not s.closed and s.storage_available for s in self.services)
+
     async def discover(self, requester):
         async with self.discovery_lock:
-            if self.closed or requester.closed:
+            if self.closed or requester.closed or not requester.storage_available:
                 return
             now = asyncio.get_running_loop().time()
             if self.discovered_at is None or now - self.discovered_at >= 300:
@@ -694,7 +720,9 @@ class PublicMarketHub(MarketService):
                     await super().scan()
                 finally:
                     self._scan_tick_versions = None
-                if self.scan_status.get("lastError") is None:
+                if self.scan_status.get("lastError") is None and not self.scan_status.get(
+                    "storageDeferred"
+                ):
                     self.discovery_version += 1
                     self.discovered_at = asyncio.get_running_loop().time()
                 for service in tuple(self.services):
@@ -706,6 +734,10 @@ class PublicMarketHub(MarketService):
     def apply_discovery(self, service):
         if service.closed:
             return
+        if not service.storage_available:
+            service.scan_status["storageDeferred"] = True
+            return
+        service.scan_status.pop("storageDeferred", None)
         try:
             # Discovery belongs to the shared source. Fatal acknowledgements and
             # stream health belong to each mode and must not be replayed by a scan.

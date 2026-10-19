@@ -27,6 +27,8 @@ from .views import dashboard, records_async, records_page_async
 from .performance import PerformanceSampler
 from .wallet_vault import VaultError, derive_signer, read_public_metadata, read_vault, write_vault
 from .live_readiness import run_readiness
+from .storage_guard import StorageGuard
+from .metadata_retention import prune_cold_metadata
 
 
 class _LiveBundleResponse(FileResponse):
@@ -86,6 +88,52 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         "error": None,
     }
     unlock_failures = []
+    storage_guard = StorageGuard(root)
+    retention_task = None
+    retention = {}
+
+    def maintain_public_metadata_once():
+        for mode, runtime in tuple(runtimes.items()):
+            state = retention.setdefault(mode, {"removed": 0, "cursor": None})
+            if storage_guard.status != "WARNING" or not storage_guard.can_open:
+                state["status"] = "idle" if storage_guard.status == "OK" else "deferred"
+                continue
+            if services[mode].scan_status.get("scanning"):
+                state["status"] = "scan_in_progress"
+                continue
+            result = prune_cold_metadata(
+                runtime,
+                time.time_ns() - 90 * 86_400_000_000_000,
+                after_token_id=state["cursor"],
+            )
+            for token_id in result["removed_ids"]:
+                runtime.tokens.pop(token_id, None)
+                runtime._preview_cache.pop(token_id, None)
+            state.update(
+                removed=state["removed"] + result["removed"],
+                cursor=result["next_token_id"],
+                status=result["skipped"] or "checked",
+                lastCheckedAt=time.time_ns() // 1_000_000,
+                lastBatchRemoved=result["removed"],
+                lastBatchScanned=result["scanned"],
+            )
+
+    async def maintain_public_metadata():
+        # Bounded owner-loop work; SQLite free pages are reused without VACUUM.
+        while True:
+            await asyncio.sleep(60)
+            maintain_public_metadata_once()
+
+    def storage_view():
+        return storage_guard.view() | {
+            "metadataRetention": {
+                mode: {key: value for key, value in state.items() if key != "cursor"}
+                for mode, state in retention.items()
+            },
+            "retentionDays": 90,
+            "retentionBatchLimit": 128,
+            "retentionIntervalSeconds": 60,
+        }
 
     async def attach(mode, runtime, wallet=None):
         runtimes[mode] = runtime
@@ -101,7 +149,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
 
     @asynccontextmanager
     async def lifespan(app):
-        nonlocal market_hub, shutting_down
+        nonlocal market_hub, shutting_down, retention_task
         root.mkdir(parents=True, exist_ok=True)
         lock = (root / "process.lock").open("a")
         try:
@@ -111,13 +159,19 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             raise RuntimeError("此数据目录已有运行实例") from exc
         try:
             shutting_down = False
+            await storage_guard.start()
             from .live_backup import cleanup_stale_live_scratch
 
             cleanup_stale_live_scratch(root / "LIVE")
             if public_data:
                 market_hub = PublicMarketHub()
                 app.state.market_hub = market_hub
-            await attach("TEST", Runtime(root / "TEST" / "state.sqlite", clock=test_clock))
+            await attach(
+                "TEST",
+                Runtime(
+                    root / "TEST" / "state.sqlite", clock=test_clock, storage_guard=storage_guard
+                ),
+            )
             if legacy_live_enabled:
                 if not password:
                     raise ValueError("启用LIVE前必须配置UI身份验证")
@@ -135,6 +189,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                         root / "LIVE" / "state.sqlite",
                         mode="LIVE",
                         live_factory=live_factory(settings, wallet),
+                        storage_guard=storage_guard,
                     )
                     # Activation may fail after native queues/private tasks have started.
                     # Register ownership before awaiting it so cleanup still reaches them.
@@ -148,6 +203,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                     raise RuntimeError(f"LIVE{stage}失败 ({type(exc).__name__})") from None
             else:
                 cold["LIVE"] = Store(root / "LIVE" / "state.sqlite", "LIVE")
+            retention_task = asyncio.create_task(maintain_public_metadata())
             yield
         finally:
             shutting_down = True
@@ -156,6 +212,9 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 try:
                     async with wallet_lock:
                         failures = []
+                        if retention_task is not None:
+                            retention_task.cancel()
+                            await asyncio.gather(retention_task, return_exceptions=True)
                         owned_runtimes = activating | runtimes
                         for sampler in samplers.values():
                             sampler.task.cancel()
@@ -194,7 +253,10 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                             kinds = ",".join(sorted({type(error).__name__ for error in failures}))
                             raise RuntimeError(f"组件关闭失败 ({kinds})") from None
                 finally:
-                    lock.close()
+                    try:
+                        await storage_guard.close()
+                    finally:
+                        lock.close()
 
             # Retain process ownership until every private worker and component
             # has finished, even if lifespan itself is cancelled repeatedly.
@@ -204,6 +266,8 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
     app.state.runtimes = runtimes
     app.state.services = services
     app.state.samplers = samplers
+    app.state.storage_guard = storage_guard
+    app.state.maintain_public_metadata_once = maintain_public_metadata_once
 
     @app.middleware("http")
     async def security(request, call_next):
@@ -592,6 +656,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 runtimes[mode], services[mode], limit, "LIVE" in runtimes, position_limit
             )
             data["liveStrategyStatus"] = live_status
+            data["storage"] = storage_view()
             if mode == "LIVE":
                 data["wallet"] = wallet_public()
                 data["liveError"] = bool(runtimes[mode].store.get("live_error"))
@@ -603,6 +668,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             "liveStrategyStatus": live_status,
             "generation": store.generation,
             "liveExecutionEnabled": False,
+            "storage": storage_view(),
             "wallet": wallet_public(),
             "positionsAvailable": False,
             "strategy": {"status": "PAUSED", "initialCapital": None, "availableCash": None},
@@ -636,6 +702,10 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
     @app.get("/api/health")
     async def health():
         failures = {}
+        if not storage_guard.can_open:
+            failures["storage"] = "storage_protection"
+        if retention_task is not None and retention_task.done() and not shutting_down:
+            failures["storageMaintenance"] = "metadata_maintenance_stopped"
         for mode, service in services.items():
             runtime = runtimes[mode]
             issues = []
@@ -666,6 +736,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             "liveWalletStatus": wallet_public()["status"],
             "revision": os.getenv("PM_GIT_REVISION", "local"),
             "backgroundErrors": failures,
+            "storage": storage_view(),
         }
         return JSONResponse(body, status_code=503 if failures else 200)
 
@@ -906,6 +977,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                     root / "LIVE" / "state.sqlite",
                     mode="LIVE",
                     live_factory=live_factory(settings, wallet),
+                    storage_guard=storage_guard,
                 )
                 # Own partial activation without presenting it as enabled.
                 activating["LIVE"] = runtime
@@ -1114,7 +1186,10 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         await services["TEST"].close()
         r.store.reset()
         r.close()
-        await attach("TEST", Runtime(root / "TEST" / "state.sqlite", clock=test_clock))
+        await attach(
+            "TEST",
+            Runtime(root / "TEST" / "state.sqlite", clock=test_clock, storage_guard=storage_guard),
+        )
         return view("TEST")
 
     @app.get("/api/{mode}/trade-records")

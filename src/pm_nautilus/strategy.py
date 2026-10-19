@@ -122,7 +122,10 @@ class PMStrategy(Strategy):
 
 
 class Runtime:
-    def __init__(self, path: str | Path, mode="TEST", clock=None, live_factory=None):
+    def __init__(
+        self, path: str | Path, mode="TEST", clock=None, live_factory=None, storage_guard=None
+    ):
+        self.storage_guard = storage_guard
         self.store = Store(path, mode)
         self.mode = mode
         self.preferences = Preferences(**self.store.get("preferences"))
@@ -164,6 +167,14 @@ class Runtime:
     @property
     def status(self):
         return self.store.get("status")
+
+    @property
+    def storage_can_open(self):
+        return self.storage_guard is None or self.storage_guard.can_open
+
+    def require_storage_safe(self):
+        if self.storage_guard is not None:
+            self.storage_guard.require_safe()
 
     def test_cash(self):
         initial = self.store.get("initial_capital")
@@ -245,6 +256,7 @@ class Runtime:
         control = (
             self.preferences.model_dump_json(),
             self.status,
+            self.storage_can_open,
             self.cash(),
             self.held_cash(),
             tuple(self.business["banned"]),
@@ -705,7 +717,7 @@ class Runtime:
             if len({(p.token.opened_ns, p.token.ends_ns) for p in tied}) > 1:
                 self._time_sensitive_events.add(eid)
         self.evaluations[eid] = status, winner
-        if dispatch and winner and self.status == "RUNNING":
+        if dispatch and winner and self.status == "RUNNING" and self.storage_can_open:
             # Evaluation is synchronous with persistence and dispatch; no await may
             # be inserted here without repeating the complete decision.
             self.submit(
@@ -749,6 +761,10 @@ class Runtime:
     def submit(
         self, t, side, qty, limit, cash=0, kind="TARGET", targets=None, execution_limit=None
     ):
+        # Preserve emergency headroom for existing rights and confirmations.
+        # A deferred BUY must not create an intent, checkpoint, or native order.
+        if side == "BUY" and not self.storage_can_open:
+            return None
         terms = None
         if side == "SELL" and kind != "SETTLEMENT":
             try:
@@ -825,6 +841,9 @@ class Runtime:
         return count
 
     def _check_start_readiness(self):
+        guard = getattr(self, "storage_guard", None)
+        if guard is not None:
+            guard.require_safe()
         if self.mode == "LIVE" and not self.client.ready:
             raise ValueError("LIVE 尚未完成实际账户核对")
         if self.mode == "LIVE" and not self.client.open_orders_clear:
@@ -843,6 +862,8 @@ class Runtime:
         self._finish_start(self.validate())
 
     async def start_async(self):
+        if self.storage_guard is not None:
+            await self.storage_guard.refresh()
         self._check_start_readiness()
         epoch = self._start_epoch
         result = await self.validate_async()

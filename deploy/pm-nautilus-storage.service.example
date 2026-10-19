@@ -1,0 +1,26 @@
+[Unit]
+Description=Bounded PM-NAUTILUS disk housekeeping
+After=docker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+StateDirectory=pm-nautilus-maintenance
+StateDirectoryMode=0700
+# Install the reviewed standalone script here; do not execute a changing checkout.
+# Add --protect-revision FULL_SHA for any additional image used by a rollback plan.
+ExecStart=/usr/bin/python3 /usr/local/libexec/pm-nautilus-storage.py run --apply
+TimeoutStartSec=60
+Nice=15
+IOSchedulingClass=idle
+CPUQuota=10%
+MemoryMax=96M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/pm-nautilus/.env
+ReadWritePaths=/var/lib/pm-nautilus-maintenance /opt/pm-nautilus/backups/managed-space
+RestrictAddressFamilies=AF_UNIX

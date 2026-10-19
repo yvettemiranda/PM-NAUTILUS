@@ -1,0 +1,12 @@
+[Unit]
+Description=Check PM-NAUTILUS disk budget every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+RandomizedDelaySec=60
+Persistent=true
+Unit=pm-nautilus-storage.service
+
+[Install]
+WantedBy=timers.target

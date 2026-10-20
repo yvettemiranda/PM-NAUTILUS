@@ -1,5 +1,7 @@
 # PM-NAUTILUS 开发、发布与运维
 
+市场归档、停单与缺失盘口的识别、订阅隔离、恢复和未知估值规则见 [市场可用性处理](MARKET_AVAILABILITY.md)；具体发布验收以 [HANDOFF](../HANDOFF.md) 为准。
+
 **2026-10-20 最新部署：**应用 `640d1b1dbc58f2e61ef9cf3e131cd37a1e163de9` 已完成备份、升级、TEST/LIVE Store 两库逻辑核对、TEST 隔离副本 Runtime 与在线 TEST 完整核对，TEST/RUNNING、LIVE=false、钱包 LOCKED，参数/历史/钱包保留。自动日志轮转、15 分钟主机清理及运行时磁盘/inode 保护已安装并验收，详见 [自动存储维护](STORAGE_MAINTENANCE.md) 与 [验证记录](VALIDATION.md)。新服务器须安装定时任务并验收，不仅复制源码；日常维护无需定时停机。纯文档源码同步不重建或重启应用。
 
 **2026-10-19 元数据格式维护：**新版本写入可离线无损还原的压缩 Token，兼容旧库读取；3e765cc 及更早的压缩格式前镜像不能读取新格式，6dac94b 与 640d1b1 的 Token 编码兼容。升级、显式离线整理、完整双库回滚副本和可选 VACUUM 的前提见 [本轮维护说明](METADATA_OPTIMIZATION_2026-10-19.md)。不能仅回退到压缩格式前镜像而继续用新格式库；恢复运行后也不能回退旧快照丢失新增交易。正式服务器当时已完成整理与验收，运行应用 `6dac94bf6bc9cbc954a22e112a52dd49a798d2a6`，结果见 [最新验证](VALIDATION.md)。

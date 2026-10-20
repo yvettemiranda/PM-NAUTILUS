@@ -135,6 +135,57 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             "retentionIntervalSeconds": 60,
         }
 
+    def market_data_view():
+        # Public health exposes aggregate availability only, never held token IDs,
+        # market questions, wallet data, quantities or financial amounts.
+        result = {}
+        for mode, service in services.items():
+            runtime = runtimes[mode]
+            availability = getattr(runtime, "market_availability", {})
+            unavailable = {
+                token_id
+                for token_id, state in availability.items()
+                if state.get("status") == "UNAVAILABLE"
+            }
+            unavailable_positions = 0
+            not_ready_positions = 0
+            settled = set(runtime.business.get("settled", []))
+            for cycle in runtime.business.get("cycles", {}).values():
+                token_id = cycle["token_id"]
+                token = runtime.tokens.get(token_id)
+                if cycle["quantity"] <= 0 or token is not None and token.condition_id in settled:
+                    continue
+                is_unavailable = getattr(runtime, "market_is_unavailable", unavailable.__contains__)
+                if is_unavailable(token_id):
+                    unavailable_positions += 1
+                elif (
+                    token is None
+                    or token_id in getattr(runtime, "market_recovering", set())
+                    or not runtime.books[token_id].ready
+                ):
+                    not_ready_positions += 1
+            groups = service.stream_diagnostics()["groups"]
+            ready_groups = sum(group.get("state") == "READY" for group in groups)
+            recovering = (
+                not_ready_positions > 0
+                or bool(service.scan_status.get("streamError"))
+                or ready_groups != len(groups)
+            )
+            result[mode] = {
+                "status": "attention"
+                if unavailable_positions
+                else "recovering"
+                if recovering
+                else "ok",
+                "unavailablePositionCount": unavailable_positions,
+                "notReadyPositionCount": not_ready_positions,
+                "readyGroupCount": ready_groups,
+                "groupCount": len(groups),
+                "readyBookCount": sum(group.get("readyBookCount", 0) for group in groups),
+                "tokenCount": sum(group.get("tokenCount", 0) for group in groups),
+            }
+        return result
+
     async def attach(mode, runtime, wallet=None):
         runtimes[mode] = runtime
         service = MarketService(runtime, hub=market_hub)
@@ -737,6 +788,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             "revision": os.getenv("PM_GIT_REVISION", "local"),
             "backgroundErrors": failures,
             "storage": storage_view(),
+            "marketData": market_data_view(),
         }
         return JSONResponse(body, status_code=503 if failures else 200)
 

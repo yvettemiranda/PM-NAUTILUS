@@ -37,6 +37,7 @@ _RPC_READ_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pm-polygo
 _ACCOUNT_LOCKS = {}
 _ACCOUNT_LOCKS_GUARD = Lock()
 RESOLUTION_CONCURRENCY = 4
+AVAILABILITY_EXTRA_MARKETS_PER_RUN = 16
 
 
 class RedemptionCheckError(ValueError):
@@ -890,21 +891,61 @@ class RedemptionService:
         try:
             r = self.r
             generation = r.store.generation
-            tokens = iter(
+            owned = [
                 r.tokens[cycle["token_id"]]
                 for cycle in list(r.business["cycles"].values())
                 if r.tokens[cycle["token_id"]].condition_id not in r.business["claims"]
-            )
+            ]
+            work = [(token, True) for token in owned]
+            covered = {(token.market_id, token.condition_id) for token in owned}
+            # A cycle may be sold or settled while its public market remains
+            # quarantined. Keep bounded observation alive so fresh reopening
+            # proof can restore future eligibility without a process restart.
+            extra_count = 0
+            due = getattr(self.market, "availability_refresh_due", None)
+            for tid in tuple(getattr(r, "market_availability", {})):
+                token = r.tokens.get(tid)
+                if token is None:
+                    # Identity already released by the existing retention policy;
+                    # discard only its transient observation, never financial rows.
+                    r.market_availability.pop(tid, None)
+                    getattr(r, "market_recovering", set()).discard(tid)
+                    continue
+                if (token.market_id, token.condition_id) in covered:
+                    continue
+                if due is None or not due(token):
+                    continue
+                covered.add((token.market_id, token.condition_id))
+                work.append((token, False))
+                extra_count += 1
+                if extra_count >= AVAILABILITY_EXTRA_MARKETS_PER_RUN:
+                    break
+            tokens = iter(work)
 
             async def query_resolutions():
-                for token in tokens:
+                for token, check_resolution in tokens:
+                    # Existing owned-position checks also observe public market
+                    # availability. Proven unavailable books use a bounded poll;
+                    # normal settlement proof and claim progression stay intact.
+                    due = getattr(self.market, "availability_refresh_due", None)
+                    unavailable = getattr(r, "market_availability", {})
+                    if due is not None and token.token_id in unavailable and not due(token):
+                        continue
                     try:
                         raw = await self.market.get(f"{GAMMA}/markets/{token.market_id}")
-                        payouts = resolution(raw, token)
-                        if payouts is not None and r.store.generation == generation:
-                            self.identify(token, payouts)
+                        observe = getattr(self.market, "observe_market_availability", None)
+                        if observe is not None and r.store.generation == generation:
+                            await observe(raw, token)
+                        if check_resolution:
+                            payouts = resolution(raw, token)
+                            if payouts is not None and r.store.generation == generation:
+                                self.identify(token, payouts)
                     except Exception as exc:
-                        r.store.put("settlement_error", type(exc).__name__)
+                        failed = getattr(self.market, "availability_refresh_failed", None)
+                        if failed is not None and r.store.generation == generation:
+                            failed(token)
+                        if check_resolution:
+                            r.store.put("settlement_error", type(exc).__name__)
 
             queries = [
                 asyncio.create_task(query_resolutions()) for _ in range(RESOLUTION_CONCURRENCY)

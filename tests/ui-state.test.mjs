@@ -175,57 +175,144 @@ test('known unavailable rights stay visible separately from healthy subscription
  const dashboard={...base(),positions:[],positionCount:92,positionBooksReady:false,unavailablePositionCount:1,unvaluedPositionCount:1,notReadyPositionCount:0};
  const state=displayStatus(dashboard,opts);
  assert.equal(state.feed,'ready');assert.equal(state.run,'ready');assert.equal(state.positions,'warning');
- assert.match(state.warning,/1 笔持仓/);assert.match(state.warning,/处置安排待核查/);
+ assert.equal(state.warning,'');assert.match(state.positionNotice,/1 笔持仓/);assert.match(state.positionNotice,/处置安排待核查/);
  assert.equal(state.warning.includes('行情未就绪'),false);
  dashboard.notReadyPositionCount=1;
  assert.equal(displayStatus(dashboard,opts).feed,'waiting');
- assert.match(displayStatus(dashboard,opts).warning,/行情未就绪/);
+ assert.equal(displayStatus(dashboard,opts).warning,'');
  dashboard.marketScan.streamError='connection failed';
  assert.equal(displayStatus(dashboard,opts).feed,'error');
- assert.match(displayStatus(dashboard,opts).warning,/市场已停用或归档/);
+ assert.match(displayStatus(dashboard,opts).positionNotice,/市场已停用或归档/);assert.match(displayStatus(dashboard,opts).warning,/行情正在恢复/);
 });
 
 test('all owned markets unavailable with no groups never appear ready or endlessly reconnecting',()=>{
  const dashboard={...base(),positions:[],positionCount:1,positionBooksReady:false,unavailablePositionCount:1,unvaluedPositionCount:1,notReadyPositionCount:0,marketScan:{lastScanAt:'2026-10-20',diagnostics:{streams:{groups:[]}}}};
  const state=displayStatus(dashboard,opts);
  assert.equal(state.feed,'unavailable');assert.equal(state.positions,'warning');
- assert.match(state.warning,/报价不可用/);
+ assert.equal(state.warning,'');assert.match(state.positionNotice,/报价不可用/);
  const unknown={...dashboard,unavailablePositionCount:0};
  assert.equal(displayStatus(unknown,opts).feed,'waiting');
 });
 
-test('actual page labels unavailable holdings, full totals unknown, and known subtotal without refund assumptions',()=>{
+function costBasisDashboard(positions, overrides={}) {
+ const count=positions.length,unpriced=positions.filter(p=>['UNAVAILABLE','NOT_READY'].includes(p.currentSellPriceStatus)).length;
+ return {...base(),generation:'g',details:'positions',preferences:{...profile},strategy:{status:'RUNNING',initialCapital:'100',availableCash:'81'},positions,positionCount:count,positionBooksReady:!unpriced,valuedPositionCount:count-unpriced,unvaluedPositionCount:unpriced,unavailablePositionCount:positions.filter(p=>p.currentSellPriceStatus==='UNAVAILABLE').length,notReadyPositionCount:positions.filter(p=>p.currentSellPriceStatus==='NOT_READY').length,portfolio:{totalFunds:null,unrealizedPnl:null,positionValue:null,realizedPnl:'2',availableCash:'81',knownPositionValue:'15',unpricedPositionCost:'1',estimatedPositionValue:'16',estimatedTotalFunds:'97',knownUnrealizedPnl:'-5',knownTotalPnl:'-3',valuedPositionCount:count-unpriced,unvaluedPositionCount:unpriced,unavailablePositionCount:unpriced,failedRedemptionCount:0},marketScan:{...base().marketScan,events:[],diagnostics:{...base().marketScan.diagnostics,availableCategories:[]}},...overrides};
+}
+function normalPosition(n,status='READY') {
+ return {tokenId:`normal-${n}`,marketQuestion:`NORMAL_${n}`,direction:'Yes',quantity:'50',averageBuyPrice:'0.02',remainingCost:'1',unrealizedPnl:status==='NO_BID'?'-1':'-0.25',estimatedUnrealizedPnl:status==='NO_BID'?'-1':'-0.25',currentSellPrice:'0.015',currentSellPriceStatus:status,executableSellValue:status==='NO_BID'?'0':'0.75',executableSellQuantity:status==='NO_BID'?'0':'50',targetSellPrice:'0.04',targetSellPrices:['0.04'],stopLossThreshold:null,cycleStatus:'ACCUMULATING'};
+}
+function unavailablePosition(status='UNAVAILABLE') {
+ return {...normalPosition('archived'),tokenId:'archived',marketQuestion:'ARCHIVED_MARKET',currentSellPriceStatus:status,marketAvailability:{status:'UNAVAILABLE',reason:'archived',since:'2026-10-20T05:00:00Z'},currentSellPrice:null,executableSellValue:null,executableSellQuantity:null,unrealizedPnl:null,estimatedUnrealizedPnl:'0'};
+}
+
+test('actual page shows normal holdings first and cost basis for the one unavailable holding',()=>{
  const page=pageHarness();seedTestDashboard(page);
  const {ui,context,element}=page;
- const position={tokenId:'archived',marketQuestion:'ARCHIVED MARKET',eventTitle:'ARCHIVED EVENT',direction:'Yes',quantity:'50',averageBuyPrice:'0.02',currentSellPrice:null,currentSellPriceStatus:'UNAVAILABLE',marketAvailability:{status:'UNAVAILABLE',reason:'archived',since:'2026-10-20T05:00:00Z'},executableSellValue:null,executableSellQuantity:null,targetSellPrice:'0.04',targetSellPrices:['0.04'],stopLossThreshold:null,cycleStatus:'ACCUMULATING'};
- const dashboard={...base(),generation:'g',details:'positions',preferences:{...profile},strategy:{status:'RUNNING',initialCapital:'100',availableCash:'79'},positions:[position],positionCount:21,positionBooksReady:false,valuedPositionCount:20,unvaluedPositionCount:1,unavailablePositionCount:1,notReadyPositionCount:0,portfolio:{totalFunds:null,unrealizedPnl:null,realizedPnl:'2',availableCash:'79',positionValue:null,knownPositionValue:'15',valuedPositionCount:20,unvaluedPositionCount:1,unavailablePositionCount:1},marketScan:{...base().marketScan,events:[],diagnostics:{...base().marketScan.diagnostics,availableCategories:[]}}};
+ const archived=unavailablePosition();
+ const positions=[archived,...Array.from({length:20},(_,i)=>normalPosition(i+1))];
+ const dashboard=costBasisDashboard(positions);
  context.applyDashboardForTest(dashboard);
- assert.equal(element('#total-funds').textContent,'—');assert.equal(element('#net-pnl').textContent,'—');
- assert.match(element('#available-cash').textContent,/79/);assert.match(element('#realized-pnl').textContent,/2/);
+ assert.equal(element('#total-funds').textContent,'97.00U');assert.equal(element('#net-pnl').textContent,'-3.00U');
+ assert.equal(element('#available-cash').textContent,'81.00U');assert.equal(element('#realized-pnl').textContent,'+2.00U');
+ assert.equal(element('#unrealized-pnl').textContent,'-5.00U');
+ assert.equal(element('#known-position-value').textContent,'15.00U');
+ assert.equal(element('#position-value').textContent,'16.00U');
+ assert.equal(element('#unpriced-position-cost').textContent,'1.00U');
  assert.equal(element('#valuation-note').hidden,false);
- assert.match(element('#valuation-note').textContent,/可估值持仓 20 笔/);
- assert.match(element('#valuation-note').textContent,/小计 15/);
- assert.match(element('#valuation-note').textContent,/不是完整资产或盈亏/);
- assert.equal(element('#tab-position-count').textContent,'21');assert.match(element('#position-count').textContent,/1笔未估值/);
- assert.match(element('#positions').innerHTML,/已归档 · 报价不可用/);
- assert.match(element('#positions').innerHTML,/处置安排待核查/);
- assert.match(element('#positions').innerHTML,/不假定结算、退款或归零/);
+ assert.match(element('#valuation-note').textContent,/1 笔暂无报价/);assert.match(element('#valuation-note').textContent,/浮盈亏暂记 0/);assert.equal(element('#net-pnl-label').textContent,'累计盈亏估算');
+ assert.match(element('#valuation-note').textContent,/剩余成本 1.00U 计入/);
+ assert.match(element('#valuation-note').textContent,/曲线显示历史记录/);assert.match(element('#valuation-note').textContent,/恢复报价后重新计算/);
+ assert.equal(element('#tab-position-count').textContent,'21');assert.match(element('#position-count').textContent,/1笔暂无报价/);
+ assert.equal(element('#connection-warning').hidden,true);
+ assert.match(element('#positions').innerHTML,/NORMAL_1/);assert.match(element('#positions').innerHTML,/NORMAL_20/);
+ assert.equal(element('#positions').innerHTML.includes('ARCHIVED_MARKET'),false);
+ assert.equal((element('#positions').innerHTML.match(/<details class="position-row/g)||[]).length,20);
+ assert.match(element('#positions').innerHTML,/剩余成本 <strong>1.00U/);
+ assert.match(element('#positions').innerHTML,/浮盈亏 <strong data-tone="negative">-0.25U/);
+ // The source response is untouched; sorting is stable within each quote group.
+ assert.equal(dashboard.positions[0].tokenId,'archived');
+ ui.positionsExpanded=true;context.renderPositions(dashboard.positions);
+ const markup=element('#positions').innerHTML;
+ assert.ok(markup.indexOf('NORMAL_20')<markup.indexOf('ARCHIVED_MARKET'));
+ assert.match(markup,/已归档 · 报价不可用/);assert.match(markup,/处置安排待核查/);
+ assert.match(markup,/交易不可用 · 处置待核查/);assert.match(markup,/浮盈亏 <strong data-tone="neutral">0.00U（暂计）/);
  assert.equal(element('#positions-dot').dataset.state,'warning');
  assert.match(element('#module-status-label').textContent,/行情 · 正常 · 1笔处置待核查/);
  assert.match(element('#module-status-detail').textContent,/2\/2 盘口完整/);
- ui.dashboard={...dashboard,positions:[],details:'summary',positionCount:92};
- context.renderPortfolio(ui.dashboard.portfolio,[]);context.renderStatus();
- assert.match(element('#valuation-note').textContent,/20 笔/);
- assert.match(element('#connection-warning').textContent,/1 笔持仓/);
- // No available subscriptions still exposes the retained rights and never
- // presents an empty 0/0 set as a healthy feed.
- ui.dashboard={...dashboard,marketScan:{diagnostics:{streams:{groups:[]}}}};context.renderStatus();
- assert.match(element('#module-status-label').textContent,/报价不可用/);
- assert.match(element('#module-status-detail').textContent,/停用持仓仍保留/);
- assert.equal(element('#module-status-detail').textContent.includes('0/0'),false);
+ // Full-account money refreshes from the new summary while rows stay available.
+ context.applyDashboardForTest({...dashboard,details:'summary',positions:[],portfolio:{...dashboard.portfolio,estimatedTotalFunds:'98',knownTotalPnl:'-2'}});
+ assert.match(element('#positions').innerHTML,/NORMAL_20/);
+ assert.equal(element('#total-funds').textContent,'98.00U');assert.equal(element('#net-pnl').textContent,'-2.00U');
+ assert.equal(element('#position-refresh-note').hidden,false);
+ assert.match(element('#position-refresh-note').textContent,/上次持仓明细/);
+ context.applyDashboardForTest({...dashboard,generation:'new',details:'summary',positions:[]});
+ assert.equal(element('#positions').innerHTML.includes('NORMAL_20'),false);
 });
 
-test('summary and market retain verified whole-account position counts without stale details',()=>{
+test('unknown quotes keep realized profit and cost assets without inventing floating profit or history',()=>{
+ for (const realized of ['-2','0','2']) {
+  const page=pageHarness();seedTestDashboard(page);const {ui,context,element}=page;
+  const positions=[unavailablePosition(),unavailablePosition('NOT_READY')];
+  const dashboard=costBasisDashboard(positions);
+  dashboard.portfolio={...dashboard.portfolio,knownPositionValue:'0',unpricedPositionCost:'2',estimatedPositionValue:'2',estimatedTotalFunds:'100',realizedPnl:realized,knownUnrealizedPnl:'0',knownTotalPnl:realized};
+  const points=[{at:1000,pnl:'1',session:'s'},{at:2000,pnl:null,session:'s'}];
+  ui.performance={generation:'g',points};ui.performanceAt=Date.now();
+  context.applyDashboardForTest(dashboard);
+  assert.equal(element('#total-funds').textContent,'100.00U');
+  assert.equal(element('#unrealized-pnl').textContent,'0.00U');
+  assert.equal(element('#net-pnl').textContent,`${Number(realized)>0?'+':''}${Number(realized).toFixed(2)}U`);
+  assert.equal(element('#net-pnl').dataset.tone,Number(realized)>0?'positive':Number(realized)<0?'negative':'neutral');
+  assert.match(element('#valuation-note').textContent,/2 笔暂无报价/);assert.match(element('#positions').innerHTML,/当前买盘可卖 <strong>暂无报价/);
+  assert.match(element('#positions').innerHTML,/浮盈亏 <strong data-tone="neutral">0.00U（暂计）/);
+  assert.equal(ui.performance.points,points);assert.equal(ui.performance.points[1].pnl,null);
+ }
+});
+
+test('failed redemption fallback remains cost assets, retains realized PnL and avoids cash duplication',()=>{
+ const page=pageHarness();seedTestDashboard(page);const {context,element}=page;
+ const dashboard=costBasisDashboard([]);
+ dashboard.portfolio={...dashboard.portfolio,availableCash:'100',knownPositionValue:'0',unpricedPositionCost:'0',estimatedPositionValue:'0',estimatedTotalFunds:'102',knownUnrealizedPnl:'0',knownTotalPnl:'1.5',realizedPnl:'1.5',failedRedemption:'99',failedRedemptionCost:'5',failedRedemptionCostFallback:'2',failedRedemptionCount:2,failedRedemptionCashIncludedCount:1};
+ context.applyDashboardForTest(dashboard);
+ assert.equal(element('#total-funds').textContent,'102.00U');assert.equal(element('#net-pnl').textContent,'+1.50U');
+ assert.match(element('#valuation-note').textContent,/2 笔赎回处置待核查，浮盈亏暂记 0/);
+ assert.match(element('#valuation-note').textContent,/2.00U 成本暂计/);
+ assert.match(element('#valuation-note').textContent,/1 笔已计现金的部分不重复/);
+ assert.equal(element('#valuation-note').textContent.includes('99.00U'),false);
+});
+
+test('legacy normal snapshots keep figures and ready no-bid holdings stay before unavailable quotes',()=>{
+ const page=pageHarness();seedTestDashboard(page);const {context,element}=page;
+ const dashboard=costBasisDashboard([unavailablePosition(),normalPosition(1,'NO_BID'),normalPosition(2)]);
+ dashboard.portfolio={totalFunds:'100',realizedPnl:'2',unrealizedPnl:'1',positionValue:'5',availableCash:'95'};
+ context.applyDashboardForTest(dashboard);
+ assert.equal(element('#total-funds').textContent,'100.00U');assert.equal(element('#net-pnl').textContent,'+3.00U');
+ const markup=element('#positions').innerHTML;
+ assert.ok(markup.indexOf('NORMAL_1')<markup.indexOf('NORMAL_2'));
+ assert.ok(markup.indexOf('NORMAL_2')<markup.indexOf('ARCHIVED_MARKET'));
+ assert.match(markup,/暂无买盘/);assert.match(markup,/data-tone="negative">-1.00U/);
+ assert.equal(element('#valuation-note').hidden,true);
+});
+
+test('locked unverified stale or mismatched LIVE snapshots hide new estimates and cached positions',()=>{
+ for (const fault of ['locked','stale','read-error','unavailable','wrong-mode']) {
+  const page=pageHarness();seedTestDashboard(page);const {ui,context,element}=page;
+  ui.displayMode='LIVE';ui.wallet={configured:true,unlocked:true,enabled:true,status:'PAUSED',readiness:{ready:true}};ui.walletAt=Date.now();
+  const dashboard=costBasisDashboard([normalPosition(1)],{executionMode:'LIVE',liveExecutionEnabled:true});
+  context.applyDashboardForTest(dashboard);assert.match(element('#positions').innerHTML,/NORMAL_1/);
+  if(fault==='locked')ui.wallet={...ui.wallet,unlocked:false,status:'LOCKED'};
+  if(fault==='stale')ui.walletAt=Date.now()-21000;
+  if(fault==='read-error')ui.walletError='failed';
+  const reply={...dashboard,details:'summary',positions:[],portfolio:{...dashboard.portfolio,estimatedTotalFunds:'999'}};
+  if(fault==='unavailable')reply.positionsAvailable=false;
+  if(fault==='wrong-mode')reply.executionMode='TEST';
+  context.applyDashboardForTest(reply);
+  assert.equal(element('#total-funds').textContent,'—');assert.equal(element('#net-pnl').textContent,'—');
+  assert.equal(element('#positions').innerHTML.includes('NORMAL_1'),false);
+  assert.equal(ui.positionSnapshot,null);assert.equal(element('#valuation-note').hidden,true);
+ }
+});
+
+test('summary and market retain only verified same-mode same-generation details while refreshing counts',()=>{
  for (const mode of ['TEST','LIVE']) {
   const page=pageHarness();seedTestDashboard(page);
   const {ui,context,element}=page;
@@ -237,13 +324,14 @@ test('summary and market retain verified whole-account position counts without s
   assert.equal(element('#tab-position-count').textContent,'86');
   assert.match(element('#positions').innerHTML,/LOADED_POSITION/);
   for (const details of ['summary','market']) {
+   ui.activeTab='positions';
+   context.applyDashboardForTest(dashboard);
    ui.activeTab=details==='summary'?'records':'market';
    context.applyDashboardForTest({...dashboard,details,positions:[]});
    assert.equal(element('#tab-position-count').textContent,'86');
-   assert.equal(element('#position-count').textContent,'读取中');
-   assert.equal(element('#position-list-controls').hidden,true);
-   assert.match(element('#positions').innerHTML,/正在读取持仓状态/);
-   assert.equal(element('#positions').innerHTML.includes('LOADED_POSITION'),false);
+   assert.equal(element('#position-count').textContent,'86单');
+   assert.equal(element('#position-refresh-note').hidden,false);
+   assert.match(element('#positions').innerHTML,/LOADED_POSITION/);
    for (const positionCount of [0,-1,1.5,'86',null,undefined]) {
     context.applyDashboardForTest({...dashboard,details,positions:[],positionCount});
     assert.equal(element('#tab-position-count').textContent,positionCount===0?'0':'—');

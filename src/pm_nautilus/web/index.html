@@ -321,9 +321,9 @@
       </section>
 
       <section class="equity-panel" aria-label="资金概览">
-        <div class="equity-label">累计盈亏估算</div>
+        <div id="net-pnl-label" class="equity-label">累计盈亏估算</div>
         <div class="equity-head"><strong id="net-pnl">—</strong><span id="net-return"></span></div>
-        <button id="equity-chart" type="button" aria-label="盈亏估算曲线，左右方向键查看数据点"><svg id="equity-svg" role="img" aria-label="累计盈亏估算曲线"></svg></button>
+        <button id="equity-chart" type="button" aria-label="历史盈亏估算曲线，左右方向键查看数据点"><svg id="equity-svg" role="img" aria-label="历史盈亏估算曲线"></svg></button>
         <div class="curve-footer">
           <span id="curve-status" role="status" aria-live="polite"></span>
           <div class="curve-scales" role="group" aria-label="收益曲线时间刻度">
@@ -338,11 +338,12 @@
           <section id="portfolio" class="portfolio" aria-label="资金明细">
             <article><span>已实现</span><strong id="realized-pnl">—</strong></article>
             <article><span>未实现估算</span><strong id="unrealized-pnl">—</strong></article>
-            <article><span>当前买盘可卖估值</span><strong id="position-value">—</strong></article>
-            <article><span>可估值持仓小计（非总资产）</span><strong id="known-position-value">—</strong></article>
+            <article><span id="position-value-label">当前买盘可卖估值</span><strong id="position-value">—</strong></article>
+            <article><span>有报价持仓估值</span><strong id="known-position-value">—</strong></article>
+            <article id="unpriced-position-cost-item" hidden><span>无报价持仓暂计成本</span><strong id="unpriced-position-cost">—</strong></article>
             <article><span>持仓数</span><strong id="portfolio-position-count">—</strong></article>
           </section>
-          <p id="cash-note" class="field-note"></p><p class="field-note">净盈亏含持仓浮动盈亏；持仓估值按当前可成交买盘逐档扣费。缺失报价或处置未明时，完整资产和盈亏保持未知；持仓小计仅包含可估值部分。</p>
+          <p id="cash-note" class="field-note"></p><p class="field-note">有报价持仓按可成交买盘逐档扣费估值；无报价持仓按剩余成本暂计资产，浮盈亏暂记 0，恢复报价后重新计算。已实现盈亏保留，历史曲线保留原采样与断点。</p>
         </details>
       </section>
       <nav class="view-tabs" role="tablist" aria-label="交易信息">
@@ -352,6 +353,7 @@
       </nav>
       <details class="module-status"><summary id="module-status-label">数据状态</summary><div id="module-status-detail"></div></details>
       <section id="positions-panel" class="panel" role="tabpanel" aria-labelledby="tab-positions">
+        <p id="position-refresh-note" class="field-note" hidden></p>
         <div class="section-heading">
           <div>
 
@@ -420,6 +422,6 @@
 
       <p id="message" role="status" aria-live="polite"></p>
     </main>
-    <script type="module" src="/app.js?v=20261020-availability1"></script>
+    <script type="module" src="/app.js?v=20261020-costbasis1"></script>
   </body>
 </html>

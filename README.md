@@ -1,6 +1,16 @@
 # PM-NAUTILUS
 
-**2026-10-20 市场可用性修复已发布部署验收：**[PR #16](https://github.com/yvettemiranda/PM-NAUTILUS/pull/16) 已合并，固定应用代码 `ebbe888a56213f3c976fdb5291b045354cb821e9`；代码 push、PR 和 [main CI 39397396195](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39397396195) 的 x86_64／ARM64 回归及 Docker verify 全部通过。本地 880 项程序、37 项页面、Ruff（105 文件）及 JS/shell 语法通过。17:14:13 CST 服务器验收 PASS，healthy／零重启／未 OOM，TEST/RUNNING 已恢复，LIVE 未启用、钱包 LOCKED，后台错误为空；原账本、参数、钱包及空间维护机制保留。源码／文档 SHA 以本次纯 Markdown 提交及私有 `docs-sync.json` 记录为准；纯文档同步仅推进源码，应用镜像、env、runtime 保持上述固定代码，无需重启。
+## 2026-10-20 缺报价仓位按成本暂计（待发布验收）
+
+本轮按用户确认口径调整展示：正常持仓继续显示报价、市值、剩余成本与浮盈亏；`UNAVAILABLE`／`NOT_READY` 仓位稳定排到列表底部，并保留数量、成本、均价、目标和原因。先对全部持仓排序，再截取前 20 笔或展开全部，纯摘要与各页的全仓汇总一致。
+
+资产估算为账面现金（含已冻结现金）＋可估值持仓市值＋缺报价持仓剩余成本＋原有已证明待赎回应收；失败赎回权利仅在未计入现金时以原剩余成本暂计，诊断回款金额不作为现金或应收。盈亏估算保留原已实现盈亏、可估值持仓浮盈亏和原已知待赎回盈亏；缺报价持仓及失败赎回权利的当前浮盈亏暂按 0 计入，并注明数量、成本暂计金额及“浮盈亏暂记 0，恢复报价后重算”。成本暂计不代表可兑现市值，暂记 0 不是已确认零收益，也不抹掉原已实现盈亏。
+
+这些值只用于只读展示，交易报价、原严格完整估值字段、账本、权益、参数和收益历史不改写。新的 `estimatedTotalFunds`／`estimatedPositionValue`、`knownUnrealizedPnl`／`knownTotalPnl` 和逐仓 `estimatedUnrealizedPnl` 明确区分展示估算与真实报价；锁定或未核对的 LIVE 账户继续隐藏账户资料。存储维护保留，LIVE 不启用。
+
+本地最终 886 项 Python（25.30 秒）、41 项页面测试、Ruff 检查／格式（106 文件）通过；14 项部署门禁专项测试通过，代码已做独立复核。本轮应用 SHA、CI、备份和服务器／页面验收结果待发布后补录；目前线上仍为应用 `ebbe888`、源码／文档 `5640b0a`。下方保留前轮历史证据。
+
+**2026-10-20 历史部署（停用识别）：**[PR #16](https://github.com/yvettemiranda/PM-NAUTILUS/pull/16) 已合并，固定应用代码 `ebbe888a56213f3c976fdb5291b045354cb821e9`；代码 push、PR 和 [main CI 39397396195](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39397396195) 的 x86_64／ARM64 回归及 Docker verify 全部通过。本地 880 项程序、37 项页面、Ruff（105 文件）及 JS/shell 语法通过。17:14:13 CST 服务器验收 PASS，healthy／零重启／未 OOM，TEST/RUNNING 已恢复，LIVE 未启用、钱包 LOCKED，后台错误为空；原账本、参数、钱包及空间维护机制保留。源码／文档 SHA 以本次纯 Markdown 提交及私有 `docs-sync.json` 记录为准；纯文档同步仅推进源码，应用镜像、env、runtime 保持上述固定代码，无需重启。
 
 本次现场 92 笔持仓中 1 笔已归档、报价不可用，其他未就绪持仓为 0；剩余 4/4 组、767/767 盘口完整。旧价已屏蔽，完整资产／盈亏未知，另列精确的可估值持仓小计；原持仓和权利保留，处置安排待核查，不保证恢复、退款或结算。在线完整 TEST validation（38.999 秒）、离线 Runtime、数据保留、认证 dashboard 语义及 API／JS 检查通过；本轮未做生产浏览器登录后的视觉验收。仅为短时采样，真实资金闭环仍未验证；详情见 [市场可用性](docs/MARKET_AVAILABILITY.md) 和 [HANDOFF](HANDOFF.md)。
 

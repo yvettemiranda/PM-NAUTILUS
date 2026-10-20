@@ -1,4 +1,4 @@
-import { displayStatus, curveSegments, modeSwitchDecision, walletOriginSecure, liveWalletAccountVerified, liveRunSummary, redemptionApprovalAction, panelVisible, setMarkupIfChanged } from "./ui-state.js?v=20261020-availability1";
+import { displayStatus, curveSegments, modeSwitchDecision, walletOriginSecure, liveWalletAccountVerified, liveRunSummary, redemptionApprovalAction, panelVisible, setMarkupIfChanged } from "./ui-state.js?v=20261020-costbasis1";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -35,6 +35,7 @@ const ui = {
   staleCandidateCount: 0,
   visibleCandidateCount: 20,
   positionsExpanded: false,
+  positionSnapshot: null,
   tradeRecordsExpanded: false,
   tradeRecordsLoaded: false,
   tradeRecordsLoading: false,
@@ -247,10 +248,16 @@ function progressMarkup(progressPercent, label = "市场进度") {
 }
 
 function currentPositions(positions = []) {
-  return positions.filter((position) => Number(position.quantity) > 0);
+  return positions.filter((position) => Number(position.quantity) > 0)
+    .sort((a, b) => Number(positionUnpriced(a)) - Number(positionUnpriced(b)));
+}
+
+function positionUnpriced(position) {
+  return ["UNAVAILABLE", "NOT_READY", "RECONNECTING", "DISCONNECTED"].includes(position.currentSellPriceStatus);
 }
 
 function liveAccountVisible() {
+  if (!ui.dashboard || ui.dashboard.executionMode !== ui.displayMode || ui.dashboard.positionsAvailable === false) return false;
   return ui.displayMode !== "LIVE" || liveWalletAccountVerified({
     dashboard: ui.dashboard, wallet: ui.wallet, walletAt: ui.walletAt, error: ui.walletError,
   });
@@ -258,23 +265,35 @@ function liveAccountVisible() {
 
 function renderPortfolio(portfolio, positions = []) {
   if (!liveAccountVisible()) { portfolio = null; positions = []; }
-  setMoneyValue("#total-funds", portfolio?.totalFunds);
+  const value = (current, previous) => portfolio && current in portfolio ? portfolio[current] : portfolio?.[previous];
+  setMoneyValue("#total-funds", value("estimatedTotalFunds", "totalFunds"));
   setMoneyValue("#available-cash", portfolio?.availableCash);
-  const pnl = portfolio?.unrealizedPnl == null || portfolio?.realizedPnl == null ? null : Number(portfolio.realizedPnl) + Number(portfolio.unrealizedPnl);
+  const legacyPnl = portfolio?.unrealizedPnl == null || portfolio?.realizedPnl == null ? null : Number(portfolio.realizedPnl) + Number(portfolio.unrealizedPnl);
+  const currentPnl = portfolio && "knownTotalPnl" in portfolio ? portfolio.knownTotalPnl : legacyPnl;
+  const pnl = currentPnl == null || !Number.isFinite(Number(currentPnl)) ? null : Number(currentPnl);
   setMoneyValue("#net-pnl", pnl, true);
   const initial = Number(ui.dashboard?.strategy?.initialCapital);
   $("#net-return").textContent = ui.displayMode === "TEST" && pnl !== null && initial > 0 ? `${pnl > 0 ? "+" : ""}${(pnl / initial * 100).toFixed(2)}%` : "";
   $("#net-return").dataset.tone = pnl > 0 ? "positive" : pnl < 0 ? "negative" : "neutral";
   setMoneyValue("#realized-pnl", portfolio?.realizedPnl, true);
-  setMoneyValue("#unrealized-pnl", portfolio?.unrealizedPnl, true);
-  setMoneyValue("#position-value", portfolio?.positionValue);
+  setMoneyValue("#unrealized-pnl", value("knownUnrealizedPnl", "unrealizedPnl"), true);
+  setMoneyValue("#position-value", value("estimatedPositionValue", "positionValue"));
   setMoneyValue("#known-position-value", portfolio?.knownPositionValue);
+  setMoneyValue("#unpriced-position-cost", portfolio?.unpricedPositionCost);
   const unvalued = portfolio?.unvaluedPositionCount ?? 0;
+  const failed = portfolio?.failedRedemptionCount ?? 0;
+  $("#net-pnl-label").textContent = "累计盈亏估算";
+  $("#position-value-label").textContent = unvalued ? "持仓估算（含暂计成本）" : "当前买盘可卖估值";
+  $("#unpriced-position-cost-item").hidden = !portfolio || !unvalued;
   const valuationNote = $("#valuation-note");
-  valuationNote.hidden = !portfolio || !unvalued;
-  valuationNote.textContent = unvalued
-    ? `可估值持仓 ${formatCount(portfolio?.valuedPositionCount ?? 0)} 笔，小计 ${formatMoney(portfolio?.knownPositionValue)}；另有 ${formatCount(unvalued)} 笔未估值。此小计不含现金及待赎回金额，也不是完整资产或盈亏。`
-    : "";
+  const notes = [];
+  if (unvalued) notes.push(portfolio && "unpricedPositionCost" in portfolio
+    ? `${formatCount(unvalued)} 笔暂无报价，资产暂按剩余成本 ${formatMoney(portfolio.unpricedPositionCost)} 计入，浮盈亏暂记 0；恢复报价后重新计算。`
+    : `${formatCount(unvalued)} 笔持仓暂无报价，浮盈亏暂记 0，恢复报价后重新计算。`);
+  if (failed) notes.push(`另有 ${formatCount(failed)} 笔赎回处置待核查，浮盈亏暂记 0；${formatMoney(portfolio.failedRedemptionCostFallback)} 成本暂计${portfolio.failedRedemptionCashIncludedCount ? `，${formatCount(portfolio.failedRedemptionCashIncludedCount)} 笔已计现金的部分不重复计入` : ""}。`);
+  if (notes.length) notes.push("曲线显示历史记录。");
+  valuationNote.hidden = !portfolio || !notes.length;
+  valuationNote.textContent = notes.join(" ");
   const positionCount = ui.dashboard?.positionCount ?? currentPositions(positions).length;
   const count = $("#portfolio-position-count");
   count.textContent = liveAccountVisible() ? `${formatCount(positionCount)}单` : "—";
@@ -701,7 +720,17 @@ function renderRunControls() {
 }
 
 function renderPositions(positions = []) {
-  if (!ui.dashboard || ["summary", "market"].includes(ui.dashboard.details)) {
+  const snapshot = ui.positionSnapshot;
+  if (!liveAccountVisible() || snapshot && (snapshot.mode !== ui.displayMode || snapshot.generation !== ui.dashboard?.generation)) ui.positionSnapshot = null;
+  const partial = ["summary", "market"].includes(ui.dashboard?.details);
+  if (partial && (!Number.isSafeInteger(ui.dashboard.positionCount) || ui.dashboard.positionCount <= 0)) ui.positionSnapshot = null;
+  const retained = partial && ui.positionSnapshot?.positions.length > 0 && ui.dashboard?.generation &&
+    ui.positionSnapshot.generation === ui.dashboard.generation &&
+    Number.isSafeInteger(ui.dashboard.positionCount) && ui.dashboard.positionCount > 0;
+  $("#position-refresh-note").hidden = !retained;
+  $("#position-refresh-note").textContent = retained ? "明细更新中，暂显示上次持仓明细。" : "";
+  if (retained) positions = ui.positionSnapshot.positions;
+  if (!ui.dashboard || partial && !retained) {
     const count = ui.dashboard?.positionCount;
     $("#tab-position-count").textContent = ui.dashboard?.executionMode === ui.displayMode &&
       liveAccountVisible() && Number.isSafeInteger(count) && count >= 0
@@ -721,6 +750,9 @@ function renderPositions(positions = []) {
     setMarkupIfChanged($("#positions"), markup);
     return;
   }
+  if (!partial) ui.positionSnapshot = ui.dashboard.generation
+    ? {mode: ui.displayMode, generation: ui.dashboard.generation, positions: [...positions]}
+    : null;
   const current = currentPositions(positions);
   const totalCount = ui.dashboard?.positionCount ?? current.length;
   if (totalCount <= POSITION_PREVIEW_LIMIT) ui.positionsExpanded = false;
@@ -729,7 +761,7 @@ function renderPositions(positions = []) {
     : current.slice(0, POSITION_PREVIEW_LIMIT);
   $("#tab-position-count").textContent = formatCount(totalCount);
   const unvaluedCount = ui.dashboard?.unvaluedPositionCount ?? ui.dashboard?.portfolio?.unvaluedPositionCount ?? 0;
-  $("#position-count").textContent = `${formatCount(totalCount)}单${unvaluedCount ? ` · ${formatCount(unvaluedCount)}笔未估值` : ""}`;
+  $("#position-count").textContent = `${formatCount(totalCount)}单${unvaluedCount ? ` · ${formatCount(unvaluedCount)}笔暂无报价` : ""}`;
   const controls = $("#position-list-controls");
   const toggle = $("#toggle-positions");
   controls.hidden = totalCount <= POSITION_PREVIEW_LIMIT;
@@ -758,10 +790,14 @@ function renderPositions(positions = []) {
             ? `<span class="event-title">${escapeHtml(position.eventTitle)}</span>`
             : "";
           const currentSellPrice = formatCurrentSellPrice(position);
+          const unpriced = positionUnpriced(position);
           const availability = position.marketAvailability;
           const unavailableNote = position.currentSellPriceStatus === "UNAVAILABLE"
-            ? `<p class="field-note market-unavailable">${availability?.reason === "archived" ? "市场已归档" : "市场已停用"}，报价不可用，处置安排待核查。持仓和账本保留，不假定结算、退款或归零。${availability?.since ? ` 首次确认 ${escapeHtml(formatDate(availability.since))}。` : ""}</p>`
-            : "";
+            ? `<p class="field-note market-unavailable">${availability?.reason === "archived" ? "市场已归档" : "市场已停用"}，报价不可用，处置安排待核查。${availability?.since ? ` 首次确认 ${escapeHtml(formatDate(availability.since))}。` : ""}</p>`
+            : unpriced ? '<p class="field-note">报价暂未就绪，资产暂按剩余成本计入，浮盈亏暂记 0；恢复报价后重新计算。</p>' : "";
+          const estimatedPnl = unpriced ? "0" : "estimatedUnrealizedPnl" in position ? position.estimatedUnrealizedPnl : position.unrealizedPnl;
+          const positionPnl = `${formatMoney(estimatedPnl, true)}${unpriced ? "（暂计）" : ""}`;
+          const positionPnlTone = unpriced ? "neutral" : Number(estimatedPnl) > 0 ? "positive" : Number(estimatedPnl) < 0 ? "negative" : "neutral";
           const cycleStatus = position.currentSellPriceStatus === "UNAVAILABLE" ? "交易不可用 · 处置待核查" : ({
             ACCUMULATING: "仍可累计",
             EXITING: "退出阶段",
@@ -772,12 +808,13 @@ function renderPositions(positions = []) {
           const stopLossSummary = position.stopLossThreshold === null
             ? ""
             : `<span>止损线 <strong>${formatCents(position.stopLossThreshold)} (${escapeHtml(position.stopLossMultiplier)}×)</strong></span>`;
-          return `<details class="position-row" data-token="${escapeHtml(position.tokenId)}" ${openIds.has(position.tokenId) ? "open" : ""}>
+          return `<details class="position-row${unpriced ? " is-unpriced" : ""}" data-token="${escapeHtml(position.tokenId)}" ${openIds.has(position.tokenId) ? "open" : ""}>
             <summary class="position-summary"><div class="market-copy"><span class="position-title">${escapeHtml(position.marketQuestion || position.eventTitle)}</span><span class="position-sub">${escapeHtml(position.direction)} · 买入均价 ${formatCents(position.averageBuyPrice)}${position.currentSellPriceStatus === "UNAVAILABLE" ? " · 处置待核查" : ""}</span></div><div class="position-price"><strong>${currentSellPrice}</strong><span>目标 ${targetLabel}</span></div></summary>
             <div class="position-detail">
               ${unavailableNote}
               <div class="row-heading"><div class="market-copy">${marketTitleMarkup(position)}${eventTitle}</div></div>
-              <div class="cycle-summary"><span>持仓数量 <strong>${formatQuantity(position.quantity)}</strong></span><span>当前买盘可卖 <strong>${formatQuantity(position.executableSellQuantity)} · ${formatMoney(position.executableSellValue)}</strong></span><span>各档目标 <strong>${targets.map(formatCents).join("、") || "—"}</strong></span></div>
+              <div class="cycle-summary"><span>持仓数量 <strong>${formatQuantity(position.quantity)}</strong></span><span>当前买盘可卖 <strong>${unpriced ? "暂无报价" : `${formatQuantity(position.executableSellQuantity)} · ${formatMoney(position.executableSellValue)}`}</strong></span><span>各档目标 <strong>${targets.map(formatCents).join("、") || "—"}</strong></span></div>
+              <div class="cycle-summary"><span>剩余成本 <strong>${formatMoney(position.remainingCost)}</strong></span><span>浮盈亏 <strong data-tone="${positionPnlTone}">${positionPnl}</strong></span></div>
             <div class="cycle-summary">
               <span>Event 周期 <strong>${escapeHtml(cycleStatus)}</strong></span>
               <span>冻结预算 <strong>${position.cycleBudget === null ? "—" : formatMoney(position.cycleBudget)}</strong></span>
@@ -1539,6 +1576,7 @@ $("#mode-toggle").addEventListener("click", () => {
   ui.tradeRecordsLoaded = false; ui.tradeRecordsLoading = false; ui.tradeRecordsLocked = false; ui.tradeRecordsLoadedAt = 0; ui.tradeRecords = [];
   ui.visibleCandidateCount = 20;
   ui.displayMode = decision.nextMode;
+  ui.positionSnapshot = null;
   ui.dashboard = null; ui.dashboardAt = 0; ui.dashboardError = null; ui.strategyStatus = "STOPPED"; ui.preferences = null;
   ui.events = []; ui.candidateCount = 0; ui.displayCandidateCount = 0; ui.staleCandidateCount = 0;
   ui.performance = null; ui.performanceAt = 0; ui.performanceError = null; ui.recordLimit = 20; ui.recordCursor = null; ui.recordHead = null; ui.recordGeneration = null;

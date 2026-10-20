@@ -5,7 +5,7 @@ import asyncio
 import sqlite3
 from contextlib import closing
 from collections import deque
-from itertools import islice
+from itertools import chain, islice
 from nautilus_trader.model.enums import OrderSide
 from .config import SCALE, units, micros
 from .rules import StopLoss, cost
@@ -71,8 +71,12 @@ def token_view(r, t):
 
 def portfolio_view(r, position_limit=None):
     positions = []
+    valued_rows = []
+    unvalued_rows = []
     values = []
     costs = 0
+    known_costs = 0
+    unpriced_costs = 0
     unavailable_count = 0
     not_ready_count = 0
     settled = set(r.business["settled"])
@@ -105,32 +109,47 @@ def portfolio_view(r, position_limit=None):
                 if remaining == 0:
                     break
             sellable = c["quantity"] - remaining
-        if position_limit is None or len(positions) < position_limit:
-            v = token_view(r, t)
-            stop = StopLoss(**c["stop"])
-            targets = sorted(targets_by_event.get(eid, ()))
-            v.update(
-                quantity=units(c["quantity"]),
-                averageBuyPrice=units(c["cost"] * SCALE // c["quantity"]),
-                cycleBudget=units(c["budget"]),
-                cycleSpent=units(c["spent"]),
-                targetSellPrice=units(targets[0]) if targets else None,
-                targetSellPrices=list(map(units, targets)),
-                stopLossThreshold=units(stop.threshold) if stop.enabled else None,
-                stopLossMultiplier=units(stop.multiplier),
-                executableSellValue=units(value),
-                executableSellQuantity=units(sellable),
-                cycleStatus="STOP_EXITING"
-                if stop.state == "EXITING"
-                else "STOP_ARMED"
-                if stop.state == "ARMED"
-                else "EXITING"
-                if c["sold"]
-                else "ACCUMULATING",
-            )
-            positions.append(v)
+        if value is None:
+            unpriced_costs += c["cost"]
+        else:
+            known_costs += c["cost"]
+        # Partition the complete owned universe before limiting the visible page.
+        # Both partitions preserve their existing cycle order. A ready empty book
+        # is a known zero value and remains with the normally priced positions.
+        if position_limit != 0:
+            rows = unvalued_rows if value is None else valued_rows
+            rows.append((eid, c, t, value, sellable))
         values.append(value)
         costs += c["cost"]
+    rows = chain(valued_rows, unvalued_rows)
+    visible = rows if position_limit is None else islice(rows, max(0, position_limit))
+    for eid, c, t, value, sellable in visible:
+        v = token_view(r, t)
+        stop = StopLoss(**c["stop"])
+        targets = sorted(targets_by_event.get(eid, ()))
+        v.update(
+            quantity=units(c["quantity"]),
+            averageBuyPrice=units(c["cost"] * SCALE // c["quantity"]),
+            remainingCost=units(c["cost"]),
+            unrealizedPnl=units(None if value is None else value - c["cost"]),
+            estimatedUnrealizedPnl=units(0 if value is None else value - c["cost"]),
+            cycleBudget=units(c["budget"]),
+            cycleSpent=units(c["spent"]),
+            targetSellPrice=units(targets[0]) if targets else None,
+            targetSellPrices=list(map(units, targets)),
+            stopLossThreshold=units(stop.threshold) if stop.enabled else None,
+            stopLossMultiplier=units(stop.multiplier),
+            executableSellValue=units(value),
+            executableSellQuantity=units(sellable),
+            cycleStatus="STOP_EXITING"
+            if stop.state == "EXITING"
+            else "STOP_ARMED"
+            if stop.state == "ARMED"
+            else "EXITING"
+            if c["sold"]
+            else "ACCUMULATING",
+        )
+        positions.append(v)
     claims = list(r.business["claims"].values())
     pending = [c for c in claims if c["state"] not in {"CREDITED", "FAILED"}]
     failed = [c for c in claims if c["state"] == "FAILED"]
@@ -138,9 +157,17 @@ def portfolio_view(r, position_limit=None):
     claim_value = sum(c["amount"] for c in pending)
     claim_cost = sum(c["cost"] for c in pending)
     value = None if None in values else sum(values)
-    # A failed redemption still represents unresolved rights. Neither assume it
-    # will pay nor book it as a loss while the actual chain/account result is unknown.
-    total = None if value is None or failed else r.cash() + value + receivable
+    known_value = sum(v for v in values if v is not None)
+    failed_cost = sum(c["cost"] for c in failed)
+    failed_cost_fallback = sum(c["cost"] for c in failed if not c.get("cash_included"))
+    # Strict totals retain their original unknown semantics for analytics. The
+    # separate display estimate carries unpriced owned rights at remaining cost;
+    # this is neither a quote nor confirmed cash, profit or redemption proceeds.
+    cash = r.cash()
+    total = None if value is None or failed else cash + value + receivable
+    estimated_position = known_value + unpriced_costs
+    estimated_total = cash + estimated_position + receivable + failed_cost_fallback
+    known_unrealized = known_value - known_costs + claim_value - claim_cost
     held_cash = r.held_cash()
     portfolio = {
         "totalFunds": units(total),
@@ -149,15 +176,24 @@ def portfolio_view(r, position_limit=None):
             None if value is None or failed else value + claim_value - costs - claim_cost
         ),
         "positionValue": units(value),
-        "knownPositionValue": units(sum(v for v in values if v is not None)),
+        "knownPositionValue": units(known_value),
+        "unpricedPositionCost": units(unpriced_costs),
+        "estimatedPositionValue": units(estimated_position),
+        "estimatedTotalFunds": units(estimated_total),
+        "knownUnrealizedPnl": units(known_unrealized),
+        "knownTotalPnl": units(r.business["realized"] + known_unrealized),
         "valuedPositionCount": sum(v is not None for v in values),
         "unvaluedPositionCount": sum(v is None for v in values),
         "unavailablePositionCount": unavailable_count,
         "notReadyPositionCount": not_ready_count,
-        "availableCash": units(r.cash() - held_cash),
+        "availableCash": units(cash - held_cash),
         "reservedCash": units(held_cash),
         "pendingRedemption": units(receivable),
         "failedRedemption": units(sum(c["amount"] for c in failed)),
+        "failedRedemptionCost": units(failed_cost),
+        "failedRedemptionCostFallback": units(failed_cost_fallback),
+        "failedRedemptionCount": len(failed),
+        "failedRedemptionCashIncludedCount": sum(bool(c.get("cash_included")) for c in failed),
     }
     return positions, portfolio
 

@@ -26,8 +26,6 @@ export function displayStatus(dashboard, { lastSuccess = 0, error = null, now = 
   const feed = feedError ? "error" : ready && !missingPosition ? "ready" : !groups.length && unavailableCount && !missingPosition ? "unavailable" : "waiting";
   const warnings = [];
   if (fatal) warnings.push(`自动暂停：${scan.lastServiceError || fatal}`);
-  if (unavailableCount) warnings.push(`${unavailableCount} 笔持仓的市场已停用或归档，报价不可用，处置安排待核查；完整资产及盈亏暂无法估算。`);
-  if (missingPosition) warnings.push("部分持仓行情未就绪，相关估值未知。");
   if (feedError) warnings.push("部分行情正在恢复，展开状态查看详情。");
   return {
     run: fatal ? "error" : dashboard.strategy.status === "RUNNING" ? "ready" : "off",
@@ -35,6 +33,7 @@ export function displayStatus(dashboard, { lastSuccess = 0, error = null, now = 
     positions: unavailableCount && !["error", "waiting"].includes(feed) ? "warning" : feed,
     scan: scan.lastError || scan.categoryError ? "error" : scan.scanning ? "waiting" : scan.lastScanAt ? "ready" : "unknown",
     unavailableCount,
+    positionNotice: unavailableCount ? `${unavailableCount} 笔持仓的市场已停用或归档，报价不可用，处置安排待核查。` : missingPosition ? "部分持仓暂无报价，浮盈亏暂记 0。" : "",
     warning: warnings.join(" "),
   };
 }

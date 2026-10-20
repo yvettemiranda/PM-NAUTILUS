@@ -1,6 +1,6 @@
 # 验证结果与边界
 
-## 2026-10-20 缺报价仓位按成本暂计（待发布验收）
+## 2026-10-20 缺报价仓位按成本暂计（已发布部署验收）
 
 本轮按用户确认口径调整展示：正常持仓继续显示报价、市值、剩余成本与浮盈亏；`UNAVAILABLE`／`NOT_READY` 仓位稳定排到列表底部，并保留数量、成本、均价、目标和原因。先对全部持仓排序，再截取前 20 笔或展开全部，纯摘要与各页的全仓汇总一致。
 
@@ -8,7 +8,11 @@
 
 这些值只用于只读展示，交易报价、原严格完整估值字段、账本、权益、参数和收益历史不改写。新的 `estimatedTotalFunds`／`estimatedPositionValue`、`knownUnrealizedPnl`／`knownTotalPnl` 和逐仓 `estimatedUnrealizedPnl` 明确区分展示估算与真实报价；锁定或未核对的 LIVE 账户继续隐藏账户资料。存储维护保留，LIVE 不启用。
 
-本地最终 886 项 Python（25.30 秒）、41 项页面测试、Ruff 检查／格式（106 文件）通过；14 项部署门禁专项测试通过，代码已做独立复核。本轮应用 SHA、CI、备份和服务器／页面验收结果待发布后补录；目前线上仍为应用 `ebbe888`、源码／文档 `5640b0a`。下方保留前轮历史证据。
+本地最终 886 项 Python（25.30 秒）、41 项页面测试、Ruff 检查／格式（106 文件）通过；14 项部署门禁专项测试通过，代码已做独立复核。[PR #17](https://github.com/yvettemiranda/PM-NAUTILUS/pull/17) 已合并，固定应用为 `2095d1427b6aaf3eae886f1172b2b1c10c8981d0`；代码 push、PR 和 [main CI 39444708014](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39444708014) 的 x86_64／ARM64 回归及 Docker verify 全部通过。2026-10-20 23:19:15 CST（15:19:15 UTC）服务器最终验收 PASS：容器 healthy、restarts=0、OOM=false，原 TEST/RUNNING 已恢复，LIVE=false、钱包 LOCKED，后台错误为空。完整在线 TEST validation PASS（62.018 秒）、真实 TEST 账本隔离副本 Runtime 验证及 TEST/LIVE 两库全部停机逻辑数据保留通过；原参数、代次、native／equity 历史、钱包、schema／codec v2、依赖／配置／安全设置与自动存储维护保留。 本次现场 94 笔持仓中 93 笔正常估值，1 笔归档持仓稳定排在第 94 笔；其他未就绪持仓为 0，剩余 702/702 盘口、4/4 连接组 READY。资产估算包含该笔精确剩余成本，行内浮盈亏显示 `0.00U（暂计）`，既有已实现盈亏保留；完整、摘要、前 20 笔的全仓聚合一致，正常仓排序保留。真实 Chrome 生产页已确认资产和盈亏均显示数字、94 笔可展开及异常项末位成本／零浮盈亏；行情变动会更新估算数字。本轮未启用 LIVE 或操作真实资金，短时验收不等于实盘闭环或长期稳定性证明。 源码／文档 SHA 以本次纯 Markdown 提交及私有 `docs-sync.json` 记录为准；镜像、env 和 runtime 保持固定应用代码，纯文档同步无需重启。下方保留前轮历史证据。
+
+备份与完整保全：`/opt/pm-nautilus/backups/pre-costvaluation-20261020T150747Z`，密文 SHA-256 `c285732230ad31c196a6ae7b72d186803207e7ce92d5e516d34db430c50ff162`；一致性私有回滚、recipient 加密及哈希通过，未演练解密恢复。两库无迁移、压缩或 VACUUM；原 native／equity 历史前缀、意图、成本、参数和钱包保留，主机维护脚本／units／enabled-active timer 内容和权限及 Docker 日志 10m×3 保持。摘要与分页历史（验收时 796 条）、HTTPS 证书／认证、未认证钱包接口 401、app.js／ui-state.js／index.html 三份部署文件哈希通过。
+
+重启后完成新市场扫描：容器 StartedAt=`2026-10-20T15:14:55.886024473Z`，lastScanAt=`2026-10-20T15:16:34.438587+00:00`；现场 scan／category／stream／service 当前错误均为 null。成本暂估和零浮盈亏仅用于展示，不作为可卖报价、退款、结算或链上回款证明。
 
 ## 2026-10-20 市场停用识别与恢复（历史部署验收）
 

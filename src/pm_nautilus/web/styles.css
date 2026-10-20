@@ -719,6 +719,8 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 .status-dot { display:inline-block; width:6px; height:6px; flex:none; border-radius:50%; background:#a0aaa6; vertical-align:middle; }
 .status-dot[data-state="ready"] { background:var(--positive); }
 .status-dot[data-state="waiting"] { background:#bd8b2e; }
+.status-dot[data-state="warning"], .status-dot[data-state="unavailable"] { background:#bd8b2e; }
+.market-unavailable { color:#946717; }
 .status-dot[data-state="error"] { background:var(--negative); }
 .status-button .status-dot { width:7px; height:7px; }
 button:focus-visible, summary:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }

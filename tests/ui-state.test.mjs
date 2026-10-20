@@ -171,6 +171,60 @@ test('summary readiness includes hidden positions',()=>{
  assert.equal(displayStatus(dashboard,{lastSuccess:1000,now:2000}).feed,'waiting');
 });
 
+test('known unavailable rights stay visible separately from healthy subscription feeds',()=>{
+ const dashboard={...base(),positions:[],positionCount:92,positionBooksReady:false,unavailablePositionCount:1,unvaluedPositionCount:1,notReadyPositionCount:0};
+ const state=displayStatus(dashboard,opts);
+ assert.equal(state.feed,'ready');assert.equal(state.run,'ready');assert.equal(state.positions,'warning');
+ assert.match(state.warning,/1 笔持仓/);assert.match(state.warning,/处置安排待核查/);
+ assert.equal(state.warning.includes('行情未就绪'),false);
+ dashboard.notReadyPositionCount=1;
+ assert.equal(displayStatus(dashboard,opts).feed,'waiting');
+ assert.match(displayStatus(dashboard,opts).warning,/行情未就绪/);
+ dashboard.marketScan.streamError='connection failed';
+ assert.equal(displayStatus(dashboard,opts).feed,'error');
+ assert.match(displayStatus(dashboard,opts).warning,/市场已停用或归档/);
+});
+
+test('all owned markets unavailable with no groups never appear ready or endlessly reconnecting',()=>{
+ const dashboard={...base(),positions:[],positionCount:1,positionBooksReady:false,unavailablePositionCount:1,unvaluedPositionCount:1,notReadyPositionCount:0,marketScan:{lastScanAt:'2026-10-20',diagnostics:{streams:{groups:[]}}}};
+ const state=displayStatus(dashboard,opts);
+ assert.equal(state.feed,'unavailable');assert.equal(state.positions,'warning');
+ assert.match(state.warning,/报价不可用/);
+ const unknown={...dashboard,unavailablePositionCount:0};
+ assert.equal(displayStatus(unknown,opts).feed,'waiting');
+});
+
+test('actual page labels unavailable holdings, full totals unknown, and known subtotal without refund assumptions',()=>{
+ const page=pageHarness();seedTestDashboard(page);
+ const {ui,context,element}=page;
+ const position={tokenId:'archived',marketQuestion:'ARCHIVED MARKET',eventTitle:'ARCHIVED EVENT',direction:'Yes',quantity:'50',averageBuyPrice:'0.02',currentSellPrice:null,currentSellPriceStatus:'UNAVAILABLE',marketAvailability:{status:'UNAVAILABLE',reason:'archived',since:'2026-10-20T05:00:00Z'},executableSellValue:null,executableSellQuantity:null,targetSellPrice:'0.04',targetSellPrices:['0.04'],stopLossThreshold:null,cycleStatus:'ACCUMULATING'};
+ const dashboard={...base(),generation:'g',details:'positions',preferences:{...profile},strategy:{status:'RUNNING',initialCapital:'100',availableCash:'79'},positions:[position],positionCount:21,positionBooksReady:false,valuedPositionCount:20,unvaluedPositionCount:1,unavailablePositionCount:1,notReadyPositionCount:0,portfolio:{totalFunds:null,unrealizedPnl:null,realizedPnl:'2',availableCash:'79',positionValue:null,knownPositionValue:'15',valuedPositionCount:20,unvaluedPositionCount:1,unavailablePositionCount:1},marketScan:{...base().marketScan,events:[],diagnostics:{...base().marketScan.diagnostics,availableCategories:[]}}};
+ context.applyDashboardForTest(dashboard);
+ assert.equal(element('#total-funds').textContent,'—');assert.equal(element('#net-pnl').textContent,'—');
+ assert.match(element('#available-cash').textContent,/79/);assert.match(element('#realized-pnl').textContent,/2/);
+ assert.equal(element('#valuation-note').hidden,false);
+ assert.match(element('#valuation-note').textContent,/可估值持仓 20 笔/);
+ assert.match(element('#valuation-note').textContent,/小计 15/);
+ assert.match(element('#valuation-note').textContent,/不是完整资产或盈亏/);
+ assert.equal(element('#tab-position-count').textContent,'21');assert.match(element('#position-count').textContent,/1笔未估值/);
+ assert.match(element('#positions').innerHTML,/已归档 · 报价不可用/);
+ assert.match(element('#positions').innerHTML,/处置安排待核查/);
+ assert.match(element('#positions').innerHTML,/不假定结算、退款或归零/);
+ assert.equal(element('#positions-dot').dataset.state,'warning');
+ assert.match(element('#module-status-label').textContent,/行情 · 正常 · 1笔处置待核查/);
+ assert.match(element('#module-status-detail').textContent,/2\/2 盘口完整/);
+ ui.dashboard={...dashboard,positions:[],details:'summary',positionCount:92};
+ context.renderPortfolio(ui.dashboard.portfolio,[]);context.renderStatus();
+ assert.match(element('#valuation-note').textContent,/20 笔/);
+ assert.match(element('#connection-warning').textContent,/1 笔持仓/);
+ // No available subscriptions still exposes the retained rights and never
+ // presents an empty 0/0 set as a healthy feed.
+ ui.dashboard={...dashboard,marketScan:{diagnostics:{streams:{groups:[]}}}};context.renderStatus();
+ assert.match(element('#module-status-label').textContent,/报价不可用/);
+ assert.match(element('#module-status-detail').textContent,/停用持仓仍保留/);
+ assert.equal(element('#module-status-detail').textContent.includes('0/0'),false);
+});
+
 test('summary and market retain verified whole-account position counts without stale details',()=>{
  for (const mode of ['TEST','LIVE']) {
   const page=pageHarness();seedTestDashboard(page);

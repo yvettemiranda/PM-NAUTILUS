@@ -1,4 +1,4 @@
-import { displayStatus, curveSegments, modeSwitchDecision, walletOriginSecure, liveWalletAccountVerified, liveRunSummary, redemptionApprovalAction, panelVisible, setMarkupIfChanged } from "./ui-state.js?v=20261014-wallet2";
+import { displayStatus, curveSegments, modeSwitchDecision, walletOriginSecure, liveWalletAccountVerified, liveRunSummary, redemptionApprovalAction, panelVisible, setMarkupIfChanged } from "./ui-state.js?v=20261020-availability1";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -268,6 +268,13 @@ function renderPortfolio(portfolio, positions = []) {
   setMoneyValue("#realized-pnl", portfolio?.realizedPnl, true);
   setMoneyValue("#unrealized-pnl", portfolio?.unrealizedPnl, true);
   setMoneyValue("#position-value", portfolio?.positionValue);
+  setMoneyValue("#known-position-value", portfolio?.knownPositionValue);
+  const unvalued = portfolio?.unvaluedPositionCount ?? 0;
+  const valuationNote = $("#valuation-note");
+  valuationNote.hidden = !portfolio || !unvalued;
+  valuationNote.textContent = unvalued
+    ? `可估值持仓 ${formatCount(portfolio?.valuedPositionCount ?? 0)} 笔，小计 ${formatMoney(portfolio?.knownPositionValue)}；另有 ${formatCount(unvalued)} 笔未估值。此小计不含现金及待赎回金额，也不是完整资产或盈亏。`
+    : "";
   const positionCount = ui.dashboard?.positionCount ?? currentPositions(positions).length;
   const count = $("#portfolio-position-count");
   count.textContent = liveAccountVisible() ? `${formatCount(positionCount)}单` : "—";
@@ -721,7 +728,8 @@ function renderPositions(positions = []) {
     ? current
     : current.slice(0, POSITION_PREVIEW_LIMIT);
   $("#tab-position-count").textContent = formatCount(totalCount);
-  $("#position-count").textContent = `${formatCount(totalCount)}单`;
+  const unvaluedCount = ui.dashboard?.unvaluedPositionCount ?? ui.dashboard?.portfolio?.unvaluedPositionCount ?? 0;
+  $("#position-count").textContent = `${formatCount(totalCount)}单${unvaluedCount ? ` · ${formatCount(unvaluedCount)}笔未估值` : ""}`;
   const controls = $("#position-list-controls");
   const toggle = $("#toggle-positions");
   controls.hidden = totalCount <= POSITION_PREVIEW_LIMIT;
@@ -750,19 +758,24 @@ function renderPositions(positions = []) {
             ? `<span class="event-title">${escapeHtml(position.eventTitle)}</span>`
             : "";
           const currentSellPrice = formatCurrentSellPrice(position);
-          const cycleStatus = {
+          const availability = position.marketAvailability;
+          const unavailableNote = position.currentSellPriceStatus === "UNAVAILABLE"
+            ? `<p class="field-note market-unavailable">${availability?.reason === "archived" ? "市场已归档" : "市场已停用"}，报价不可用，处置安排待核查。持仓和账本保留，不假定结算、退款或归零。${availability?.since ? ` 首次确认 ${escapeHtml(formatDate(availability.since))}。` : ""}</p>`
+            : "";
+          const cycleStatus = position.currentSellPriceStatus === "UNAVAILABLE" ? "交易不可用 · 处置待核查" : ({
             ACCUMULATING: "仍可累计",
             EXITING: "退出阶段",
             STOP_ARMED: "止损确认中",
             STOP_EXITING: "止损退出中",
             LEGACY_CONFLICT: "旧仓冲突·只减仓",
-          }[position.cycleStatus] || "周期状态待确认";
+          }[position.cycleStatus] || "周期状态待确认");
           const stopLossSummary = position.stopLossThreshold === null
             ? ""
             : `<span>止损线 <strong>${formatCents(position.stopLossThreshold)} (${escapeHtml(position.stopLossMultiplier)}×)</strong></span>`;
           return `<details class="position-row" data-token="${escapeHtml(position.tokenId)}" ${openIds.has(position.tokenId) ? "open" : ""}>
-            <summary class="position-summary"><div class="market-copy"><span class="position-title">${escapeHtml(position.marketQuestion || position.eventTitle)}</span><span class="position-sub">${escapeHtml(position.direction)} · 买入均价 ${formatCents(position.averageBuyPrice)}</span></div><div class="position-price"><strong>${currentSellPrice}</strong><span>目标 ${targetLabel}</span></div></summary>
+            <summary class="position-summary"><div class="market-copy"><span class="position-title">${escapeHtml(position.marketQuestion || position.eventTitle)}</span><span class="position-sub">${escapeHtml(position.direction)} · 买入均价 ${formatCents(position.averageBuyPrice)}${position.currentSellPriceStatus === "UNAVAILABLE" ? " · 处置待核查" : ""}</span></div><div class="position-price"><strong>${currentSellPrice}</strong><span>目标 ${targetLabel}</span></div></summary>
             <div class="position-detail">
+              ${unavailableNote}
               <div class="row-heading"><div class="market-copy">${marketTitleMarkup(position)}${eventTitle}</div></div>
               <div class="cycle-summary"><span>持仓数量 <strong>${formatQuantity(position.quantity)}</strong></span><span>当前买盘可卖 <strong>${formatQuantity(position.executableSellQuantity)} · ${formatMoney(position.executableSellValue)}</strong></span><span>各档目标 <strong>${targets.map(formatCents).join("、") || "—"}</strong></span></div>
             <div class="cycle-summary">
@@ -928,6 +941,7 @@ function formatCurrentSellPrice(position) {
   }
   return escapeHtml({
     NO_BID: "暂无买盘",
+    UNAVAILABLE: position.marketAvailability?.reason === "archived" ? "已归档 · 报价不可用" : "已停用 · 报价不可用",
     NOT_READY: "行情未就绪",
     RECONNECTING: "行情重连中",
     DISCONNECTED: "行情已断开",
@@ -1606,9 +1620,9 @@ function renderStatus() {
   $("#live-run-indicator").dataset.tone = live.tone;
   const state = displayStatus(ui.dashboard, { lastSuccess: ui.dashboardAt, error: ui.dashboardError });
   const records = ui.tradeRecordsLocked || ui.displayMode === "LIVE" && ui.dashboard?.positionsAvailable === false ? "locked" : ui.tradeRecordsError ? "error" : ui.tradeRecordsLoadedAt ? "ready" : ui.tradeRecordsLoading ? "waiting" : "unknown";
-  for (const [id, value] of [["run-dot", state.run], ["positions-dot", state.feed], ["market-dot", state.scan], ["records-dot", records]]) {
+  for (const [id, value] of [["run-dot", state.run], ["positions-dot", state.positions || state.feed], ["market-dot", state.scan], ["records-dot", records]]) {
     const dot = $(`#${id}`); dot.dataset.state = value;
-    dot.setAttribute("role", "img"); dot.setAttribute("aria-label", {ready:"正常", waiting:"更新中", error:"异常", off:"未运行", locked:"已锁定", unknown:"未确认"}[value]);
+    dot.setAttribute("role", "img"); dot.setAttribute("aria-label", {ready:"正常", waiting:"更新中", warning:"有持仓报价不可用", unavailable:"报价不可用", error:"异常", off:"未运行", locked:"已锁定", unknown:"未确认"}[value]);
   }
   $("#connection-warning").textContent = state.warning;
   $("#connection-warning").hidden = !state.warning;
@@ -1623,8 +1637,10 @@ function renderStatus() {
   const runText = state.run === "error" ? state.warning : !ui.dashboardAt ? "运行状态未确认" : ui.displayMode === "LIVE" && !ui.wallet?.configured ? "实盘钱包未连接" : ui.displayMode === "LIVE" && !ui.wallet?.unlocked ? "实盘钱包已锁定" : ui.displayMode === "LIVE" && !ui.wallet?.enabled ? "实盘尚未启用" : ui.strategyStatus === "RUNNING" ? "运行中" : "已暂停新买入；已有仓位仍继续退出和赎回。";
   $("#runtime-status").textContent = runText;
   $("#status-toggle").setAttribute("aria-label", `查看运行状态：${runText}`);
-  const info = ui.activeTab === "positions" ? ["行情", `${groups.filter(g=>g.state === "READY").length}/${groups.length} 组就绪 · ${groups.reduce((n,g)=>n+g.readyBookCount,0)}/${groups.reduce((n,g)=>n+g.tokenCount,0)} 盘口完整`, ...groups.map((g,i)=>`组${i+1}：${g.state}，心跳 ${formatClock(g.lastPongAt)}${g.error ? `，${g.error}` : ""}`)] : ui.activeTab === "market" ? ["扫描", `最近完成 ${formatDate(s.lastScanAt)} · ${s.scanning ? "扫描中" : "等待下一轮"}`, s.lastError || s.categoryError || `监控 ${formatCount(ui.displayCandidateCount)} 个事件，当前可交易 ${formatCount(ui.candidateCount)} 个`] : ["同步", `最近成功 ${formatClock(ui.tradeRecordsLoadedAt || null)}`, ui.tradeRecordsError || (ui.tradeRecordsLoaded ? "记录已同步；无新成交也属于正常。" : "打开记录后读取")];
-  $("#module-status-label").textContent = `${info[0]} · ${ui.activeTab === "records" ? ({ready:"已同步",error:"更新失败",waiting:"读取中",locked:"已锁定",unknown:"未读取"}[records]) : ({ready:"正常",error:"需关注",waiting:"更新中",off:"未连接",unknown:"未确认"}[ui.activeTab === "market" ? state.scan : state.feed])}`;
+  const liveFeedSummary = groups.length ? `${groups.filter(g=>g.state === "READY").length}/${groups.length} 组就绪 · ${groups.reduce((n,g)=>n+g.readyBookCount,0)}/${groups.reduce((n,g)=>n+g.tokenCount,0)} 盘口完整` : state.feed === "unavailable" ? "当前没有可接收报价的订阅；停用持仓仍保留并低频核查。" : "当前没有已确认就绪的行情订阅。";
+  const unavailableSummary = state.unavailableCount ? `另有 ${formatCount(state.unavailableCount)} 笔持仓的市场已停用或归档，报价不可用，处置安排待核查。` : "";
+  const info = ui.activeTab === "positions" ? ["行情", liveFeedSummary, ...(unavailableSummary ? [unavailableSummary] : []), ...groups.map((g,i)=>`组${i+1}：${g.state}，心跳 ${formatClock(g.lastPongAt)}${g.error ? `，${g.error}` : ""}`)] : ui.activeTab === "market" ? ["扫描", `最近完成 ${formatDate(s.lastScanAt)} · ${s.scanning ? "扫描中" : "等待下一轮"}`, s.lastError || s.categoryError || `监控 ${formatCount(ui.displayCandidateCount)} 个事件，当前可交易 ${formatCount(ui.candidateCount)} 个`] : ["同步", `最近成功 ${formatClock(ui.tradeRecordsLoadedAt || null)}`, ui.tradeRecordsError || (ui.tradeRecordsLoaded ? "记录已同步；无新成交也属于正常。" : "打开记录后读取")];
+  $("#module-status-label").textContent = `${info[0]} · ${ui.activeTab === "records" ? ({ready:"已同步",error:"更新失败",waiting:"读取中",locked:"已锁定",unknown:"未读取"}[records]) : ({ready:"正常",error:"需关注",waiting:"更新中",unavailable:"报价不可用",off:"未连接",unknown:"未确认"}[ui.activeTab === "market" ? state.scan : state.feed])}${ui.activeTab === "positions" && state.unavailableCount ? ` · ${formatCount(state.unavailableCount)}笔处置待核查` : ""}`;
   $("#module-status-detail").textContent = info.slice(1).join("\n");
 }
 

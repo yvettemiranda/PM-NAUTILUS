@@ -126,6 +126,10 @@ class Runtime:
         self, path: str | Path, mode="TEST", clock=None, live_factory=None, storage_guard=None
     ):
         self.storage_guard = storage_guard
+        # Observational public-market state, separate from durable ownership.
+        # Missing books never erase a cycle, intent, native event or redemption right.
+        self.market_availability = {}
+        self.market_recovering = set()
         self.store = Store(path, mode)
         self.mode = mode
         self.preferences = Preferences(**self.store.get("preferences"))
@@ -175,6 +179,29 @@ class Runtime:
     def require_storage_safe(self):
         if self.storage_guard is not None:
             self.storage_guard.require_safe()
+
+    def market_is_unavailable(self, token_id):
+        direct = self.market_availability.get(token_id)
+        if direct is not None and direct.get("status") == "UNAVAILABLE":
+            return True
+        token = self.tokens.get(token_id)
+        # Trading flags apply to both outcomes of this exact market, never to
+        # every market in the Event or a same-titled replacement market.
+        return token is not None and any(
+            state.get("status") == "UNAVAILABLE"
+            and state.get("marketId") == token.market_id
+            and state.get("conditionId") == token.condition_id
+            for state in self.market_availability.values()
+        )
+
+    def market_can_trade(self, token_id):
+        return not self.market_is_unavailable(token_id) and token_id not in self.market_recovering
+
+    def require_market_tradeable(self, token_id):
+        if not self.market_can_trade(token_id):
+            from .market_availability import MarketUnavailable
+
+            raise MarketUnavailable("市场暂不可交易或盘口尚未恢复，不能提交新订单")
 
     def test_cash(self):
         initial = self.store.get("initial_capital")
@@ -240,6 +267,7 @@ class Runtime:
             for tid, t in self.tokens.items()
             if static_reason(t, self.preferences, now, self.official_tags) is None
             and t.condition_id not in settled
+            and not self.market_is_unavailable(tid)
         }
         self.events = {}
         for tid in eligible:
@@ -257,6 +285,8 @@ class Runtime:
             self.preferences.model_dump_json(),
             self.status,
             self.storage_can_open,
+            tuple(sorted(self.market_availability)),
+            tuple(sorted(self.market_recovering)),
             self.cash(),
             self.held_cash(),
             tuple(self.business["banned"]),
@@ -608,7 +638,7 @@ class Runtime:
         if cycle:
             t = self.tokens[cycle["token_id"]]
             b = self.books[t.token_id]
-            if t.condition_id in self.business["settled"]:
+            if t.condition_id in self.business["settled"] or not self.market_can_trade(t.token_id):
                 self.evaluations[eid] = "NO_WINNER", None
                 return
             stop = StopLoss(**cycle["stop"])
@@ -667,7 +697,11 @@ class Runtime:
                 self.evaluations[eid] = "NO_WINNER", None
                 return
             ids = {t.token_id} if t.token_id in self.events.get(eid, set()) else set()
-        elif any(not self.books[tid].ready for tid in ids):
+        elif any(
+            not self.books[tid].ready or tid in self.market_recovering
+            for tid in ids
+            if not self.market_is_unavailable(tid)
+        ):
             self.evaluations[eid] = "INCOMPLETE", None
             return
         if eid in self.business["banned"] or active:
@@ -684,7 +718,11 @@ class Runtime:
         for tid in ids:
             t = self.tokens[tid]
             b = self.books[tid]
-            if not b.ready or static_reason(t, self.preferences, self.now, self.official_tags):
+            if (
+                not self.market_can_trade(tid)
+                or not b.ready
+                or static_reason(t, self.preferences, self.now, self.official_tags)
+            ):
                 continue
             bid = b.bid.available() if self.mode == "TEST" else list(b.bid.external.items())
             ask = b.ask.available() if self.mode == "TEST" else list(b.ask.external.items())
@@ -717,7 +755,13 @@ class Runtime:
             if len({(p.token.opened_ns, p.token.ends_ns) for p in tied}) > 1:
                 self._time_sensitive_events.add(eid)
         self.evaluations[eid] = status, winner
-        if dispatch and winner and self.status == "RUNNING" and self.storage_can_open:
+        if (
+            dispatch
+            and winner
+            and self.status == "RUNNING"
+            and self.storage_can_open
+            and self.market_can_trade(winner.token.token_id)
+        ):
             # Evaluation is synchronous with persistence and dispatch; no await may
             # be inserted here without repeating the complete decision.
             self.submit(
@@ -764,6 +808,8 @@ class Runtime:
         # Preserve emergency headroom for existing rights and confirmations.
         # A deferred BUY must not create an intent, checkpoint, or native order.
         if side == "BUY" and not self.storage_can_open:
+            return None
+        if (kind != "SETTLEMENT" or side != "SELL") and not self.market_can_trade(t.token_id):
             return None
         terms = None
         if side == "SELL" and kind != "SETTLEMENT":

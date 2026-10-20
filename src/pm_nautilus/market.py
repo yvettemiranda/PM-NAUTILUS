@@ -7,7 +7,7 @@ import asyncio
 import json
 from collections import defaultdict
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from websockets.asyncio.client import connect, process_exception
@@ -16,12 +16,16 @@ from websockets.exceptions import ConnectionClosed
 from .config import micros
 from .books import Book
 from .rules import Token, Fees, SUPPORTED_CLOB_TICKS
+from .market_availability import market_state, missing_orderbook
 
 GAMMA = "https://gamma-api.polymarket.com"
 WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 TAGS = f"{GAMMA}/tags/102982/related-tags/tags"
 HEARTBEAT_SECONDS = 10
 RECOVERY_SECONDS = 30
+AVAILABILITY_RECHECK_SECONDS = 300
+CLOB_BOOK = "https://clob.polymarket.com/book"
+FRESH_BASELINE_RECOVERY_SECONDS = 30
 
 
 def timestamp(value):
@@ -150,6 +154,13 @@ class MarketService:
         )
         self.tasks = {}
         self.streams = {}
+        self.active_groups = {}
+        self.sockets = {}
+        self._availability_next_check = {}
+        self._availability_fresh_pending = set()
+        self._availability_subscribe_pending = set()
+        self._availability_fresh_requested_at = {}
+        self._availability_timestamp_floor = {}
         self.scan_status = runtime.store.get("scan", {})
         self.categories = runtime.store.get("categories", [])
         self.closed = False
@@ -340,44 +351,233 @@ class MarketService:
         async with self.subscription_lock:
             await self._sync_subscriptions()
 
+    def recovering_ids(self):
+        recovering = getattr(self.runtime, "market_recovering", None)
+        if recovering is None:
+            recovering = self.runtime.market_recovering = set()
+        return recovering
+
+    def desired_subscription_ids(self):
+        unavailable = getattr(self.runtime, "market_availability", {})
+        return set(self.runtime.monitored) - unavailable.keys()
+
+    def availability_refresh_due(self, token):
+        return asyncio.get_running_loop().time() >= self._availability_next_check.get(
+            token.token_id, 0
+        )
+
+    def _availability_checked(self, token):
+        self._availability_next_check[token.token_id] = (
+            asyncio.get_running_loop().time() + AVAILABILITY_RECHECK_SECONDS
+        )
+        return datetime.now(timezone.utc)
+
+    def availability_refresh_failed(self, token, code="metadata_unavailable"):
+        now = self._availability_checked(token)
+        entry = getattr(self.runtime, "market_availability", {}).get(token.token_id)
+        if entry is not None:
+            entry.update(
+                checkedAt=now.isoformat(),
+                nextCheckAt=(now + timedelta(seconds=AVAILABILITY_RECHECK_SECONDS)).isoformat(),
+                lastError=code,
+            )
+
+    def known_market_tokens(self, token):
+        registry = self.runtime.tokens
+        condition_ids = getattr(registry, "condition_token_ids", None)
+        candidates = (
+            (registry[tid] for tid in condition_ids(token.condition_id))
+            if condition_ids is not None
+            else registry.values()
+        )
+        return [
+            known
+            for known in candidates
+            if known.market_id == token.market_id and known.condition_id == token.condition_id
+        ]
+
+    async def observe_market_availability(self, raw, token):
+        """A metadata response is observational; no ownership or settlement write."""
+        if not self.availability_refresh_due(token):
+            return
+        peers = self.known_market_tokens(token)
+        try:
+            state = market_state(raw, token, peers)
+        except (ValueError, TypeError, KeyError):
+            self.availability_refresh_failed(token, "metadata_invalid")
+            return
+        # Venue trading flags apply to both outcomes, scoped strictly to this
+        # Market/Condition pair. Another market in the Event is unaffected.
+        ids = {known.token_id for known in peers}
+        unavailable = getattr(self.runtime, "market_availability", None)
+        if unavailable is None:
+            unavailable = self.runtime.market_availability = {}
+        generation = self.runtime.store.generation
+        now = self._availability_checked(token)
+        for known in peers:
+            self._availability_checked(known)
+        if state == "open":
+            if any(tid in unavailable for tid in ids):
+                # Invalidate every known outcome before clearing any order gate.
+                # A shared consumer may retain a newer continuous source book.
+                self.runtime.disconnect(ids)
+                self.recovering_ids().update(ids)
+                requested_at = asyncio.get_running_loop().time()
+                for tid in ids:
+                    book = self.runtime.books.get(tid)
+                    self._availability_timestamp_floor[tid] = (
+                        book.timestamp if book is not None else 0
+                    )
+                    self._availability_fresh_pending.add(tid)
+                    self._availability_subscribe_pending.add(tid)
+                    self._availability_fresh_requested_at[tid] = requested_at
+                    unavailable.pop(tid, None)
+                self.runtime.dirty.add(token.event_id)
+                await self.sync_subscriptions()
+            return
+        try:
+            response = await self.http.get(CLOB_BOOK, params={"token_id": token.token_id})
+        except httpx.HTTPError:
+            for known in peers:
+                self.availability_refresh_failed(known, "book_check_unavailable")
+            return
+        if (
+            self.closed
+            or self.runtime.store.generation != generation
+            or self.runtime.tokens.get(token.token_id) != token
+            or any(self.runtime.tokens.get(known.token_id) != known for known in peers)
+        ):
+            return
+        if not missing_orderbook(response):
+            for known in peers:
+                entry = unavailable.get(known.token_id)
+                if entry is not None:
+                    entry.update(
+                        checkedAt=now.isoformat(),
+                        nextCheckAt=(
+                            now + timedelta(seconds=AVAILABILITY_RECHECK_SECONDS)
+                        ).isoformat(),
+                        lastError="book_absence_unconfirmed",
+                    )
+            return
+        for known in peers:
+            tid = known.token_id
+            previous = unavailable.get(tid)
+            unavailable[tid] = {
+                "status": "UNAVAILABLE",
+                "reason": state,
+                "marketId": token.market_id,
+                "conditionId": token.condition_id,
+                "tokenId": tid,
+                "since": previous["since"] if previous is not None else now.isoformat(),
+                "checkedAt": now.isoformat(),
+                "nextCheckAt": (now + timedelta(seconds=AVAILABILITY_RECHECK_SECONDS)).isoformat(),
+                "lastError": None,
+            }
+        self.runtime.disconnect(ids)
+        self.recovering_ids().difference_update(ids)
+        self._availability_fresh_pending.difference_update(ids)
+        self._availability_subscribe_pending.difference_update(ids)
+        for tid in ids:
+            self._availability_fresh_requested_at.pop(tid, None)
+            self._availability_timestamp_floor.pop(tid, None)
+        self.runtime.dirty.add(token.event_id)
+        await self.sync_subscriptions()
+
+    def refresh_stream_readiness(self, group):
+        entry = self.streams.get(group)
+        if entry is not None and entry.get("state") in {"AWAITING_BOOKS", "READY"}:
+            if all(self.runtime.books[tid].ready for tid in self.subscription_ids(group)):
+                self.stream_state(group, "READY")
+
     async def _sync_subscriptions(self):
         if self.closed:
             return
-        # Batch size limits one socket, never the monitored universe. Stable sorted
-        # chunks bound connections; changed chunks are invalid until fresh snapshots.
-        monitored = self.runtime.monitored
-        # Preserve existing groups: adding one ID must not reshuffle every socket.
-        groups = {tuple(tid for tid in group if tid in monitored) for group in self.tasks}
-        groups.discard(())
-        assigned = {tid for group in groups for tid in group}
-        ids = sorted(monitored - assigned)
-        groups.update(tuple(ids[i : i + 200]) for i in range(0, len(ids), 200))
-        # Leave one spare partial group to avoid reconnecting on every addition,
-        # but compact accumulated fragments. Never drop or cap eligible tokens.
-        if len(groups) > (len(monitored) + 199) // 200 + 1:
-            partial = sorted(tid for group in groups if len(group) < 200 for tid in group)
-            groups = {group for group in groups if len(group) == 200}
-            groups.update(tuple(partial[i : i + 200]) for i in range(0, len(partial), 200))
-        for group in self.tasks.keys() - groups:
-            task = self.tasks.pop(group)
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            self.streams.pop(group, None)
-        self.runtime.release_unmonitored()
-        # Recompute after obsolete subscriptions have been removed.
-        errors = [v["error"] for v in self.streams.values() if v.get("error")]
-        if self.scan_status.get("streamError") != (errors[-1] if errors else None):
-            self.scan_status["streamError"] = errors[-1] if errors else None
-            self.runtime.store.put("scan", self.scan_status)
-        for group in groups - self.tasks.keys():
-            if self.closed:
-                return
+        # Stable socket slots allow one unavailable market to unsubscribe without
+        # invalidating healthy sibling streams or removing held identities.
+        monitored = self.desired_subscription_ids()
+        for group in list(self.tasks):
+            active = self.active_groups.setdefault(group, set(group))
+            removed = active - monitored
+            active.intersection_update(monitored)
+            # Preserve legacy filter compaction and tuple diagnostics. A proven
+            # unavailable held token is the special case requiring in-place
+            # removal so its healthy peers retain uninterrupted books.
+            unavailable = getattr(self.runtime, "market_availability", {})
+            if removed and not (removed & unavailable.keys()):
+                task = self.tasks.pop(group)
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                self.active_groups.pop(group, None)
+                self.streams.pop(group, None)
+                continue
+            if removed:
+                self.runtime.disconnect(removed)
+                ws = self.sockets.get(group)
+                if ws is not None:
+                    try:
+                        await ws.send(
+                            json.dumps({"operation": "unsubscribe", "assets_ids": sorted(removed)})
+                        )
+                    except Exception:
+                        pass  # Socket heartbeat owns transport recovery.
+            if not active:
+                task = self.tasks.pop(group)
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                self.active_groups.pop(group, None)
+                self.streams.pop(group, None)
+            else:
+                self.refresh_stream_readiness(group)
+        # Reopened outcomes rejoin existing slots in place, even when an
+        # unheld counteroutcome becomes eligible one control tick later.
+        assigned = set().union(*self.active_groups.values()) if self.active_groups else set()
+        recovering_additions = sorted((monitored - assigned) & self._availability_fresh_pending)
+        for group, active in self.active_groups.items():
+            added = recovering_additions[: 200 - len(active)]
+            if not added:
+                continue
+            del recovering_additions[: len(added)]
+            active.update(added)
+            self.runtime.disconnect(added)
+            ws = self.sockets.get(group)
+            if ws is not None:
+                try:
+                    await ws.send(json.dumps({"operation": "subscribe", "assets_ids": added}))
+                    self._availability_subscribe_pending.difference_update(added)
+                except Exception:
+                    pass
+            self.stream_state(group, "AWAITING_BOOKS", self.streams.get(group, {}).get("error"))
+        # Compact only excess fragments, keeping complete groups undisturbed.
+        assigned = set().union(*self.active_groups.values()) if self.active_groups else set()
+        new_groups = (len(monitored - assigned) + 199) // 200
+        if len(self.tasks) + new_groups > (len(monitored) + 199) // 200 + 1:
+            for group in list(self.tasks):
+                if len(self.active_groups[group]) < 200:
+                    self.runtime.disconnect(self.active_groups[group])
+                    task = self.tasks.pop(group)
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    self.active_groups.pop(group, None)
+                    self.streams.pop(group, None)
+        assigned = set().union(*self.active_groups.values()) if self.active_groups else set()
+        additions = sorted(monitored - assigned)
+        for i in range(0, len(additions), 200):
+            group = tuple(additions[i : i + 200])
+            self.active_groups[group] = set(group)
             self.tasks[group] = asyncio.create_task(self.socket(group))
+        self.runtime.release_unmonitored()
+        errors = [v["error"] for v in self.streams.values() if v.get("error")]
+        current = errors[-1] if errors else None
+        if self.scan_status.get("streamError") != current:
+            self.scan_status["streamError"] = current
+            self.runtime.store.put("scan", self.scan_status)
 
     def message(self, msg, allowed):
         if self.closed:
             return
         r = self.runtime
+        allowed = set(allowed) - getattr(r, "market_availability", {}).keys()
         kind = msg.get("event_type")
         ts = int(msg.get("timestamp", 0)) * 1_000_000
         if kind == "price_change":
@@ -403,11 +603,24 @@ class MarketService:
         elif kind == "book":
             tid = msg.get("asset_id")
             if tid in allowed and msg.get("market") == r.tokens[tid].condition_id:
+                if ts < self._availability_timestamp_floor.get(tid, 0):
+                    return
 
                 def levels(side):
                     return [(micros(x["price"]), micros(x["size"])) for x in msg[side]]
 
+                before_revision = r.books[tid].revision
                 r.book(tid, levels("bids"), levels("asks"), ts)
+                if r.books[tid].ready and r.books[tid].revision != before_revision:
+                    was_recovering = tid in self._availability_fresh_pending
+                    self._availability_fresh_pending.discard(tid)
+                    self._availability_subscribe_pending.discard(tid)
+                    self._availability_fresh_requested_at.pop(tid, None)
+                    self._availability_timestamp_floor.pop(tid, None)
+                    self.recovering_ids().discard(tid)
+                    if was_recovering:
+                        r.dirty.add(r.tokens[tid].event_id)
+                        r.drain()
         elif kind == "tick_size_change":
             tid = msg.get("asset_id")
             if tid in allowed and msg.get("market") == r.tokens[tid].condition_id:
@@ -428,13 +641,75 @@ class MarketService:
                 raise ConnectionError("tick 变化，需要新完整盘口")
 
     def subscription_ids(self, group):
-        return group
+        return tuple(sorted(self.active_groups.get(group, group)))
 
     def socket_opened(self, group, ws):
-        pass
+        self.sockets[group] = ws
 
     def socket_closed(self, group):
-        pass
+        self.sockets.pop(group, None)
+
+    def baseline_consumers(self, group):
+        return [self]
+
+    async def recover_consumer_baselines(self, group, ws):
+        """Bounded escalation when an idempotent subscribe returned no snapshot.
+
+        Only the affected token's baselines are invalidated. Other outcomes on
+        this connection keep their continuous books, heartbeat and shadow depth.
+        """
+        async with self.subscription_lock:
+            if self.closed or group not in self.streams:
+                return
+            now = asyncio.get_running_loop().time()
+            consumers = self.baseline_consumers(group)
+            active = set(self.subscription_ids(group))
+            due = (
+                set().union(
+                    *(
+                        {
+                            tid
+                            for tid, requested_at in service._availability_fresh_requested_at.items()
+                            if tid in service._availability_fresh_pending
+                            and tid in service.desired_subscription_ids()
+                            and now - requested_at >= FRESH_BASELINE_RECOVERY_SECONDS
+                        }
+                        for service in consumers
+                        if not service.closed
+                    )
+                )
+                & active
+            )
+            if not due:
+                return
+            # Invalidate before the first await, retaining consumed TEST depth.
+            for tid in due:
+                self._availability_timestamp_floor[tid] = max(
+                    self._availability_timestamp_floor.get(tid, 0),
+                    self.runtime.books[tid].timestamp,
+                )
+            self.runtime.disconnect(due)
+            for service in consumers:
+                ids = due & service.desired_subscription_ids()
+                for tid in ids:
+                    service._availability_timestamp_floor[tid] = max(
+                        service._availability_timestamp_floor.get(tid, 0),
+                        service.runtime.books[tid].timestamp,
+                        self._availability_timestamp_floor[tid],
+                    )
+                service._availability_fresh_pending.update(ids)
+                service.recovering_ids().update(ids)
+                for tid in ids:
+                    service._availability_fresh_requested_at[tid] = now
+                    service._availability_subscribe_pending.discard(tid)
+            await ws.send(json.dumps({"operation": "unsubscribe", "assets_ids": sorted(due)}))
+            if self.closed or not due.issubset(set(self.subscription_ids(group))):
+                return
+            await ws.send(json.dumps({"operation": "subscribe", "assets_ids": sorted(due)}))
+            entry = self.streams.get(group)
+            if entry is not None:
+                entry["snapshotRetries"] = entry.get("snapshotRetries", 0) + 1
+                self.stream_state(group, "AWAITING_BOOKS", entry.get("error"))
 
     def socket_error(self, group, key, exc):
         self.remember_error(key, exc)
@@ -450,6 +725,8 @@ class MarketService:
         last_pong = loop.time()
         while not self.closed:
             now = loop.time()
+            await self.recover_consumer_baselines(group, ws)
+            self.refresh_stream_readiness(group)
             if now >= next_ping:
                 if now - last_pong > RECOVERY_SECONDS:
                     raise ConnectionError("市场文本心跳PONG超时")
@@ -793,8 +1070,11 @@ class PublicMarketHub(MarketService):
         return [
             service
             for service in tuple(self.services)
-            if not service.closed and ids & service.runtime.monitored
+            if not service.closed and ids & service.desired_subscription_ids()
         ]
+
+    def baseline_consumers(self, group):
+        return self.socket_consumers(group)
 
     def socket_error(self, group, key, exc):
         # Keep source history, but a socket fault only affects its subscribers.
@@ -824,7 +1104,7 @@ class PublicMarketHub(MarketService):
                 entry["error"]
                 for group, entry in self.streams.items()
                 if entry.get("error")
-                and self.active_groups.get(group, set()) & service.runtime.monitored
+                and self.active_groups.get(group, set()) & service.desired_subscription_ids()
             ]
             current = errors[-1] if errors else None
             if service.scan_status.get("streamError") != current:
@@ -847,7 +1127,7 @@ class PublicMarketHub(MarketService):
         if self.closed:
             return
         services = [s for s in self.services if not s.closed]
-        consumer_ids = {service: set(service.runtime.monitored) for service in services}
+        consumer_ids = {service: service.desired_subscription_ids() for service in services}
         monitored = set().union(*consumer_ids.values())
         # Keep connections still used by an unchanged consumer. A TEST reset or
         # filter reduction must not invalidate another mode's continuous books.
@@ -860,7 +1140,7 @@ class PublicMarketHub(MarketService):
         )
         self.runtime.monitored = monitored
         for service in services:
-            for tid in tuple(service.runtime.monitored):
+            for tid in tuple(consumer_ids[service]):
                 consumer = service.runtime.tokens[tid]
                 source = self.runtime.tokens.setdefault(tid, consumer)
                 if source.tick != consumer.tick:
@@ -885,7 +1165,7 @@ class PublicMarketHub(MarketService):
             # deltas from the new connection as if it were still continuous.
             missing = {
                 tid
-                for tid in service.runtime.monitored
+                for tid in consumer_ids[service]
                 if (tid not in self.runtime.books or not self.runtime.books[tid].ready)
                 and service.runtime.books[tid].ready
             }
@@ -985,13 +1265,33 @@ class PublicMarketHub(MarketService):
             group = (f"public-{self._next_group}",)
             self.active_groups[group] = set(additions[i : i + 200])
             self.tasks[group] = asyncio.create_task(self.socket(group))
+        for service in services:
+            pending = service._availability_subscribe_pending & consumer_ids[service]
+            for group, active in self.active_groups.items():
+                requested = pending & active
+                ws = self.sockets.get(group)
+                if requested and ws is not None:
+                    try:
+                        await ws.send(
+                            json.dumps({"operation": "subscribe", "assets_ids": sorted(requested)})
+                        )
+                        service._availability_subscribe_pending.difference_update(requested)
+                    except Exception:
+                        pass
         self.runtime.release_unmonitored()
+        for group in tuple(self.streams):
+            self.refresh_stream_readiness(group)
         self.update_consumer_stream_errors()
         for service in services:
             try:
-                for tid in service.runtime.monitored:
+                for tid in consumer_ids[service]:
                     source = self.runtime.books.get(tid)
-                    if source is not None and source.ready and not service.runtime.books[tid].ready:
+                    if (
+                        source is not None
+                        and source.ready
+                        and not service.runtime.books[tid].ready
+                        and tid not in service._availability_fresh_pending
+                    ):
                         # Copy values, including the original venue timestamp;
                         # no Book or TEST consumption object is shared.
                         service.runtime.book(
@@ -1010,7 +1310,7 @@ class PublicMarketHub(MarketService):
     def diagnostics_for(self, service):
         groups = []
         for group in sorted(self.streams):
-            ids = self.active_groups.get(group, set()) & service.runtime.monitored
+            ids = self.active_groups.get(group, set()) & service.desired_subscription_ids()
             if not ids:
                 continue
             missing = [tid for tid in sorted(ids) if not service.runtime.books[tid].ready]
@@ -1018,6 +1318,8 @@ class PublicMarketHub(MarketService):
             entry = dict(self.streams[group])
             if not missing and entry.get("state") == "AWAITING_BOOKS":
                 entry["state"] = "READY"
+            elif missing and entry.get("state") == "READY":
+                entry["state"] = "AWAITING_BOOKS"
             groups.append(
                 dict(
                     entry,
@@ -1039,10 +1341,13 @@ class PublicMarketHub(MarketService):
             tid = msg.get("asset_id")
             if tid not in allowed or msg.get("market") != self.runtime.tokens[tid].condition_id:
                 return
+            if ts < self._availability_timestamp_floor.get(tid, 0):
+                return
             bids = [(micros(x["price"]), micros(x["size"])) for x in msg["bids"]]
             asks = [(micros(x["price"]), micros(x["size"])) for x in msg["asks"]]
             if not self.runtime.books[tid].snapshot(bids, asks, ts):
                 return
+            self._availability_timestamp_floor.pop(tid, None)
         elif kind == "price_change":
             for change in msg.get("price_changes", []):
                 tid = change.get("asset_id")
@@ -1073,7 +1378,7 @@ class PublicMarketHub(MarketService):
             if service.closed:
                 continue
             try:
-                service.message(msg, allowed & service.runtime.monitored)
+                service.message(msg, allowed & service.desired_subscription_ids())
             except ConnectionError:
                 if kind != "tick_size_change":
                     self.consumer_error(service, ConnectionError("消费者行情处理失败"))

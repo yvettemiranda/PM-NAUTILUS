@@ -333,14 +333,16 @@
         </div>
         <div id="curve-note" class="field-note" hidden></div>
         <div class="equity-money"><div><span>资产估算（含待赎回）</span><strong id="total-funds">—</strong></div><div><span>可用现金</span><strong id="available-cash">—</strong></div></div>
+        <p id="valuation-note" class="field-note" hidden></p>
         <details id="portfolio-details"><summary>明细</summary>
           <section id="portfolio" class="portfolio" aria-label="资金明细">
             <article><span>已实现</span><strong id="realized-pnl">—</strong></article>
             <article><span>未实现估算</span><strong id="unrealized-pnl">—</strong></article>
             <article><span>当前买盘可卖估值</span><strong id="position-value">—</strong></article>
+            <article><span>可估值持仓小计（非总资产）</span><strong id="known-position-value">—</strong></article>
             <article><span>持仓数</span><strong id="portfolio-position-count">—</strong></article>
           </section>
-          <p id="cash-note" class="field-note"></p><p class="field-note">净盈亏含持仓浮动盈亏；估值按最佳买价扣费，不代表全部仓位可按此价卖出。</p>
+          <p id="cash-note" class="field-note"></p><p class="field-note">净盈亏含持仓浮动盈亏；持仓估值按当前可成交买盘逐档扣费。缺失报价或处置未明时，完整资产和盈亏保持未知；持仓小计仅包含可估值部分。</p>
         </details>
       </section>
       <nav class="view-tabs" role="tablist" aria-label="交易信息">
@@ -418,6 +420,6 @@
 
       <p id="message" role="status" aria-live="polite"></p>
     </main>
-    <script type="module" src="/app.js?v=20261020-storage1"></script>
+    <script type="module" src="/app.js?v=20261020-availability1"></script>
   </body>
 </html>

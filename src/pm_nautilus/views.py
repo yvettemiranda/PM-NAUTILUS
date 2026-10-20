@@ -18,12 +18,31 @@ def iso(ns):
     return datetime.fromtimestamp(ns / 1_000_000_000, timezone.utc).isoformat()
 
 
+def market_availability(r, token_id):
+    states = getattr(r, "market_availability", {})
+    state = states.get(token_id)
+    if state is None and (token := r.tokens.get(token_id)) is not None:
+        state = next(
+            (
+                item | {"tokenId": token_id}
+                for item in states.values()
+                if item.get("status") == "UNAVAILABLE"
+                and item.get("marketId") == token.market_id
+                and item.get("conditionId") == token.condition_id
+            ),
+            None,
+        )
+    return dict(state) if isinstance(state, dict) and state.get("status") == "UNAVAILABLE" else None
+
+
 def token_view(r, t):
     b = r.books[t.token_id]
+    unavailable = market_availability(r, t.token_id)
+    ready = b.ready and t.token_id not in getattr(r, "market_recovering", set())
     bids = b.bid.available() if r.mode == "TEST" else list(b.bid.external.items())
     asks = b.ask.available() if r.mode == "TEST" else list(b.ask.external.items())
-    bid = max((p for p, q in bids if q), default=None) if b.ready else None
-    ask = min((p for p, q in asks if q), default=None) if b.ready else None
+    bid = max((p for p, q in bids if q), default=None) if ready and not unavailable else None
+    ask = min((p for p, q in asks if q), default=None) if ready and not unavailable else None
     return {
         "tokenId": t.token_id,
         "eventId": t.event_id,
@@ -39,8 +58,11 @@ def token_view(r, t):
         "endsAt": iso(t.ends_ns),
         "progressPercent": float(t.progress(r.now)),
         "currentSellPrice": units(bid),
-        "currentSellPriceStatus": "NOT_READY"
-        if not b.ready
+        "marketAvailability": unavailable,
+        "currentSellPriceStatus": "UNAVAILABLE"
+        if unavailable
+        else "NOT_READY"
+        if not ready
         else "NO_BID"
         if bid is None
         else "READY",
@@ -51,6 +73,8 @@ def portfolio_view(r, position_limit=None):
     positions = []
     values = []
     costs = 0
+    unavailable_count = 0
+    not_ready_count = 0
     settled = set(r.business["settled"])
     targets_by_event = {}
     for target in r.business["targets"].values() if position_limit != 0 else ():
@@ -60,9 +84,13 @@ def portfolio_view(r, position_limit=None):
             continue
         t = r.tokens[c["token_id"]]
         book = r.books[t.token_id]
+        unavailable = market_availability(r, t.token_id)
+        ready = book.ready and t.token_id not in getattr(r, "market_recovering", set())
+        unavailable_count += bool(unavailable)
+        not_ready_count += not unavailable and not ready
         value = None
         sellable = None
-        if book.ready:
+        if ready and not unavailable:
             remaining = c["quantity"]
             value = 0
             for price, quantity in sorted(
@@ -121,6 +149,11 @@ def portfolio_view(r, position_limit=None):
             None if value is None or failed else value + claim_value - costs - claim_cost
         ),
         "positionValue": units(value),
+        "knownPositionValue": units(sum(v for v in values if v is not None)),
+        "valuedPositionCount": sum(v is not None for v in values),
+        "unvaluedPositionCount": sum(v is None for v in values),
+        "unavailablePositionCount": unavailable_count,
+        "notReadyPositionCount": not_ready_count,
         "availableCash": units(r.cash() - held_cash),
         "reservedCash": units(held_cash),
         "pendingRedemption": units(receivable),
@@ -234,7 +267,16 @@ def dashboard(r, service=None, limit=20, live_enabled=False, position_limit=None
         "preferences": r.preferences.public(),
         "positions": positions,
         "positionCount": len(position_cycles),
-        "positionBooksReady": all(r.books[c["token_id"]].ready for c in position_cycles),
+        "positionBooksReady": portfolio["unvaluedPositionCount"] == 0,
+        **{
+            key: portfolio[key]
+            for key in (
+                "valuedPositionCount",
+                "unvaluedPositionCount",
+                "unavailablePositionCount",
+                "notReadyPositionCount",
+            )
+        },
         "marketScan": scan,
         "portfolio": portfolio,
         "redemptions": [

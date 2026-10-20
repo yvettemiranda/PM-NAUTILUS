@@ -669,19 +669,24 @@ class LiveExecution(PolymarketExecutionClient):
     def _finish_failed_submit(self, order, exc, *, submitted=None):
         """Release only when the retry manager never reached the POST boundary."""
         from .storage_guard import StoragePressure
+        from .market_availability import MarketUnavailable
 
         r = self.owner
         oid = str(order.client_order_id)
         intent = r.store.intent(oid)
         if (
-            isinstance(exc, StoragePressure)
+            isinstance(exc, MarketUnavailable)
+            or isinstance(exc, StoragePressure)
             and order.side == OrderSide.BUY
-            and oid not in self._post_possible
-        ):
-            # Capacity deferral is not an account failure. Only a proven
-            # unposted BUY can be released; existing exits remain supervised.
+        ) and oid not in self._post_possible:
+            # A known local deferral is not an account failure. Only a proven
+            # unposted order can be released; other markets' exits remain supervised.
             if intent and not intent.get("terminal"):
-                reason = "存储保护：此买单尚未向交易所提交"
+                reason = (
+                    "市场暂不可交易：此订单尚未向交易所提交"
+                    if isinstance(exc, MarketUnavailable)
+                    else "存储保护：此买单尚未向交易所提交"
+                )
                 was_submitted = self._submitting.get(oid) if submitted is None else submitted
                 if was_submitted:
                     self.generate_order_rejected(
@@ -721,6 +726,7 @@ class LiveExecution(PolymarketExecutionClient):
         basic = (
             r.status == "RUNNING"
             and getattr(r, "storage_can_open", True)
+            and getattr(r, "market_can_trade", lambda _: True)(t.token_id)
             and r.books[t.token_id].ready
             and static_reason(t, r.preferences, r.now, r.official_tags) is None
             and t.event_id not in r.business["banned"]
@@ -740,6 +746,7 @@ class LiveExecution(PolymarketExecutionClient):
         if not basic or i["limit"] != r.preferences.max_price or i["fees"] != asdict(t.fees):
             return False
         ids = {t.token_id} if cycle else r.events.get(t.event_id, set())
+        ids = {tid for tid in ids if getattr(r, "market_can_trade", lambda _: True)(tid)}
         if not ids or any(not r.books[tid].ready for tid in ids):
             return False
         opportunities = []
@@ -1033,6 +1040,13 @@ class LiveExecution(PolymarketExecutionClient):
         if o.side == OrderSide.BUY and guard is not None:
             # Also runs after signing, pool waits and each HTTP retry.
             guard.require_safe()
+        require_market = getattr(r, "require_market_tradeable", None)
+        if require_market is not None and (
+            i.get("kind") != "SETTLEMENT" or o.side != OrderSide.SELL
+        ):
+            # Recheck after signing, pool waits, and immediately before every retry.
+            # Existing SETTLEMENT intents use their separate confirmed-rights path.
+            require_market(i["token_id"])
         if o.side == OrderSide.BUY and (not self.open_orders_clear or not self.buy_valid(o, i)):
             raise ValueError("提交前资格/资金/暂停状态已变化")
         token = r.tokens[i["token_id"]]

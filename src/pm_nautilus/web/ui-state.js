@@ -16,15 +16,26 @@ export function displayStatus(dashboard, { lastSuccess = 0, error = null, now = 
   if (dashboard.executionMode === "LIVE" && !dashboard.liveExecutionEnabled) return { run: "off", feed: "off", scan: "off", warning: "" };
   const scan = dashboard.marketScan || {};
   const groups = scan.diagnostics?.streams?.groups || [];
+  const unavailableCount = dashboard.unavailablePositionCount ?? dashboard.portfolio?.unavailablePositionCount ?? (dashboard.positions || []).filter(p => p.currentSellPriceStatus === "UNAVAILABLE").length;
   const fatal = scan.serviceError;
   const feedError = scan.streamError || groups.some(g => g.error || !g.taskRunning || g.state === "STOPPED");
   const ready = groups.length > 0 && groups.every(g => g.state === "READY" && g.readyBookCount === g.tokenCount);
-  const missingPosition = dashboard.positionBooksReady === false || (dashboard.positions || []).some(p => p.currentSellPriceStatus === "NOT_READY");
+  const missingPosition = Number.isSafeInteger(dashboard.notReadyPositionCount)
+    ? dashboard.notReadyPositionCount > 0
+    : dashboard.positionBooksReady === false || (dashboard.positions || []).some(p => p.currentSellPriceStatus === "NOT_READY");
+  const feed = feedError ? "error" : ready && !missingPosition ? "ready" : !groups.length && unavailableCount && !missingPosition ? "unavailable" : "waiting";
+  const warnings = [];
+  if (fatal) warnings.push(`自动暂停：${scan.lastServiceError || fatal}`);
+  if (unavailableCount) warnings.push(`${unavailableCount} 笔持仓的市场已停用或归档，报价不可用，处置安排待核查；完整资产及盈亏暂无法估算。`);
+  if (missingPosition) warnings.push("部分持仓行情未就绪，相关估值未知。");
+  if (feedError) warnings.push("部分行情正在恢复，展开状态查看详情。");
   return {
     run: fatal ? "error" : dashboard.strategy.status === "RUNNING" ? "ready" : "off",
-    feed: feedError ? "error" : ready && !missingPosition ? "ready" : "waiting",
+    feed,
+    positions: unavailableCount && !["error", "waiting"].includes(feed) ? "warning" : feed,
     scan: scan.lastError || scan.categoryError ? "error" : scan.scanning ? "waiting" : scan.lastScanAt ? "ready" : "unknown",
-    warning: fatal ? `自动暂停：${scan.lastServiceError || fatal}` : missingPosition ? "部分持仓行情未就绪，相关估值未知。" : feedError ? "部分行情正在恢复，展开状态查看详情。" : "",
+    unavailableCount,
+    warning: warnings.join(" "),
   };
 }
 

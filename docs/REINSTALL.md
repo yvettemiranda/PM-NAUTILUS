@@ -1,6 +1,10 @@
 # 新开发环境配置
 
-**2026-10-20 最新部署：**自动空间维护与运行时保护已发布，应用 `640d1b1dbc58f2e61ef9cf3e131cd37a1e163de9`；847 项程序/34 项页面及双架构 CI、服务器完整验收通过。日志自动轮转、15 分钟主机清理和磁盘/inode 保护已实际安装；TEST/RUNNING、LIVE 未启用、钱包 LOCKED，原参数/账本/钱包保留。清理范围、阈值及容量边界见 [自动存储维护](STORAGE_MAINTENANCE.md)。新服务器须安装并验收定时任务；真实资金闭环仍未验证。
+**2026-10-20 市场可用性修复已发布部署验收：**[PR #16](https://github.com/yvettemiranda/PM-NAUTILUS/pull/16) 已合并，固定应用代码 `ebbe888a56213f3c976fdb5291b045354cb821e9`；代码 push、PR 和 [main CI 39397396195](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39397396195) 的 x86_64／ARM64 回归及 Docker verify 全部通过。本地 880 项程序、37 项页面、Ruff（105 文件）及 JS/shell 语法通过。17:14:13 CST 服务器验收 PASS，healthy／零重启／未 OOM，TEST/RUNNING 已恢复，LIVE 未启用、钱包 LOCKED，后台错误为空；原账本、参数、钱包及空间维护机制保留。源码／文档 SHA 以本次纯 Markdown 提交及私有 `docs-sync.json` 记录为准；纯文档同步仅推进源码，应用镜像、env、runtime 保持上述固定代码，无需重启。
+
+本次现场 92 笔持仓中 1 笔已归档、报价不可用，其他未就绪持仓为 0；剩余 4/4 组、767/767 盘口完整。旧价已屏蔽，完整资产／盈亏未知，另列精确的可估值持仓小计；原持仓和权利保留，处置安排待核查，不保证恢复、退款或结算。在线完整 TEST validation（38.999 秒）、离线 Runtime、数据保留、认证 dashboard 语义及 API／JS 检查通过；本轮未做生产浏览器登录后的视觉验收。仅为短时采样，真实资金闭环仍未验证；详情见 [市场可用性](MARKET_AVAILABILITY.md) 和 [HANDOFF](../HANDOFF.md)。
+
+**2026-10-20 历史部署（空间维护）：**自动空间维护与运行时保护已发布，应用 `640d1b1dbc58f2e61ef9cf3e131cd37a1e163de9`；847 项程序/34 项页面及双架构 CI、服务器完整验收通过。日志自动轮转、15 分钟主机清理和磁盘/inode 保护已实际安装；当时 TEST/RUNNING、LIVE 未启用、钱包 LOCKED，原参数/账本/钱包保留。清理范围、阈值及容量边界见 [自动存储维护](STORAGE_MAINTENANCE.md)。新服务器须安装并验收定时任务；真实资金闭环仍未验证。
 
 **2026-10-19 历史维护：**元数据压缩与扫描调度优化已发布，应用 `6dac94bf6bc9cbc954a22e112a52dd49a798d2a6`，752 项程序/33 项页面及双架构 CI、服务器完整验收通过；原 TEST/RUNNING 已恢复，LIVE 未启用、钱包 LOCKED，参数及历史保留。实际库文件减少 31.95%；新格式库不能直接配旧镜像回滚，见 [本轮格式、维护与验收](METADATA_OPTIMIZATION_2026-10-19.md)。本次维护不代表真实资金闭环已验证。
 

@@ -2,7 +2,15 @@
 
 市场归档、停单与缺失盘口的识别、订阅隔离、恢复和未知估值规则见 [市场可用性处理](MARKET_AVAILABILITY.md)；具体发布验收以 [HANDOFF](../HANDOFF.md) 为准。
 
-**2026-10-20 最新部署：**应用 `640d1b1dbc58f2e61ef9cf3e131cd37a1e163de9` 已完成备份、升级、TEST/LIVE Store 两库逻辑核对、TEST 隔离副本 Runtime 与在线 TEST 完整核对，TEST/RUNNING、LIVE=false、钱包 LOCKED，参数/历史/钱包保留。自动日志轮转、15 分钟主机清理及运行时磁盘/inode 保护已安装并验收，详见 [自动存储维护](STORAGE_MAINTENANCE.md) 与 [验证记录](VALIDATION.md)。新服务器须安装定时任务并验收，不仅复制源码；日常维护无需定时停机。纯文档源码同步不重建或重启应用。
+**2026-10-20 市场可用性修复已发布部署验收：**[PR #16](https://github.com/yvettemiranda/PM-NAUTILUS/pull/16) 已合并，固定应用代码 `ebbe888a56213f3c976fdb5291b045354cb821e9`；代码 push、PR 和 [main CI 39397396195](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39397396195) 的 x86_64／ARM64 回归及 Docker verify 全部通过。本地 880 项程序、37 项页面、Ruff（105 文件）及 JS/shell 语法通过。源码／文档 SHA 以本次纯 Markdown 提交及私有 `docs-sync.json` 记录为准；纯文档同步仅推进源码，应用镜像、env、runtime 保持上述固定代码，无需重启。
+
+2026-10-20 17:14:13 CST（09:14:13 UTC）服务器最终 proof 的 `acceptance=true`：容器 healthy、restarts=0、OOM=false，原 TEST/RUNNING 已恢复，LIVE=false、钱包 LOCKED，后台错误为空。在线完整 TEST validation PASS（38.999 秒），真实 TEST 账本隔离副本离线 Runtime 完整验证通过；停机 TEST/LIVE 两库全部逻辑值、schema 和 codec v2 原样保留。原参数、generation、native／equity 历史、加密钱包及绑定、依赖／配置／安全设置保留；既有主机存储工具、units、enabled／active timer 和 Docker 日志 10m×3 保持。本轮没有数据迁移、压缩或 VACUUM。
+
+一致性私有回滚与 age 加密归档位于 `/opt/pm-nautilus/backups/pre-marketavailability-20261020T090449Z`；密文 SHA-256 `46526d65e1df00dd89206671d9b3ae2a9129fac976fe4ce7ba7e621da3e879e7`。私有回滚一致性、recipient 加密及哈希通过，未演练解密恢复。恢复交易后不得用旧快照覆盖新增记录。 全仓摘要／分页历史（790 条）、HTTPS／认证／未认证钱包 401 与部署 JS 哈希通过；认证 dashboard 的报价和估值语义通过，本轮未做生产浏览器登录后的视觉验收。
+
+本次现场为 92 笔持仓，1 笔因 `archived` 报价不可用，其他未就绪持仓为 0；剩余 4/4 连接组 READY、767/767 盘口完整。停用仓位的旧价格已屏蔽，已知持仓小计精确并与完整总额分开；完整资产和未实现盈亏仍为 `null`／未知，数量、成本与权利保留，处置安排待核查。归档不证明零价值、退款、结算或一定恢复。新扫描和后续 PONG／错误复查通过；仅代表本次短时采样，具体时间和结果见 [最新验证](VALIDATION.md)。可用性在内存观察，重启后重新核实，不用旧盘口恢复交易。停用持仓仍随账本、钱包和备份保留。本轮没有启用 LIVE、解锁钱包、签订单或链上资金操作，也未重新解决地区、pUSD／POL 或真实资金买卖／正额赎回闭环；TEST、CI 和服务器验收不等于实盘就绪。
+
+**2026-10-20 历史部署（空间维护）：**应用 `640d1b1dbc58f2e61ef9cf3e131cd37a1e163de9` 已完成备份、升级、TEST/LIVE Store 两库逻辑核对、TEST 隔离副本 Runtime 与在线 TEST 完整核对，当时 TEST/RUNNING、LIVE=false、钱包 LOCKED，参数/历史/钱包保留。自动日志轮转、15 分钟主机清理及运行时磁盘/inode 保护已安装并验收，详见 [自动存储维护](STORAGE_MAINTENANCE.md) 与 [验证记录](VALIDATION.md)。新服务器须安装定时任务并验收，不仅复制源码；日常维护无需定时停机。纯文档源码同步不重建或重启应用。
 
 **2026-10-19 元数据格式维护：**新版本写入可离线无损还原的压缩 Token，兼容旧库读取；3e765cc 及更早的压缩格式前镜像不能读取新格式，6dac94b 与 640d1b1 的 Token 编码兼容。升级、显式离线整理、完整双库回滚副本和可选 VACUUM 的前提见 [本轮维护说明](METADATA_OPTIMIZATION_2026-10-19.md)。不能仅回退到压缩格式前镜像而继续用新格式库；恢复运行后也不能回退旧快照丢失新增交易。正式服务器当时已完成整理与验收，运行应用 `6dac94bf6bc9cbc954a22e112a52dd49a798d2a6`，结果见 [最新验证](VALIDATION.md)。
 

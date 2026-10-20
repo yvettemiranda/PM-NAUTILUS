@@ -1,5 +1,17 @@
 # PM-SMALL → NautilusTrader 迁移设计与当前架构
 
+## 2026-10-20 市场可用性增量（已发布部署验收）
+
+[PR #16](https://github.com/yvettemiranda/PM-NAUTILUS/pull/16) 已合并，固定应用代码 `ebbe888a56213f3c976fdb5291b045354cb821e9`；代码 push、PR 和 [main CI 39397396195](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39397396195) 的 x86_64／ARM64 回归及 Docker verify 全部通过。本地 880 项 Python、37 项页面、Ruff（105 文件）及 JS/shell 语法通过。源码／文档 SHA 以本次纯 Markdown 提交及私有 `docs-sync.json` 记录为准；纯文档同步仅推进源码，应用镜像、env、runtime 保持上述固定代码，无需重启。
+
+新增进程内 `market_availability` 观察和盘口恢复门槛，严格核对官方市场身份、停单标志与明确不存在的订单簿；确认后隔离同 Market／Condition 的结果订阅及订单入口，保留其他市场、TEST 深度、订单所有权和私有对账。恢复须重新核对身份与开放状态、丢弃旧盘口有效性并取得新的完整快照；预期的未 POST 延期与可能已 POST 的未知结果仍分别处理。这个增量不迁移数据库格式、不重写既有账本，不执行压缩或 VACUUM，原空间维护、FAK、预算、目标及止损条件保留。
+
+投影新增全仓已估值／未估值／停用持仓计数和 `knownPositionValue`，分页外持仓也计入。停用报价为 `UNAVAILABLE`，即使旧 book 标为就绪也不使用旧价；完整资产、持仓价值和未实现盈亏保持未知，可用现金、已实现盈亏及已知持仓小计独立展示。原持仓数量、成本、预算和待结算权利保留，不由归档推断零价值、退款或最终结算。公开健康只提供聚合 `marketData`，已确认停用为非致命 `attention`，与临时恢复 `recovering` 分开。
+
+2026-10-20 17:14:13 CST（09:14:13 UTC）服务器最终 proof 的 `acceptance=true`：容器 healthy、restarts=0、OOM=false，原 TEST/RUNNING 已恢复，LIVE=false、钱包 LOCKED，后台错误为空。在线完整 TEST validation PASS（38.999 秒），真实 TEST 账本隔离副本离线 Runtime 完整验证通过；停机 TEST/LIVE 两库全部逻辑值、schema 和 codec v2 原样保留。原参数、generation、native／equity 历史、加密钱包及绑定、依赖／配置／安全设置保留；既有主机存储工具、units、enabled／active timer 和 Docker 日志 10m×3 保持。本轮没有数据迁移、压缩或 VACUUM。
+
+本次现场为 92 笔持仓，1 笔因 `archived` 报价不可用，其他未就绪持仓为 0；剩余 4/4 连接组 READY、767/767 盘口完整。停用仓位的旧价格已屏蔽，已知持仓小计精确并与完整总额分开；完整资产和未实现盈亏仍为 `null`／未知，数量、成本与权利保留，处置安排待核查。归档不证明零价值、退款、结算或一定恢复。 全仓摘要／分页历史（790 条）、HTTPS／认证及 JS 身份通过，认证 dashboard 语义通过；未做本轮生产浏览器登录后的视觉验收。新扫描、短时复查、备份目录／密文哈希与未演练解密的边界见 [最新验证](VALIDATION.md)。真实资金闭环仍未验收。
+
 ## 2026-10-20 自动空间维护增量
 
 Docker 日志 10 MiB×3、每 15 分钟受限主机清理、每 30 秒运行时磁盘/inode 检查；WARNING 时每个已运行模式每分钟最多检查 128 条且结束超过 90 天的无归属公共缓存。主机使用率达到 80% 或可用不超过 6 GiB 时按保留规则回收旧镜像；运行时严重不足、检测失败或采样过期会阻止 START/新增 BUY，并暂缓批量扫描落库。已有交易及卖出/赎回继续遵守原所有权和先落账后发送规则，未明提交不释放或重下。 新增 `intents_token` 索引，删除仅限有严格所有权保护的公共 Token 缓存；不清理财务数据或改变策略参数。正式部署及完整验证已通过，固定应用 `640d1b1dbc58f2e61ef9cf3e131cd37a1e163de9`，运行及容量边界见 [自动存储维护](STORAGE_MAINTENANCE.md) / [最新验证](VALIDATION.md)。

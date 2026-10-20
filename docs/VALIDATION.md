@@ -1,12 +1,26 @@
 # 验证结果与边界
 
-## 2026-10-20 市场停用识别与恢复（待发布部署）
+## 2026-10-20 市场停用识别与恢复（已发布部署验收）
 
-880 项 Python（26.00 秒）、37 项页面、Ruff 检查／格式（105 文件）、JS/shell 语法通过，保留两条既有第三方弃用警告。新增回归覆盖严格身份和状态证明、404／失败拒绝、同市场双向与同 Event 其他市场隔离、低频复查、共享重新开放及时间戳下限、旧缓存和隐藏持仓估值、公开健康接口聚合隐私、排队 BUY/SELL 的预期延期、可能 POST 的未知结果与正式结算豁免。独立复核发现的共享静默恢复及旧快照问题均已修正并回归通过。
+[PR #16](https://github.com/yvettemiranda/PM-NAUTILUS/pull/16) 已合并，固定应用代码 `ebbe888a56213f3c976fdb5291b045354cb821e9`；代码 push、PR 和 [main CI 39397396195](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39397396195) 的 x86_64／ARM64 回归及 Docker verify 全部通过。源码／文档 SHA 以本次纯 Markdown 提交及私有 `docs-sync.json` 记录为准；纯文档同步仅推进源码，应用镜像、env、runtime 保持上述固定代码，无需重启。
 
-机制与边界见 [市场可用性处理](MARKET_AVAILABILITY.md)。本轮尚未部署新版本；原程序、账本、钱包和运行状态未因本地修改改变。后续 CI 和服务器数据保留、现场报价与告警结果另行记录，LIVE 仍不启用。
+880 项 Python（26.00 秒）、37 项页面、Ruff 检查／格式（105 文件）、JS/shell 语法通过，保留两条既有第三方弃用警告。新增回归覆盖严格身份和状态证明、404／失败拒绝、同市场双向与同 Event 其他市场隔离、低频复查、共享重新开放及时间戳下限、旧缓存和隐藏持仓估值、公开健康接口聚合隐私、排队 BUY／SELL 的预期延期、可能 POST 的未知结果与正式结算豁免。独立复核发现的共享静默恢复及旧快照问题均已修正并回归通过。
 
-## 2026-10-20 自动空间维护（已发布部署验收）
+2026-10-20 17:14:13 CST（09:14:13 UTC）服务器最终 proof 的 `acceptance=true`，`checkedAt=2026-10-20T09:14:13.529303+00:00`：容器 healthy、restarts=0、OOM=false，原 TEST/RUNNING 已恢复，LIVE=false、钱包 LOCKED，后台错误为空。在线完整 TEST validation PASS（38.999 秒），真实 TEST 账本隔离副本离线 Runtime 完整验证通过；停机 TEST/LIVE 两库全部逻辑值、schema 和 codec v2 原样保留。原参数、generation、native／equity 历史、加密钱包及绑定、依赖／配置／安全设置保留；既有主机存储工具、units、enabled／active timer 和 Docker 日志 10m×3 保持。本轮没有数据迁移、压缩或 VACUUM。
+
+本次现场为 92 笔持仓，1 笔因 `archived` 报价不可用，其他未就绪持仓为 0；剩余 4/4 连接组 READY、767/767 盘口完整。停用仓位的旧价格已屏蔽，已知持仓小计精确并与完整总额分开；完整资产和未实现盈亏仍为 `null`／未知，数量、成本与权利保留，处置安排待核查。归档不证明零价值、退款、结算或一定恢复。
+
+09:15:19 UTC 复查时四组 PONG 新鲜、各组 snapshotRetries=0，当前 scan／category／stream／service error 均为 null；lastScanAt=`2026-10-20T09:13:38.724659+00:00`，晚于容器 StartedAt=`2026-10-20T09:12:01.904732102`，确认重启后完成新扫描。这是短时采样，不是跨夜稳定性或实盘成交／收益保证。
+
+09:17:19 UTC 的真实低频复查样本：该停用观察的 since=`09:12:17.679330`、checkedAt=`09:17:19.549873`、nextCheckAt=`09:22:19.549873`（均为当天 UTC），lastError=null，符合约 300 秒一次的复查间隔；其余四组 PONG 均为 09:17:19，snapshotRetries 与 missing 各为 0。停用权利继续保留，未通过快速重订阅假造恢复。
+
+全仓摘要、分页历史（当时 790 条记录）、HTTPS 证书及认证、未认证钱包接口 401、部署 JS 哈希均通过。认证 dashboard 的停用原因、旧价屏蔽和未知总额／已知小计语义通过；本轮未做生产浏览器登录后的视觉验收。
+
+一致性私有回滚与 age 加密归档位于 `/opt/pm-nautilus/backups/pre-marketavailability-20261020T090449Z`；密文 SHA-256 `46526d65e1df00dd89206671d9b3ae2a9129fac976fe4ce7ba7e621da3e879e7`。私有回滚一致性、recipient 加密及哈希通过，未演练解密恢复。恢复交易后不得用旧快照覆盖新增记录。
+
+机制与边界见 [市场可用性处理](MARKET_AVAILABILITY.md)。本轮没有启用 LIVE、解锁钱包、签订单或链上资金操作，也未重新解决地区、pUSD／POL 或真实资金买卖／正额赎回闭环；TEST、CI 和服务器验收不等于实盘就绪。
+
+## 2026-10-20 自动空间维护（历史发布部署验收）
 
 [PR #15](https://github.com/yvettemiranda/PM-NAUTILUS/pull/15) 已合并，固定应用代码 `640d1b1dbc58f2e61ef9cf3e131cd37a1e163de9`；[main CI 39292103375](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39292103375) 的 x86_64/ARM64 回归及 Docker verify 全部通过。本地 847 项 Python、34 项页面、Ruff 检查/格式（101 文件）及 JS/shell 语法通过，保留两条既有第三方弃用警告。独立复核及真实外层 submit 回归覆盖尚未 POST 的 BUY 保护不影响已有 SELL，可能已 POST 的未知结果继续隔离。纯文档同步可推进服务器源码，镜像/env/runtime 保持上述固定应用版本，无需重启。
 

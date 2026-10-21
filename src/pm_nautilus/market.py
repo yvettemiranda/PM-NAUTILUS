@@ -5,9 +5,11 @@ No credential import, private endpoint or signed client exists in this module.
 
 import asyncio
 import json
+import random
 from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 
 import httpx
 from websockets.asyncio.client import connect, process_exception
@@ -26,6 +28,10 @@ RECOVERY_SECONDS = 30
 AVAILABILITY_RECHECK_SECONDS = 300
 CLOB_BOOK = "https://clob.polymarket.com/book"
 FRESH_BASELINE_RECOVERY_SECONDS = 30
+DISCOVERY_PAGE_ATTEMPTS = 3
+DISCOVERY_PAGE_SECONDS = 60
+DISCOVERY_RETRY_AFTER_CAP_SECONDS = 5
+DISCOVERY_RETRY_STATUSES = {429, 502, 503, 504}
 
 
 def timestamp(value):
@@ -162,6 +168,17 @@ class MarketService:
         self._availability_fresh_requested_at = {}
         self._availability_timestamp_floor = {}
         self.scan_status = runtime.store.get("scan", {})
+        self.discovery_status = {
+            "enabled": True,
+            "monitoringSince": None,
+            "lastAttemptAt": None,
+            "lastSuccessAt": None,
+            "error": None,
+            "consecutiveFailures": 0,
+            "failureSince": None,
+            "affectedMarketCount": 0,
+            "checkedMarketCount": 0,
+        }
         self.categories = runtime.store.get("categories", [])
         self.closed = False
         self.loop_task = None
@@ -232,6 +249,52 @@ class MarketService:
         response.raise_for_status()
         return response.json()
 
+    async def discovery_page(self, **params):
+        """Retry only this idempotent public page; never replay private requests."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + DISCOVERY_PAGE_SECONDS
+        for attempt in range(DISCOVERY_PAGE_ATTEMPTS):
+            if self.closed:
+                raise asyncio.CancelledError
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise httpx.ReadTimeout("公开 Event 分页重试时间用尽")
+            try:
+                # The client's usual timeout still applies to each attempt. This
+                # extra deadline also bounds the sum of requests and backoffs.
+                async with asyncio.timeout(remaining):
+                    return await self.get(f"{GAMMA}/events/keyset", **params)
+            except TimeoutError as exc:
+                raise httpx.ReadTimeout("公开 Event 分页重试时间用尽") from exc
+            except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+                response = exc.response if isinstance(exc, httpx.HTTPStatusError) else None
+                if response is not None and response.status_code not in DISCOVERY_RETRY_STATUSES:
+                    raise
+                if attempt + 1 == DISCOVERY_PAGE_ATTEMPTS:
+                    raise
+                delay = 0.5 * 2**attempt
+                if response is not None:
+                    value = response.headers.get("Retry-After", "")
+                    try:
+                        retry_after = float(value)
+                    except ValueError:
+                        try:
+                            retry_after = (
+                                parsedate_to_datetime(value) - datetime.now(timezone.utc)
+                            ).total_seconds()
+                        except (ValueError, TypeError, OverflowError):
+                            retry_after = 0
+                    delay = max(
+                        delay,
+                        min(max(0, retry_after), DISCOVERY_RETRY_AFTER_CAP_SECONDS),
+                    )
+                delay += random.uniform(0, 0.25)
+                if delay >= deadline - loop.time():
+                    raise
+                # Cancellation propagates through both the request and backoff;
+                # closing a consumer must not start another page attempt.
+                await asyncio.sleep(delay)
+
     @property
     def storage_available(self):
         return getattr(self.runtime, "storage_can_open", True)
@@ -264,8 +327,11 @@ class MarketService:
             self.runtime.store.put("categories", self.categories)
 
     async def scan(self):
+        if self.closed:
+            return
         if not self.storage_available:
             self.scan_status.update(scanning=False, storageDeferred=True)
+            self.discovery_status["storageDeferred"] = True
             return
         self.scan_status.pop("storageDeferred", None)
         if self.hub is not None:
@@ -278,9 +344,17 @@ class MarketService:
                     self.runtime.store.put("scan", self.scan_status)
             return
         r = self.runtime
+        generation = getattr(r.store, "generation", None)
+        started_at = datetime.now(timezone.utc).isoformat()
+        status = self.discovery_status
+        status.update(lastAttemptAt=started_at, checkedMarketCount=0)
+        if status["monitoringSince"] is None:
+            status["monitoringSince"] = started_at
+        status.pop("storageDeferred", None)
         self.scan_status.update(scanning=True, lastError=None)
         tokens = {}
         seen = set()
+        checked_markets = set()
         after_cursor = None
         cursors = set()
         try:
@@ -290,8 +364,11 @@ class MarketService:
             except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
                 self.scan_status["categoryError"] = type(exc).__name__
             while not self.closed:
+                if getattr(r.store, "generation", None) != generation:
+                    return
                 if not self.storage_available:
                     self.scan_status["storageDeferred"] = True
+                    status["storageDeferred"] = True
                     return
                 params = {
                     "active": "true",
@@ -302,7 +379,9 @@ class MarketService:
                 }
                 if after_cursor:
                     params["after_cursor"] = after_cursor
-                payload = await self.get(f"{GAMMA}/events/keyset", **params)
+                payload = await self.discovery_page(**params)
+                if self.closed or getattr(r.store, "generation", None) != generation:
+                    return
                 if not isinstance(payload, dict):
                     raise ValueError("公开 Event keyset 分页格式变化")
                 page = payload.get("events")
@@ -318,6 +397,12 @@ class MarketService:
                     for t in normalize(event):
                         if t.token_id not in self.unsupported_ticks:
                             tokens[t.token_id] = t
+                    checked_markets.update(
+                        str(m["id"])
+                        for m in event.get("markets") or []
+                        if isinstance(m, dict) and m.get("id") is not None
+                    )
+                status["checkedMarketCount"] = len(checked_markets)
                 self.scan_status["eventCountScanned"] = len(seen)
                 cursor = payload.get("next_cursor")
                 if cursor is None:
@@ -326,22 +411,41 @@ class MarketService:
                     raise ValueError("公开 Event keyset 游标没有前进")
                 cursors.add(cursor)
                 after_cursor = cursor
-            if self.closed or not self.storage_available:
+            if self.closed or getattr(r.store, "generation", None) != generation:
+                return
+            if not self.storage_available:
                 if not self.closed:
                     self.scan_status["storageDeferred"] = True
+                    status["storageDeferred"] = True
                 return
             # Commit discovery only after all pages succeed. Missing old tokens remain
             # available for held-position identity, but cannot open new cycles.
             merged = [replace(t, open=False) for tid, t in r.tokens.items() if tid not in tokens]
             r.add_tokens(merged + list(tokens.values()), [t["id"] for t in self.categories])
             self.scan_status["lastScanAt"] = datetime.now(timezone.utc).isoformat()
+            status.update(
+                lastSuccessAt=self.scan_status["lastScanAt"],
+                error=None,
+                consecutiveFailures=0,
+                failureSince=None,
+            )
             r.drain()
             await self.sync_subscriptions()
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
-            self.scan_status["lastError"] = f"{type(exc).__name__}: {str(exc)[:180]}"
+            if not self.closed and getattr(r.store, "generation", None) == generation:
+                self.scan_status["lastError"] = f"{type(exc).__name__}: {str(exc)[:180]}"
+                status.update(
+                    error=type(exc).__name__,
+                    consecutiveFailures=status["consecutiveFailures"] + 1,
+                    failureSince=status["failureSince"] or started_at,
+                )
         finally:
             self.scan_status["scanning"] = False
-            if self.storage_available:
+            if (
+                not self.closed
+                and getattr(r.store, "generation", None) == generation
+                and self.storage_available
+            ):
                 r.store.put("scan", self.scan_status)
 
     async def sync_subscriptions(self):
@@ -863,6 +967,7 @@ class MarketService:
 
     async def close(self):
         self.closed = True
+        self.discovery_status["enabled"] = False
         tasks = (
             list(self.tasks.values())
             + ([self.loop_task] if self.loop_task else [])
@@ -1011,6 +1116,7 @@ class PublicMarketHub(MarketService):
     def apply_discovery(self, service):
         if service.closed:
             return
+        service.discovery_status = dict(self.discovery_status)
         if not service.storage_available:
             service.scan_status["storageDeferred"] = True
             return

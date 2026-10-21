@@ -1,4 +1,4 @@
-import { displayStatus, curveSegments, modeSwitchDecision, walletOriginSecure, liveWalletAccountVerified, liveRunSummary, redemptionApprovalAction, panelVisible, setMarkupIfChanged } from "./ui-state.js?v=20261020-costbasis1";
+import { displayStatus, curveSegments, modeSwitchDecision, walletOriginSecure, liveWalletAccountVerified, liveRunSummary, redemptionApprovalAction, panelVisible, setMarkupIfChanged } from "./ui-state.js?v=20261021-freshness1";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -1656,14 +1656,17 @@ function renderStatus() {
   });
   $("#live-run-indicator").textContent = live.text;
   $("#live-run-indicator").dataset.tone = live.tone;
-  const state = displayStatus(ui.dashboard, { lastSuccess: ui.dashboardAt, error: ui.dashboardError });
+  const currentDashboard = ui.dashboard?.executionMode === ui.displayMode ? ui.dashboard : null;
+  const state = displayStatus(currentDashboard, { lastSuccess: ui.dashboardAt, error: ui.dashboardError });
   const records = ui.tradeRecordsLocked || ui.displayMode === "LIVE" && ui.dashboard?.positionsAvailable === false ? "locked" : ui.tradeRecordsError ? "error" : ui.tradeRecordsLoadedAt ? "ready" : ui.tradeRecordsLoading ? "waiting" : "unknown";
   for (const [id, value] of [["run-dot", state.run], ["positions-dot", state.positions || state.feed], ["market-dot", state.scan], ["records-dot", records]]) {
     const dot = $(`#${id}`); dot.dataset.state = value;
-    dot.setAttribute("role", "img"); dot.setAttribute("aria-label", {ready:"正常", waiting:"更新中", warning:"有持仓报价不可用", unavailable:"报价不可用", error:"异常", off:"未运行", locked:"已锁定", unknown:"未确认"}[value]);
+    dot.setAttribute("role", "img"); dot.setAttribute("aria-label", {ready:"正常", waiting:"更新中", warning:id === "market-dot" ? "扫描需关注" : "有持仓报价不可用", unavailable:"报价不可用", error:"异常", off:"未运行", locked:"已锁定", unknown:"未确认"}[value]);
   }
   $("#connection-warning").textContent = state.warning;
   $("#connection-warning").hidden = !state.warning;
+  $("#service-warning").textContent = state.serviceWarning || "";
+  $("#service-warning").hidden = !state.serviceWarning;
   const storage = ui.dashboard?.storage;
   const storageWarning = storage?.canOpen === false
     ? "存储保护已生效：暂缓新增买入和全量扫描，优先处理已有交易与持仓。请查看服务器存储状态。"
@@ -1678,7 +1681,17 @@ function renderStatus() {
   const liveFeedSummary = groups.length ? `${groups.filter(g=>g.state === "READY").length}/${groups.length} 组就绪 · ${groups.reduce((n,g)=>n+g.readyBookCount,0)}/${groups.reduce((n,g)=>n+g.tokenCount,0)} 盘口完整` : state.feed === "unavailable" ? "当前没有可接收报价的订阅；停用持仓仍保留并低频核查。" : "当前没有已确认就绪的行情订阅。";
   const unavailableSummary = state.unavailableCount ? `另有 ${formatCount(state.unavailableCount)} 笔持仓的市场已停用或归档，报价不可用，处置安排待核查。` : "";
   const info = ui.activeTab === "positions" ? ["行情", liveFeedSummary, ...(unavailableSummary ? [unavailableSummary] : []), ...groups.map((g,i)=>`组${i+1}：${g.state}，心跳 ${formatClock(g.lastPongAt)}${g.error ? `，${g.error}` : ""}`)] : ui.activeTab === "market" ? ["扫描", `最近完成 ${formatDate(s.lastScanAt)} · ${s.scanning ? "扫描中" : "等待下一轮"}`, s.lastError || s.categoryError || `监控 ${formatCount(ui.displayCandidateCount)} 个事件，当前可交易 ${formatCount(ui.candidateCount)} 个`] : ["同步", `最近成功 ${formatClock(ui.tradeRecordsLoadedAt || null)}`, ui.tradeRecordsError || (ui.tradeRecordsLoaded ? "记录已同步；无新成交也属于正常。" : "打开记录后读取")];
-  $("#module-status-label").textContent = `${info[0]} · ${ui.activeTab === "records" ? ({ready:"已同步",error:"更新失败",waiting:"读取中",locked:"已锁定",unknown:"未读取"}[records]) : ({ready:"正常",error:"需关注",waiting:"更新中",unavailable:"报价不可用",off:"未连接",unknown:"未确认"}[ui.activeTab === "market" ? state.scan : state.feed])}${ui.activeTab === "positions" && state.unavailableCount ? ` · ${formatCount(state.unavailableCount)}笔处置待核查` : ""}`;
+  const freshness = currentDashboard?.serviceFreshness;
+  if (freshness && ui.dashboardAt && !ui.dashboardError && Date.now() - ui.dashboardAt <= 10000) {
+    const key = ui.activeTab === "positions" ? "settlement" : ui.activeTab === "market" ? "discovery" : null;
+    const query = freshness[key];
+    if (key && query?.enabled) {
+      const label = key === "settlement" ? "结算查询" : "市场扫描";
+      const status = {ok:"正常",attention:"需关注",retrying:"重试中",starting:"首次核查中",deferred:"等待存储恢复"}[query.status] || "待核查";
+      info.push(`${label}：${status}；最近成功 ${formatDate(query.lastSuccessAt)}；连续失败 ${formatCount(query.consecutiveFailures)} 次${query.error ? `（${query.error}）` : ""}${query.affectedMarketCount ? `；影响 ${formatCount(query.affectedMarketCount)} 个市场` : ""}`);
+    }
+  }
+  $("#module-status-label").textContent = `${info[0]} · ${ui.activeTab === "records" ? ({ready:"已同步",error:"更新失败",waiting:"读取中",locked:"已锁定",unknown:"未读取"}[records]) : ({ready:"正常",error:"需关注",warning:"需关注",waiting:"更新中",unavailable:"报价不可用",off:"未连接",unknown:"未确认"}[ui.activeTab === "market" ? state.scan : state.feed])}${ui.activeTab === "positions" && state.unavailableCount ? ` · ${formatCount(state.unavailableCount)}笔处置待核查` : ""}`;
   $("#module-status-detail").textContent = info.slice(1).join("\n");
 }
 

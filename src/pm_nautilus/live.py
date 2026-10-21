@@ -284,6 +284,10 @@ class _LedgerGate:
             raise asyncio.CancelledError
 
 
+class _StaleBuyPlan(ValueError):
+    """A locally obsolete BUY, safe to release only before the first possible POST."""
+
+
 class _PostStateChanged(ValueError):
     """A retry was stopped after an earlier POST may already have reached the venue."""
 
@@ -371,6 +375,8 @@ class LiveExecution(PolymarketExecutionClient):
         self._pending_conversions = set()
         self._submitting = {}
         self._post_possible = set()
+        self._stale_buy_refresh_tasks = {}
+        self._stale_buy_refresh_at = OrderedDict()
         self._boot_intents = set(owner.store.intents())
         self._sync_lock = asyncio.Lock()
         self._sdk_terms = {}
@@ -675,7 +681,7 @@ class LiveExecution(PolymarketExecutionClient):
         oid = str(order.client_order_id)
         intent = r.store.intent(oid)
         if (
-            isinstance(exc, MarketUnavailable)
+            isinstance(exc, (MarketUnavailable, _StaleBuyPlan))
             or isinstance(exc, StoragePressure)
             and order.side == OrderSide.BUY
         ) and oid not in self._post_possible:
@@ -683,10 +689,14 @@ class LiveExecution(PolymarketExecutionClient):
             # unposted order can be released; other markets' exits remain supervised.
             if intent and not intent.get("terminal"):
                 reason = (
-                    "市场暂不可交易：此订单尚未向交易所提交"
+                    "行情已变化：旧买单未提交，等待按最新行情重新评估"
+                    if isinstance(exc, _StaleBuyPlan)
+                    else "市场暂不可交易：此订单尚未向交易所提交"
                     if isinstance(exc, MarketUnavailable)
                     else "存储保护：此买单尚未向交易所提交"
                 )
+                if isinstance(exc, _StaleBuyPlan) and oid in self._submit_timings:
+                    self._submit_timings[oid][2]["stale_buy_deferred"] = 1
                 was_submitted = self._submitting.get(oid) if submitted is None else submitted
                 if was_submitted:
                     self.generate_order_rejected(
@@ -694,6 +704,8 @@ class LiveExecution(PolymarketExecutionClient):
                     )
                 else:
                     self.deny(order, reason)
+                if isinstance(exc, _StaleBuyPlan):
+                    self._queue_stale_buy_refresh(oid, intent)
             return
         self.ready = False
         self.open_orders_clear = False
@@ -718,6 +730,78 @@ class LiveExecution(PolymarketExecutionClient):
             # An in-flight worker can complete after the awaiting task fails.
             # Never release this reservation or resubmit the order automatically.
             r.store.put("live_error", f"订单 {oid} 结果未确认：{type(exc).__name__}")
+
+    def _queue_stale_buy_refresh(self, oid, intent):
+        """One prompt full reevaluation per Event/5s; never an in-place reprice."""
+        r = self.owner
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        # The 5s normal control tick remains the fallback. Keep this optimization
+        # bounded even when many markets keep changing during every signature.
+        for eid, allowed_at in list(self._stale_buy_refresh_at.items()):
+            if allowed_at <= now:
+                del self._stale_buy_refresh_at[eid]
+        eid = intent["event_id"]
+        if (
+            eid in self._stale_buy_refresh_tasks
+            or eid in self._stale_buy_refresh_at
+            or len(self._stale_buy_refresh_at) >= 512
+        ):
+            return
+        self._stale_buy_refresh_at[eid] = now + 5
+        generation, epoch = r.store.generation, r._start_epoch
+        preferences = r.preferences.model_dump_json()
+
+        async def refresh():
+            try:
+                # Native terminal delivery must commit the release first. If it
+                # is not ready after this event-loop turn, use the normal tick.
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                if (
+                    r.store._closed
+                    or r.faulted
+                    or not self.ready
+                    or not self.open_orders_clear
+                    or r.status != "RUNNING"
+                    or r.store.generation != generation
+                    or r._start_epoch != epoch
+                    or r.preferences.model_dump_json() != preferences
+                ):
+                    return
+                current = r.store.intent(oid)
+                if not current or not current.get("terminal") or r.active_intents(eid):
+                    return
+                # Preserve cross-Event cash arbitration and every normal strategy
+                # check rather than submitting this token directly.
+                r.refresh_eligibility()
+                r.dirty.add(eid)
+                r.drain()
+            except Exception as exc:
+                self._invalidate_ledger()
+                r.store.put("live_error", f"行情重新评估失败：{type(exc).__name__}")
+
+        task = asyncio.create_task(refresh())
+        self._stale_buy_refresh_tasks[eid] = task
+
+        def done(task):
+            self._stale_buy_refresh_tasks.pop(eid, None)
+            if not task.cancelled() and task.exception() is not None:
+                self._log.error(
+                    f"PM stale BUY reevaluation failed: {type(task.exception()).__name__}"
+                )
+
+        task.add_done_callback(done)
+
+    def _check_buy_plan_current(self, i):
+        """Keep useful partial/better FAKs; skip a currently empty signed price."""
+        r = self.owner
+        book = r.books[i["token_id"]]
+        limit = i.get("outbound_terms", {}).get("limit", i.get("execution_limit", i["limit"]))
+        if book.ready and not any(0 < p <= limit and q > 0 for p, q in book.ask.external.items()):
+            # New strategy evaluation, not an in-place change to signed terms,
+            # decides whether the new price still meets every original rule.
+            raise _StaleBuyPlan("签名买价内已无可执行卖盘")
 
     def buy_valid(self, o, i):
         r = self.owner
@@ -939,6 +1023,7 @@ class LiveExecution(PolymarketExecutionClient):
             self.deny(o, str(exc))
             return
         self._record_outbound_terms(o, token, executable_limit, maker, taker)
+        self._check_buy_plan_current(i)
         if not self.buy_valid(o, i):
             self.deny(o, "签名期间控制/资格发生变化")
             return
@@ -946,6 +1031,7 @@ class LiveExecution(PolymarketExecutionClient):
             self.deny(o, "账户开放挂单或同Condition份额核对未通过")
             return
         self._mark_submit_stage(o, "account_check_ms")
+        self._check_buy_plan_current(i)
         if not self.buy_valid(o, i):
             self.deny(o, "核对期间控制/资格发生变化")
             return
@@ -1047,8 +1133,6 @@ class LiveExecution(PolymarketExecutionClient):
             # Recheck after signing, pool waits, and immediately before every retry.
             # Existing SETTLEMENT intents use their separate confirmed-rights path.
             require_market(i["token_id"])
-        if o.side == OrderSide.BUY and (not self.open_orders_clear or not self.buy_valid(o, i)):
-            raise ValueError("提交前资格/资金/暂停状态已变化")
         token = r.tokens[i["token_id"]]
         terms = i.get("outbound_terms")
         if (
@@ -1085,6 +1169,9 @@ class LiveExecution(PolymarketExecutionClient):
                 token.min_size,
                 token.tick,
             )
+            self._check_buy_plan_current(i)
+            if not self.open_orders_clear or not self.buy_valid(o, i):
+                raise ValueError("提交前资格/资金/暂停状态已变化")
 
     def _is_unknown_submit_result(self, exc):
         # The pinned retry manager also returns None after a cancelled POST,
@@ -1232,78 +1319,92 @@ class LiveExecution(PolymarketExecutionClient):
         results = await asyncio.gather(
             *(lookup(venue) for _, venue in queries), return_exceptions=True
         )
-        for result in results:
-            if isinstance(result, BaseException):
-                raise result
+        errors = [result for result in results if isinstance(result, BaseException)]
+        if errors:
+            self.ready = self.open_orders_clear = False
         # All DB and native state stays on this event loop. CONFIRMED WS facts
         # arriving during the REST reads must be included before releasing rights.
         await asyncio.sleep(0)
         for (oid, venue), result in zip(queries, results, strict=True):
-            i = r.store.intent(oid)
-            if not i or i.get("terminal") or i["generation"] != r.store.generation:
+            if isinstance(result, BaseException):
                 continue
-            if i.get("venue_id") != venue:
-                raise ValueError("订单查询期间持久化身份已变化")
-            o = self._cache.order(ClientOrderId(oid))
-            if not result:
-                raise ValueError("订单结果不明，保留额度与Event锁")
-            associated, matched, status = checked_owned_order_result(result, venue, i["token_id"])
-            rows = r.store.order_fills(oid)
-            confirmed = {e.info.get("venue_trade_id") for e in rows}
-            gross = sum(e.info.get("pm_gross", 0) for e in rows)
-            failed = {
-                key: qty for key, qty in i.get("failed_trades", {}).items() if key not in confirmed
-            }
             try:
-                maximum = self._owned_quantity_upper_bound(i, o, r.tokens[i["token_id"]])
-                if matched > maximum or gross + sum(failed.values()) > maximum:
-                    raise ValueError("订单查询累计成交或失败份额超过持久化订单上限")
+                self._apply_owned_order_result(oid, venue, result)
             except ValueError as exc:
-                # Impossible final evidence cannot release ownership. Keep all
-                # confirmed fills and reservations for a later trustworthy read.
-                self._invalidate_ledger()
-                r.store.put("live_error", str(exc))
-                raise
-            # All matched quantity must be represented by finalized venue responses.
-            # Missing/deferred records retain the reservation; never infer zero fill.
-            if (
-                i.get("pending_trades")
-                or not associated.issubset(confirmed | failed.keys())
-                or gross + sum(failed.values()) < matched
-            ):
-                continue
-            if status in {
-                "CANCELED",
-                "CANCELED_MARKET_RESOLVED",
-                "CANCELLED",
-                "MATCHED",
-                "FILLED",
-                "EXPIRED",
-            }:
-                i = r.store.intent(oid)
-                i["verified_terminal"] = True
-                r.store.save_intent(oid, i)
-                if o and not o.is_closed:
-                    self._release_verified = True
-                    try:
-                        self.generate_order_canceled(
-                            o.strategy_id,
-                            o.instrument_id,
-                            o.client_order_id,
-                            VenueOrderId(venue),
-                            r.now,
-                        )
-                    finally:
-                        self._release_verified = False
-                elif o and o.is_closed:
-                    with r.store.transaction():
-                        i["terminal"] = True
-                        r.store.save_intent(oid, i)
-                        r.release_cycle(i["event_id"])
-                        r.store.put("business", r.business)
-                    r.note_terminal(i["event_id"])
+                self.ready = self.open_orders_clear = False
+                errors.append(exc)
+        # Fully verified orders can release their own reservation even when an
+        # unrelated lookup failed. The round still fails closed for all new BUYs.
         await asyncio.sleep(0)
+        if errors:
+            raise errors[0]
         await self._update_account_state()
+
+    def _apply_owned_order_result(self, oid, venue, result):
+        r = self.owner
+        i = r.store.intent(oid)
+        if not i or i.get("terminal") or i["generation"] != r.store.generation:
+            return
+        if i.get("venue_id") != venue:
+            raise ValueError("订单查询期间持久化身份已变化")
+        o = self._cache.order(ClientOrderId(oid))
+        if not result:
+            raise ValueError("订单结果不明，保留额度与Event锁")
+        associated, matched, status = checked_owned_order_result(result, venue, i["token_id"])
+        rows = r.store.order_fills(oid)
+        confirmed = {e.info.get("venue_trade_id") for e in rows}
+        gross = sum(e.info.get("pm_gross", 0) for e in rows)
+        failed = {
+            key: qty for key, qty in i.get("failed_trades", {}).items() if key not in confirmed
+        }
+        try:
+            maximum = self._owned_quantity_upper_bound(i, o, r.tokens[i["token_id"]])
+            if matched > maximum or gross + sum(failed.values()) > maximum:
+                raise ValueError("订单查询累计成交或失败份额超过持久化订单上限")
+        except ValueError as exc:
+            # Impossible final evidence cannot release ownership. Keep all
+            # confirmed fills and reservations for a later trustworthy read.
+            self._invalidate_ledger()
+            r.store.put("live_error", str(exc))
+            raise
+        # All matched quantity must be represented by finalized venue responses.
+        # Missing/deferred records retain the reservation; never infer zero fill.
+        if (
+            i.get("pending_trades")
+            or not associated.issubset(confirmed | failed.keys())
+            or gross + sum(failed.values()) < matched
+        ):
+            return
+        if status in {
+            "CANCELED",
+            "CANCELED_MARKET_RESOLVED",
+            "CANCELLED",
+            "MATCHED",
+            "FILLED",
+            "EXPIRED",
+        }:
+            i = r.store.intent(oid)
+            i["verified_terminal"] = True
+            r.store.save_intent(oid, i)
+            if o and not o.is_closed:
+                self._release_verified = True
+                try:
+                    self.generate_order_canceled(
+                        o.strategy_id,
+                        o.instrument_id,
+                        o.client_order_id,
+                        VenueOrderId(venue),
+                        r.now,
+                    )
+                finally:
+                    self._release_verified = False
+            elif o and o.is_closed:
+                with r.store.transaction():
+                    i["terminal"] = True
+                    r.store.save_intent(oid, i)
+                    r.release_cycle(i["event_id"])
+                    r.store.put("business", r.business)
+                r.note_terminal(i["event_id"])
 
     async def generate_order_status_reports(self, command):
         await self.sync_owned()
@@ -1494,6 +1595,11 @@ class LiveExecution(PolymarketExecutionClient):
 
     async def shutdown(self):
         self.ready = False
+        refresh_tasks = list(self._stale_buy_refresh_tasks.values())
+        for task in refresh_tasks:
+            task.cancel()
+        if refresh_tasks:
+            await asyncio.gather(*refresh_tasks, return_exceptions=True)
         if self.reconciliation_task:
             self.reconciliation_task.cancel()
             await asyncio.gather(self.reconciliation_task, return_exceptions=True)

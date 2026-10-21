@@ -17,6 +17,44 @@ test('storage protection is visible and blocks START while preserving PAUSE',()=
  page.ui.dashboard.storage={status:'OK',canOpen:true};page.context.renderStatus();
  assert.equal(page.element('#storage-warning').hidden,true);
 });
+test('query freshness concern is separate from healthy prices and clears on recovery',()=>{
+ const dashboard=base();
+ const normal={enabled:true,status:'ok',lastSuccessAt:'2026-10-21T08:00:00Z',consecutiveFailures:0,error:null};
+ dashboard.serviceFreshness={discovery:{...normal,status:'retrying',error:'HTTPStatusError',consecutiveFailures:1},settlement:{...normal}};
+ let state=displayStatus(dashboard,opts);
+ assert.equal(state.scan,'waiting');assert.equal(state.serviceWarning,'');assert.equal(state.run,'ready');assert.equal(state.feed,'ready');
+ dashboard.serviceFreshness.settlement={...normal,status:'attention',reason:'query_failed',error:'ReadTimeout',consecutiveFailures:3,failureDurationSeconds:90,affectedMarketCount:1};
+ state=displayStatus(dashboard,opts);
+ assert.match(state.serviceWarning,/结算查询需关注/);assert.match(state.serviceWarning,/连续失败 3 次/);assert.match(state.serviceWarning,/影响 1 个市场/);
+ assert.equal(state.warning,'');assert.equal(state.run,'ready');assert.equal(state.feed,'ready');
+ dashboard.serviceFreshness.discovery={...normal,status:'attention',reason:'stale'};
+ assert.equal(displayStatus(dashboard,opts).scan,'warning');
+ assert.match(displayStatus(dashboard,opts).serviceWarning,/超过 15 分钟/);
+ dashboard.serviceFreshness={discovery:{...normal},settlement:{...normal}};
+ state=displayStatus(dashboard,opts);assert.equal(state.serviceWarning,'');assert.equal(state.scan,'ready');
+});
+test('actual page shows current query concern and details while keeping usable assets visible',()=>{
+ const page=pageHarness();seedTestDashboard(page);
+ const {ui,context,element}=page;
+ ui.dashboard={...base(),serviceFreshness:{settlement:{enabled:true,status:'attention',reason:'query_failed',lastSuccessAt:'2026-10-21T08:00:00Z',error:'ReadTimeout',consecutiveFailures:4,failureDurationSeconds:120,affectedMarketCount:2}}};
+ ui.activeTab='positions';context.renderStatus();
+ assert.equal(element('#service-warning').hidden,false);assert.match(element('#service-warning').textContent,/结算查询需关注/);
+ assert.match(element('#module-status-detail').textContent,/ReadTimeout/);assert.match(element('#module-status-detail').textContent,/影响 2 个市场/);
+ assert.equal(element('#run-dot').dataset.state,'ready');assert.equal(element('#positions-dot').dataset.state,'ready');
+ assert.equal(element('#connection-warning').hidden,true);
+ ui.dashboard.serviceFreshness.settlement={enabled:true,status:'ok',lastSuccessAt:'2026-10-21T08:03:00Z',consecutiveFailures:0};context.renderStatus();
+ assert.equal(element('#service-warning').hidden,true);assert.equal(element('#module-status-detail').textContent.includes('ReadTimeout'),false);
+});
+test('query freshness never replays another mode or a stale dashboard as a current concern',()=>{
+ const page=pageHarness();seedTestDashboard(page);
+ const {ui,context,element}=page;
+ ui.dashboard={...base(),serviceFreshness:{settlement:{enabled:true,status:'attention',reason:'query_failed',error:'ReadTimeout',consecutiveFailures:4}}};
+ ui.dashboardAt=Date.now()-11_000;context.renderStatus();
+ assert.equal(element('#service-warning').hidden,true);assert.equal(element('#module-status-detail').textContent.includes('ReadTimeout'),false);
+ assert.match(element('#connection-warning').textContent,/上次快照/);
+ ui.dashboardAt=Date.now();ui.displayMode='LIVE';context.renderStatus();
+ assert.equal(element('#service-warning').hidden,true);assert.equal(element('#module-status-detail').textContent.includes('ReadTimeout'),false);
+});
 test('only the visible panel needs list rendering',()=>{
  for (const active of ['positions','market','records']) {
   for (const panel of ['positions','market','records']) assert.equal(panelVisible(active,panel),active===panel);

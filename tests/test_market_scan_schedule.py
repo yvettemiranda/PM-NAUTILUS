@@ -16,7 +16,7 @@ def control_waiter(monkeypatch):
     real_sleep = asyncio.sleep
 
     async def accelerated_sleep(delay):
-        await real_sleep(0.001 if delay == 5 else delay)
+        await real_sleep(0.001 if delay >= 0.5 else delay)
 
     async def until(predicate):
         async with asyncio.timeout(3):
@@ -121,7 +121,7 @@ def test_failed_middle_page_keeps_old_discovery_and_does_not_busy_retry(tmp_path
             release.set()
             await until(lambda: service._scan_finished_at is not None)
             await until(lambda: service.sync_subscriptions.await_count >= 3)
-            assert pages == [None, "failed"]
+            assert pages == [None, "failed", "failed", "failed"]
             assert runtime.tokens == original and runtime.store.tokens() == stored
             assert service.scan_status["lastScanAt"] == "previous-success"
             assert "HTTPStatusError" in service.scan_status["lastError"]

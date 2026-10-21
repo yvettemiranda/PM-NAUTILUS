@@ -10,6 +10,7 @@ import re
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import closing
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from threading import Lock
@@ -752,6 +753,56 @@ class RedemptionService:
         self.market = market
         self.wallet = wallet
         self.busy = False
+        self._query_generation = None
+        self._query_health = {}
+
+    def _publish_query_health(self):
+        """Public aggregate observations never contain ownership or RPC details."""
+        if self.market is None:
+            return
+        rows = list(self._query_health.values())
+        failed = [row for row in rows if row["error"] is not None]
+        successes = [row["lastSuccessAt"] for row in rows if row["lastSuccessAt"]]
+        attempts = [row["lastAttemptAt"] for row in rows if row["lastAttemptAt"]]
+        self.market.resolution_status = {
+            "enabled": bool(rows),
+            "monitoringSince": min((row["monitoringSince"] for row in rows), default=None),
+            "freshnessSince": min(
+                (row["lastSuccessAt"] or row["monitoringSince"] for row in rows), default=None
+            ),
+            "lastAttemptAt": max(attempts, default=None),
+            # The oldest success is the coverage watermark. A healthy market
+            # must never conceal another owned market that has stopped updating.
+            "lastSuccessAt": min(successes) if len(successes) == len(rows) and rows else None,
+            "failureSince": min((row["failureSince"] for row in failed), default=None),
+            "error": failed[0]["error"] if failed else None,
+            "consecutiveFailures": max((row["failures"] for row in failed), default=0),
+            "affectedMarketCount": len(failed),
+            "checkedMarketCount": len(rows),
+            "pendingQueryCount": sum(row["pending"] for row in rows),
+        }
+
+    def _watch_queries(self, owned, generation):
+        if self._query_generation != generation:
+            self._query_generation = generation
+            self._query_health.clear()
+        keys = {(token.market_id, token.condition_id) for token in owned}
+        self._query_health = {key: row for key, row in self._query_health.items() if key in keys}
+        now = datetime.now(timezone.utc).isoformat()
+        for key in keys:
+            self._query_health.setdefault(
+                key,
+                {
+                    "monitoringSince": now,
+                    "lastAttemptAt": None,
+                    "lastSuccessAt": None,
+                    "failureSince": None,
+                    "error": None,
+                    "failures": 0,
+                    "pending": False,
+                },
+            )
+        self._publish_query_health()
 
     def identify(self, token, payouts):
         r = self.r
@@ -896,6 +947,41 @@ class RedemptionService:
                 for cycle in list(r.business["cycles"].values())
                 if r.tokens[cycle["token_id"]].condition_id not in r.business["claims"]
             ]
+            self._watch_queries(owned, generation)
+            claims = asyncio.Queue()
+            queued = set()
+
+            def enqueue_claims():
+                if r.store.generation != generation:
+                    return
+                for key, claim in list(r.business["claims"].items()):
+                    if key not in queued and claim["state"] not in {"CREDITED", "FAILED"}:
+                        queued.add(key)
+                        claims.put_nowait(claim)
+
+            async def advance_claims():
+                while True:
+                    claim = await claims.get()
+                    if claim is None:
+                        return
+                    if r.store.generation != generation:
+                        continue
+                    try:
+                        await self.advance(claim)
+                    except Exception as exc:
+                        if r.store.generation != generation:
+                            continue
+                        claim["error"] = (
+                            str(exc)
+                            if isinstance(exc, RedemptionCheckError)
+                            else type(exc).__name__
+                        )
+                        r.store.put("business", r.business)
+
+            # Claims already identified must progress while unrelated public
+            # market requests are waiting. One consumer preserves account nonce
+            # serialization and advances each claim at most once per round.
+            enqueue_claims()
             work = [(token, True) for token in owned]
             covered = {(token.market_id, token.condition_id) for token in owned}
             # A cycle may be sold or settled while its public market remains
@@ -931,6 +1017,13 @@ class RedemptionService:
                     unavailable = getattr(r, "market_availability", {})
                     if due is not None and token.token_id in unavailable and not due(token):
                         continue
+                    health = self._query_health.get((token.market_id, token.condition_id))
+                    if check_resolution and health is not None:
+                        health["pending"] = True
+                        health["lastAttemptAt"] = datetime.now(timezone.utc).isoformat()
+                        status = self.market.resolution_status
+                        status["lastAttemptAt"] = health["lastAttemptAt"]
+                        status["pendingQueryCount"] += 1
                     try:
                         raw = await self.market.get(f"{GAMMA}/markets/{token.market_id}")
                         observe = getattr(self.market, "observe_market_availability", None)
@@ -940,31 +1033,54 @@ class RedemptionService:
                             payouts = resolution(raw, token)
                             if payouts is not None and r.store.generation == generation:
                                 self.identify(token, payouts)
+                                enqueue_claims()
+                            if health is not None and r.store.generation == generation:
+                                recovered = health["error"] is not None
+                                health.update(
+                                    lastSuccessAt=datetime.now(timezone.utc).isoformat(),
+                                    failureSince=None,
+                                    error=None,
+                                    failures=0,
+                                )
+                                if recovered:
+                                    self._publish_query_health()
                     except Exception as exc:
                         failed = getattr(self.market, "availability_refresh_failed", None)
                         if failed is not None and r.store.generation == generation:
                             failed(token)
-                        if check_resolution:
+                        if check_resolution and r.store.generation == generation:
                             r.store.put("settlement_error", type(exc).__name__)
+                            if health is not None and r.store.generation == generation:
+                                health["failureSince"] = (
+                                    health["failureSince"] or datetime.now(timezone.utc).isoformat()
+                                )
+                                health["error"] = type(exc).__name__
+                                health["failures"] += 1
+                                self._publish_query_health()
+                    finally:
+                        if health is not None and r.store.generation == generation:
+                            health["pending"] = False
+                            status = self.market.resolution_status
+                            status["pendingQueryCount"] = max(0, status["pendingQueryCount"] - 1)
 
             queries = [
                 asyncio.create_task(query_resolutions()) for _ in range(RESOLUTION_CONCURRENCY)
             ]
+            worker = asyncio.create_task(advance_claims())
             try:
                 await asyncio.gather(*queries)
+                claims.put_nowait(None)
+                await worker
             finally:
-                for task in queries:
+                for task in [*queries, worker]:
                     task.cancel()
-                await asyncio.gather(*queries, return_exceptions=True)
-            for claim in list(r.business["claims"].values()):
-                if claim["state"] in {"CREDITED", "FAILED"}:
-                    continue
-                try:
-                    await self.advance(claim)
-                except Exception as exc:
-                    claim["error"] = (
-                        str(exc) if isinstance(exc, RedemptionCheckError) else type(exc).__name__
-                    )
-                    r.store.put("business", r.business)
+                await asyncio.gather(*queries, worker, return_exceptions=True)
+            if r.store.generation == generation:
+                self._watch_queries(
+                    [token for token in owned if token.condition_id not in r.business["claims"]],
+                    generation,
+                )
+                if not any(row["error"] for row in self._query_health.values()):
+                    r.store.put("settlement_error", None)
         finally:
             self.busy = False

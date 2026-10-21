@@ -10,6 +10,19 @@ export function setMarkupIfChanged(element, markup) {
   return true;
 }
 
+export function serviceFreshnessNotice(freshness) {
+  return [["discovery", "市场扫描"], ["settlement", "结算查询"]].flatMap(([key, label]) => {
+    const state = freshness?.[key];
+    if (state?.status !== "attention") return [];
+    const affected = key === "settlement" && state.affectedMarketCount > 0 ? `，影响 ${state.affectedMarketCount} 个市场` : "";
+    const duration = state.failureDurationSeconds > 0 ? `，已持续约 ${Math.max(1, Math.floor(state.failureDurationSeconds / 60))} 分钟` : "";
+    const reason = state.reason === "query_failed"
+      ? `连续失败 ${state.consecutiveFailures || 0} 次${duration}${affected}`
+      : "超过 15 分钟未确认成功";
+    return [`${label}需关注：${reason}；正在继续核查。`];
+  }).join(" ");
+}
+
 export function displayStatus(dashboard, { lastSuccess = 0, error = null, now = Date.now() } = {}) {
   if (!dashboard || !lastSuccess) return { run: "unknown", feed: "unknown", scan: "unknown", warning: error || "等待数据" };
   if (error || now - lastSuccess > 10000) return { run: "error", feed: "error", scan: "unknown", warning: "页面数据更新中断，显示为上次快照；当前运行状态未确认。" };
@@ -27,14 +40,18 @@ export function displayStatus(dashboard, { lastSuccess = 0, error = null, now = 
   const warnings = [];
   if (fatal) warnings.push(`自动暂停：${scan.lastServiceError || fatal}`);
   if (feedError) warnings.push("部分行情正在恢复，展开状态查看详情。");
+  const discovery = dashboard.serviceFreshness?.discovery;
   return {
     run: fatal ? "error" : dashboard.strategy.status === "RUNNING" ? "ready" : "off",
     feed,
     positions: unavailableCount && !["error", "waiting"].includes(feed) ? "warning" : feed,
-    scan: scan.lastError || scan.categoryError ? "error" : scan.scanning ? "waiting" : scan.lastScanAt ? "ready" : "unknown",
+    scan: discovery?.status === "attention" ? "warning" : scan.categoryError ? "error" : discovery?.enabled
+      ? ["retrying", "starting", "deferred"].includes(discovery.status) || scan.scanning ? "waiting" : "ready"
+      : scan.lastError ? "error" : scan.scanning ? "waiting" : scan.lastScanAt ? "ready" : "unknown",
     unavailableCount,
     positionNotice: unavailableCount ? `${unavailableCount} 笔持仓的市场已停用或归档，报价不可用，处置安排待核查。` : missingPosition ? "部分持仓暂无报价，浮盈亏暂记 0。" : "",
     warning: warnings.join(" "),
+    serviceWarning: serviceFreshnessNotice(dashboard.serviceFreshness),
   };
 }
 

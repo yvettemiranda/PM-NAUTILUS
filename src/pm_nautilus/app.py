@@ -29,6 +29,7 @@ from .wallet_vault import VaultError, derive_signer, read_public_metadata, read_
 from .live_readiness import run_readiness
 from .storage_guard import StorageGuard
 from .metadata_retention import prune_cold_metadata
+from .service_freshness import freshness_view
 
 
 class _LiveBundleResponse(FileResponse):
@@ -185,6 +186,20 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 "tokenCount": sum(group.get("tokenCount", 0) for group in groups),
             }
         return result
+
+    def service_freshness_view():
+        # Discovery belongs to the shared source, including its in-flight scan.
+        # Settlement checks belong to each isolated runtime. Never replay stored
+        # settlement_error as evidence of a currently failing process.
+        return {
+            mode: {
+                "discovery": freshness_view(
+                    getattr(getattr(service, "hub", None) or service, "discovery_status", {})
+                ),
+                "settlement": freshness_view(getattr(service, "resolution_status", {})),
+            }
+            for mode, service in services.items()
+        }
 
     async def attach(mode, runtime, wallet=None):
         runtimes[mode] = runtime
@@ -708,6 +723,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             )
             data["liveStrategyStatus"] = live_status
             data["storage"] = storage_view()
+            data["serviceFreshness"] = service_freshness_view()[mode]
             if mode == "LIVE":
                 data["wallet"] = wallet_public()
                 data["liveError"] = bool(runtimes[mode].store.get("live_error"))
@@ -720,6 +736,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             "generation": store.generation,
             "liveExecutionEnabled": False,
             "storage": storage_view(),
+            "serviceFreshness": {},
             "wallet": wallet_public(),
             "positionsAvailable": False,
             "strategy": {"status": "PAUSED", "initialCapital": None, "availableCash": None},
@@ -778,8 +795,12 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                     issues.append("live_maintenance_task_stopped")
             if issues:
                 failures[mode] = ",".join(issues)
+        freshness = service_freshness_view()
+        attention = any(
+            state["status"] == "attention" for mode in freshness.values() for state in mode.values()
+        )
         body = {
-            "status": "degraded" if failures else "ok",
+            "status": "degraded" if failures else "attention" if attention else "ok",
             "version": "0.1.0",
             "mode": "TEST",
             "strategyStatus": runtimes["TEST"].status,
@@ -789,6 +810,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             "backgroundErrors": failures,
             "storage": storage_view(),
             "marketData": market_data_view(),
+            "serviceFreshness": freshness,
         }
         return JSONResponse(body, status_code=503 if failures else 200)
 

@@ -725,6 +725,7 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 .status-button .status-dot { width:7px; height:7px; }
 button:focus-visible, summary:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
 .warning { padding:10px 12px; margin-bottom:12px; color:var(--negative); background:var(--negative-soft); border-radius:8px; font-size:12px; overflow-wrap:anywhere; }
+.service-warning { color:#805b14; background:#fff6df; }
 .wallet-panel { margin-bottom:14px; padding:16px 18px; border-radius:12px; background:var(--surface); }
 .wallet-heading { display:flex; align-items:center; justify-content:space-between; gap:10px; }
 .wallet-heading-actions { display:flex; align-items:center; gap:9px; }

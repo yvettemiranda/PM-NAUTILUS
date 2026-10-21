@@ -183,6 +183,7 @@ def test_unposted_buy_market_deferral_keeps_other_market_owned_sell_available(tm
             await flush()
             next_token = token(runtime, index=2)
             runtime.add_tokens([next_token])
+            runtime.book(next_token.token_id, [(90_000, 100_000_000)], [(100_000, 10_000_000)])
             buy_oid = runtime.submit(
                 next_token,
                 "BUY",

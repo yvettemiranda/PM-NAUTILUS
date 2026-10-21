@@ -66,6 +66,7 @@ from .rules import (
     static_reason,
     Fees,
     preview,
+    plan_buy,
     arbitrate,
     signed_buy_notional,
 )
@@ -286,6 +287,10 @@ class _LedgerGate:
 
 class _PostStateChanged(ValueError):
     """A retry was stopped after an earlier POST may already have reached the venue."""
+
+
+class _BuyQuoteChanged(ValueError):
+    """The old BUY limit has no executable depth in the current local book."""
 
 
 class _TrackedRetryManager:
@@ -675,7 +680,7 @@ class LiveExecution(PolymarketExecutionClient):
         oid = str(order.client_order_id)
         intent = r.store.intent(oid)
         if (
-            isinstance(exc, MarketUnavailable)
+            isinstance(exc, (MarketUnavailable, _BuyQuoteChanged))
             or isinstance(exc, StoragePressure)
             and order.side == OrderSide.BUY
         ) and oid not in self._post_possible:
@@ -683,7 +688,9 @@ class LiveExecution(PolymarketExecutionClient):
             # unposted order can be released; other markets' exits remain supervised.
             if intent and not intent.get("terminal"):
                 reason = (
-                    "市场暂不可交易：此订单尚未向交易所提交"
+                    "盘口已变化：此买单尚未向交易所提交，等待重新判断"
+                    if isinstance(exc, _BuyQuoteChanged)
+                    else "市场暂不可交易：此订单尚未向交易所提交"
                     if isinstance(exc, MarketUnavailable)
                     else "存储保护：此买单尚未向交易所提交"
                 )
@@ -720,6 +727,10 @@ class LiveExecution(PolymarketExecutionClient):
             r.store.put("live_error", f"订单 {oid} 结果未确认：{type(exc).__name__}")
 
     def buy_valid(self, o, i):
+        return self._buy_winner(o, i) is not None
+
+    def _buy_winner(self, o, i):
+        """Current complete decision, including the order's own reserved cash."""
         r = self.owner
         t = r.tokens[i["token_id"]]
         cycle = r.business["cycles"].get(t.event_id)
@@ -744,11 +755,11 @@ class LiveExecution(PolymarketExecutionClient):
             and not o.is_closed
         )
         if not basic or i["limit"] != r.preferences.max_price or i["fees"] != asdict(t.fees):
-            return False
+            return None
         ids = {t.token_id} if cycle else r.events.get(t.event_id, set())
         ids = {tid for tid in ids if getattr(r, "market_can_trade", lambda _: True)(tid)}
         if not ids or any(not r.books[tid].ready for tid in ids):
-            return False
+            return None
         opportunities = []
         for tid in ids:
             token = r.tokens[tid]
@@ -766,7 +777,37 @@ class LiveExecution(PolymarketExecutionClient):
             if p:
                 opportunities.append(p)
         winner = arbitrate(opportunities, r.preferences, r.now)
-        return bool(winner and winner.token.token_id == t.token_id)
+        return winner if winner and winner.token.token_id == t.token_id else None
+
+    def _buy_quote_executable(self, i):
+        r = self.owner
+        token = r.tokens[i["token_id"]]
+        if token.tick not in SUPPORTED_CLOB_TICKS:
+            return False
+        limit = min(
+            i.get("execution_limit", i["limit"]) // token.tick * token.tick, SCALE - token.tick
+        )
+        if limit <= 0:
+            return False
+        terms = i.get("outbound_terms")
+        notional = (
+            terms["maker"]
+            if terms is not None
+            else signed_buy_notional(i["cash"], Fees(**i["fees"]), token.tick, limit)
+        )
+        return bool(
+            r.books[token.token_id].ready
+            and plan_buy(
+                list(r.books[token.token_id].ask.external.items()),
+                i["cash"],
+                limit,
+                token.min_size,
+                Fees(**i["fees"]),
+                token.tick,
+                r.preferences,
+                notional,
+            )
+        )
 
     def deny(self, o, reason):
         self.generate_order_denied(
@@ -881,6 +922,47 @@ class LiveExecution(PolymarketExecutionClient):
         self.owner.store.save_intent(order.client_order_id, i)
 
     async def _submit_market_order(self, command, instrument):
+        # A quote BUY keeps its cash quantity and hard price cap. Re-sign only
+        # before publishing any venue identity, and at most once per dispatch.
+        o = command.order
+        r = self.owner
+        if o.side != OrderSide.BUY or not o.is_quote_quantity:
+            self.deny(o, "仅使用有现金上限的BUY市价FAK")
+            return
+        oid = str(o.client_order_id)
+        for attempt in range(2):
+            i = r.store.intent(oid)
+            if not i or i.get("terminal") or i["generation"] != r.store.generation:
+                raise ValueError("准备期间订单状态已变化")
+            if not self._buy_quote_executable(i):
+                if i.get("venue_id") or oid in self._post_possible or self._submitting.get(oid):
+                    raise _BuyQuoteChanged
+                winner = self._buy_winner(o, i)
+                if winner is None:
+                    self.deny(o, "盘口变化后买入条件已不满足")
+                    return
+                i["execution_limit"] = max(f.price for f in winner.fills)
+                i["quantity"] = sum(f.gross for f in winner.fills)
+                i.pop("outbound_terms", None)
+                r.store.save_intent(oid, i)
+            try:
+                await self._prepare_market_buy(command, instrument)
+                return
+            except _BuyQuoteChanged:
+                # After OrderSubmitted/venue_id, a different signature would
+                # overwrite crash-recovery identity. End that unposted order
+                # through the normal terminal projection instead.
+                current = r.store.intent(oid)
+                if (
+                    attempt
+                    or not current
+                    or current.get("venue_id")
+                    or self._submitting.get(oid)
+                    or oid in self._post_possible
+                ):
+                    raise
+
+    async def _prepare_market_buy(self, command, instrument):
         o = command.order
         r = self.owner
         i = r.store.intent(o.client_order_id)
@@ -946,9 +1028,12 @@ class LiveExecution(PolymarketExecutionClient):
             self.deny(o, "账户开放挂单或同Condition份额核对未通过")
             return
         self._mark_submit_stage(o, "account_check_ms")
+        i = r.store.intent(o.client_order_id)
         if not self.buy_valid(o, i):
             self.deny(o, "核对期间控制/资格发生变化")
             return
+        if not self._buy_quote_executable(i):
+            raise _BuyQuoteChanged
         self.generate_order_submitted(o.strategy_id, o.instrument_id, o.client_order_id, r.now)
         venue = self._expected_venue_order_id(signed, neg_risk=r.tokens[i["token_id"]].neg_risk)
         await self._post_signed_order(
@@ -1085,6 +1170,8 @@ class LiveExecution(PolymarketExecutionClient):
                 token.min_size,
                 token.tick,
             )
+            if not self._buy_quote_executable(i):
+                raise _BuyQuoteChanged
 
     def _is_unknown_submit_result(self, exc):
         # The pinned retry manager also returns None after a cancelled POST,

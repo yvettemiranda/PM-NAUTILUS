@@ -1,8 +1,14 @@
 # PM-NAUTILUS 接手记录
 
-## 2026-10-21 执行与查询恢复优化（本地验收完成，待部署）
+## 2026-10-21 执行与查询恢复优化（已发布部署验收）
 
-本轮落实五项执行与恢复优化：未提交旧价 BUY 复核并交回原策略、逐笔处理已核实订单、公开发现分页有限重试、已识别赎回独立推进、扫描与结算查询持续异常提示。原策略规则／参数、预算、历史账本与成本暂估保持；不实现故障后自动恢复 RUNNING。实现与边界见 [执行与恢复优化](docs/EXECUTION_RESILIENCE.md)。本地完整 954 项 Python（25.58 秒）、44 项页面测试、Ruff 检查／格式（112 文件）、JS 语法与 diff 检查通过；关键提交、取消／nonce 与持仓保全已交叉复核。GitHub／服务器实际验收将在发布完成后补充。
+本轮落实五项执行与恢复优化：未提交旧价 BUY 复核并交回原策略、逐笔处理已核实订单、公开发现分页有限重试、已识别赎回独立推进、扫描与结算查询持续异常提示。原策略规则／参数、预算、历史账本与成本暂估保持；不实现故障后自动恢复 RUNNING。实现与边界见 [执行与恢复优化](docs/EXECUTION_RESILIENCE.md)。本地完整 954 项 Python（25.58 秒）、44 项页面测试、Ruff 检查／格式（112 文件）、JS 语法与 diff 检查通过；关键提交、取消／nonce 与持仓保全已交叉复核。[PR #19](https://github.com/yvettemiranda/PM-NAUTILUS/pull/19) 已合并，固定应用为 `257b1fbe205cea083d6a9a80ac739fcfea2c17b4`；代码 push、PR 及 [main CI 39572351724](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39572351724) 的 x86_64／ARM64 回归和 Docker verify 全部通过。
+
+2026-10-21 17:40:41 CST（09:40:41 UTC）服务器最终验收 PASS：容器 healthy、restarts=0、OOM=false，原 TEST/RUNNING 已恢复，LIVE=false、钱包 LOCKED，后台错误为空。完整在线 TEST validation PASS（44.838 秒）、真实账本隔离副本 Runtime full validation、TEST/LIVE 两库全部停机逻辑值保全通过；原参数、代次、native／equity 历史、钱包、schema／codec v2、依赖／配置／安全设置及既有存储维护保留，无迁移、压缩或 VACUUM。
+
+发现与自有结算查询当前覆盖正常，公开诊断隐私白名单通过；首次启动扫描尚未完成时新鲜度门禁未通过，等待实际成功覆盖后只重跑验收并通过，未放宽门禁或重复切换。现场 1 笔已归档持仓保留成本／权利及浮盈亏暂记 0，其他未就绪持仓为 0，剩余 747/747 盘口、4/4 连接组 READY；全仓／摘要／前 20 笔聚合、异常末位、801 条分页历史、HTTPS／认证及四份页面文件哈希核对通过。Chrome 生产页已确认 TEST 运行中、94 笔持仓、资产／盈亏数字及查询状态正常；这些为本次采样。
+
+一致性私有回滚及 age 密文备份：`/opt/pm-nautilus/backups/pre-execresilience-20261021T092512Z`，SHA-256 `cbbab2bfb3e111da7997f2e2a6a53334678a521c13107bde91696860c483ae06`；recipient 加密及哈希通过，未演练解密恢复。容器 StartedAt=`2026-10-21T09:32:31.850639404Z`。源码／文档版本以本次纯 Markdown 提交及私有 `docs-sync.json` 为准，镜像／env／runtime 固定上述应用版本，文档同步不重启。本轮没有启用 LIVE、解锁钱包、签订单或操作真实资金，真实买卖及正额赎回闭环仍未实测。
 
 第一节是最新实现、验收及部署状态；后文为按各节日期保留的历史记录，其中“当前”或“待部署”只代表当时的版本。纯文档提交不会改变已运行的代码镜像。
 

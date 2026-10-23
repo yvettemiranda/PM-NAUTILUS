@@ -11,3 +11,7 @@
 模式／账本代次切换清除旧图；过时代次的异步结果不接管当前图。LIVE 钱包锁定、核对失败或过期时隐藏已绘制历史，保持原账户隐私边界。真正的数据中断、存储保护和自动暂停提示继续可见，常规诊断在“数据状态”中展开。
 
 本地验证：954 项 Python（29.83 秒）、73 项 Node 页面／曲线测试、Ruff112文件、JS语法与diff检查通过；CI 改为发现全部 `tests/*.test.mjs`。电脑与手机的示例预览已检查，发布版本与服务器结果见 [HANDOFF](../HANDOFF.md)。示例金额不代表服务器持仓、实盘成交或收益。
+
+2026-10-23 23:37:59 CST 已发布部署验收：[PR #20](https://github.com/yvettemiranda/PM-NAUTILUS/pull/20) 合并，应用固定 `a45abef7093ea55d1af0244442f2f93a2c05285d`；push、PR 及 [main CI](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39977743753) 的双架构与镜像验证全部通过。服务器在线完整 TEST validation（63.163 秒）、真实账本副本验证、两库／参数／历史／钱包／安全配置保全、五资产哈希、HTTPS／认证及当前发现／结算覆盖均通过；TEST/RUNNING、LIVE=false、钱包 LOCKED，后台错误为空。生产 Chrome 已实测七天窗口、拖动历史、刷新保留视野、回到最新和记录页直接显示。原历史中的未知估值继续留白。
+
+备份位置、哈希与全部保全证据见 [HANDOFF](../HANDOFF.md)。密文加密及哈希已验，解密恢复未演练；没有实盘资金操作。源码／文档以本次纯 Markdown 提交及 `docs-sync.json` 为准，运行镜像／env 固定上述应用版本，文档同步不重启。

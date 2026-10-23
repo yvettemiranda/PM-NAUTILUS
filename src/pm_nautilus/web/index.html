@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
     <title>PM-NAUTILUS</title>
-    <link rel="stylesheet" href="/styles.css?v=20261021-freshness1" />
+    <link rel="stylesheet" href="/styles.css?v=20261023-ui1" />
   </head>
   <body>
     <main class="app-shell">
@@ -16,7 +16,7 @@
         <span id="live-run-indicator" class="live-run-indicator" role="status" aria-live="polite">LIVE 状态未确认</span>
         <div class="topbar-actions">
           <button id="mode-toggle" class="mode-toggle" type="button">TEST</button>
-          <button id="status-toggle" class="status-button" type="button" aria-label="查看运行状态" aria-expanded="false" aria-controls="runtime-status"><span id="run-dot" class="status-dot"></span></button>
+          <button id="status-toggle" class="status-button" type="button" aria-label="查看运行状态" aria-expanded="false" aria-controls="runtime-status"><span id="run-dot" class="status-dot"></span><span id="run-state-label">状态</span></button>
           <button id="run-toggle" class="icon-button" type="button" aria-label="开始自动交易">▶</button>
           <button id="config-toggle" class="icon-button" type="button" aria-label="交易配置" aria-expanded="false" aria-controls="config-panel">⚙</button>
         </div>
@@ -94,7 +94,7 @@
         <form id="config-form">
           <div class="section-heading config-heading">
             <div>
-              <span class="eyebrow">SETUP</span>
+
               <h2>交易配置</h2>
             </div>
             <button id="config-close" class="icon-button" type="button" aria-label="关闭配置">×</button>
@@ -111,7 +111,7 @@
                 </label>
               </div>
               <div id="category-options" class="chip-options" aria-label="选择市场类别"></div>
-              <p id="category-note" class="field-note">栏目同步自 Polymarket 首页。</p>
+              <p id="category-note" class="field-note">与 Polymarket 栏目同步。</p>
             </fieldset>
 
             <fieldset class="config-block">
@@ -158,7 +158,7 @@
                   </span>
                 </label>
               </div>
-              <p class="field-note">最低和最高价格均包含在筛选范围内，可按 0.1¢ 调整。</p>
+              <p class="field-note">含上下限，步长 0.1¢。</p>
             </div>
 
             <div class="config-block target-formula-block">
@@ -280,14 +280,14 @@
                   </span>
                 </label>
                 <label class="field">
-                  <span>每 Event 每轮金额</span>
+                  <span>每事件本轮预算</span>
                   <span class="unit-input">
                     <input id="order-amount" type="number" min="0.01" step="0.01" inputmode="decimal" />
                     <span>U</span>
                   </span>
                 </label>
               </div>
-              <p class="field-note">首次成交时冻结为该 Event 本轮的累计现金投入上限；买入费用从实际获得份额中扣除。</p>
+              <p class="field-note">首笔成交后固定本轮预算，费用从买入份额中扣除。</p>
               <div class="stop-loss-settings">
                 <label class="stop-loss-toggle">
                   <input id="stop-loss-enabled" type="checkbox" />
@@ -310,7 +310,7 @@
                   </span>
                 </label>
               </div>
-              <p class="field-note">默认 0.40×；新鲜可成交买盘连续约 30 秒低于止损线后主动退出。只影响后续新周期。</p>
+              <p class="field-note">连续约 30 秒低于止损线时退出，仅对新周期生效。</p>
               <button id="reset-test" class="button danger" type="button">重置TEST</button>
             </div>
           </div>
@@ -324,27 +324,29 @@
       <section class="equity-panel" aria-label="资金概览">
         <div id="net-pnl-label" class="equity-label">累计盈亏估算</div>
         <div class="equity-head"><strong id="net-pnl">—</strong><span id="net-return"></span></div>
-        <button id="equity-chart" type="button" aria-label="历史盈亏估算曲线，左右方向键查看数据点"><svg id="equity-svg" role="img" aria-label="历史盈亏估算曲线"></svg></button>
+        <div class="curve-heading"><span>收益走势 <span id="curve-period">近 7 天</span></span><div class="curve-navigation"><button id="curve-older" type="button" aria-label="查看前一周">←</button><button id="curve-newer" type="button" aria-label="查看后一周">→</button><button id="curve-latest" type="button" hidden>回到最新</button></div></div>
+        <button id="equity-chart" type="button" aria-label="近一周盈亏估算曲线，可左右拖动查看历史" aria-describedby="curve-help"><svg id="equity-svg" role="img" aria-label="盈亏估算曲线"></svg></button>
+        <span id="curve-help" class="sr-only">左右拖动查看历史。左右方向键移动一天，PageUp 和 PageDown 移动一周，Home 到最早，End 回到最新；Shift 加左右方向键查看日期和盈亏。</span>
         <div class="curve-footer">
           <span id="curve-status" role="status" aria-live="polite"></span>
           <div class="curve-scales" role="group" aria-label="收益曲线时间刻度">
-            <button type="button" data-curve-scale="H" aria-label="每小时一个点" aria-pressed="true">H</button>
-            <button type="button" data-curve-scale="D" aria-label="每天一个点，按 UTC 日期" title="按 UTC 日期分组" aria-pressed="false">D</button>
+            <button type="button" data-curve-scale="H" aria-label="每小时一个点" aria-pressed="true">时</button>
+            <button type="button" data-curve-scale="D" aria-label="每天一个点，按 UTC 日期" title="按 UTC 日期分组" aria-pressed="false">日</button>
           </div>
         </div>
         <div id="curve-note" class="field-note" hidden></div>
-        <div class="equity-money"><div><span>资产估算（含待赎回）</span><strong id="total-funds">—</strong></div><div><span>可用现金</span><strong id="available-cash">—</strong></div></div>
+        <div class="equity-money"><div><span>总资产估算</span><strong id="total-funds">—</strong></div><div><span>可用现金</span><strong id="available-cash">—</strong></div></div>
         <p id="valuation-note" class="field-note" hidden></p>
-        <details id="portfolio-details"><summary>明细</summary>
+        <details id="portfolio-details"><summary>资金明细</summary>
           <section id="portfolio" class="portfolio" aria-label="资金明细">
             <article><span>已实现</span><strong id="realized-pnl">—</strong></article>
             <article><span>未实现估算</span><strong id="unrealized-pnl">—</strong></article>
             <article><span id="position-value-label">当前买盘可卖估值</span><strong id="position-value">—</strong></article>
-            <article><span>有报价持仓估值</span><strong id="known-position-value">—</strong></article>
+            <article id="known-position-value-item"><span>有报价持仓</span><strong id="known-position-value">—</strong></article>
             <article id="unpriced-position-cost-item" hidden><span>无报价持仓暂计成本</span><strong id="unpriced-position-cost">—</strong></article>
             <article><span>持仓数</span><strong id="portfolio-position-count">—</strong></article>
           </section>
-          <p id="cash-note" class="field-note"></p><p class="field-note">有报价持仓按可成交买盘逐档扣费估值；无报价持仓按剩余成本暂计资产，浮盈亏暂记 0，恢复报价后重新计算。已实现盈亏保留，历史曲线保留原采样与断点。</p>
+          <p id="cash-note" class="field-note"></p><p id="valuation-detail" class="field-note" hidden></p><p class="field-note">持仓按可成交买盘扣费估值；暂无报价时按成本暂计、浮盈亏暂记 0。历史采样与已实现盈亏保留。</p>
         </details>
       </section>
       <nav class="view-tabs" role="tablist" aria-label="交易信息">
@@ -370,23 +372,7 @@
       </section>
 
       <section id="trade-records-panel" class="panel trade-records-panel" role="tabpanel" aria-labelledby="tab-records" hidden>
-        <button
-          id="trade-records-toggle"
-          class="trade-records-toggle"
-          type="button"
-          aria-expanded="false"
-          aria-controls="trade-records-content"
-          aria-label="展开交易记录"
-        >
-          <span class="trade-records-heading">
-
-            <span class="trade-records-title">交易记录</span>
-          </span>
-          <span class="trade-records-toggle-state">
-            <span id="trade-records-count" class="count">展开</span>
-            <strong aria-hidden="true">⌄</strong>
-          </span>
-        </button>
+        <div class="records-heading"><span>交易记录</span><span id="trade-records-count" class="count"></span></div>
         <div id="trade-records-content" hidden>
           <div id="trade-records" class="trade-record-list"></div>
           <button id="more-records" class="button secondary" type="button">再显示20条</button>
@@ -423,6 +409,6 @@
 
       <p id="message" role="status" aria-live="polite"></p>
     </main>
-    <script type="module" src="/app.js?v=20261021-freshness1"></script>
+    <script type="module" src="/app.js?v=20261023-ui1"></script>
   </body>
 </html>

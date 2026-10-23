@@ -258,8 +258,9 @@ test('actual page shows normal holdings first and cost basis for the one unavail
  assert.equal(element('#unpriced-position-cost').textContent,'1.00U');
  assert.equal(element('#valuation-note').hidden,false);
  assert.match(element('#valuation-note').textContent,/1 笔暂无报价/);assert.match(element('#valuation-note').textContent,/浮盈亏暂记 0/);assert.equal(element('#net-pnl-label').textContent,'累计盈亏估算');
- assert.match(element('#valuation-note').textContent,/剩余成本 1.00U 计入/);
- assert.match(element('#valuation-note').textContent,/曲线显示历史记录/);assert.match(element('#valuation-note').textContent,/恢复报价后重新计算/);
+ assert.match(element('#valuation-note').textContent,/成本暂计 1.00U/);
+ assert.match(element('#valuation-detail').textContent,/剩余成本 1.00U 计入/);
+ assert.match(element('#valuation-detail').textContent,/曲线显示历史记录/);assert.match(element('#valuation-detail').textContent,/恢复报价后重新计算/);
  assert.equal(element('#tab-position-count').textContent,'21');assert.match(element('#position-count').textContent,/1笔暂无报价/);
  assert.equal(element('#connection-warning').hidden,true);
  assert.match(element('#positions').innerHTML,/NORMAL_1/);assert.match(element('#positions').innerHTML,/NORMAL_20/);
@@ -275,7 +276,7 @@ test('actual page shows normal holdings first and cost basis for the one unavail
  assert.match(markup,/已归档 · 报价不可用/);assert.match(markup,/处置安排待核查/);
  assert.match(markup,/交易不可用 · 处置待核查/);assert.match(markup,/浮盈亏 <strong data-tone="neutral">0.00U（暂计）/);
  assert.equal(element('#positions-dot').dataset.state,'warning');
- assert.match(element('#module-status-label').textContent,/行情 · 正常 · 1笔处置待核查/);
+ assert.match(element('#module-status-label').textContent,/行情正常 · 1 笔暂无报价/);
  assert.match(element('#module-status-detail').textContent,/2\/2 盘口完整/);
  // Full-account money refreshes from the new summary while rows stay available.
  context.applyDashboardForTest({...dashboard,details:'summary',positions:[],portfolio:{...dashboard.portfolio,estimatedTotalFunds:'98',knownTotalPnl:'-2'}});
@@ -312,10 +313,11 @@ test('failed redemption fallback remains cost assets, retains realized PnL and a
  dashboard.portfolio={...dashboard.portfolio,availableCash:'100',knownPositionValue:'0',unpricedPositionCost:'0',estimatedPositionValue:'0',estimatedTotalFunds:'102',knownUnrealizedPnl:'0',knownTotalPnl:'1.5',realizedPnl:'1.5',failedRedemption:'99',failedRedemptionCost:'5',failedRedemptionCostFallback:'2',failedRedemptionCount:2,failedRedemptionCashIncludedCount:1};
  context.applyDashboardForTest(dashboard);
  assert.equal(element('#total-funds').textContent,'102.00U');assert.equal(element('#net-pnl').textContent,'+1.50U');
- assert.match(element('#valuation-note').textContent,/2 笔赎回处置待核查，浮盈亏暂记 0/);
- assert.match(element('#valuation-note').textContent,/2.00U 成本暂计/);
- assert.match(element('#valuation-note').textContent,/1 笔已计现金的部分不重复/);
- assert.equal(element('#valuation-note').textContent.includes('99.00U'),false);
+ assert.equal(element('#valuation-note').textContent,'2 笔赎回待核查');
+ assert.match(element('#valuation-detail').textContent,/2 笔赎回处置待核查，浮盈亏暂记 0/);
+ assert.match(element('#valuation-detail').textContent,/2.00U 成本暂计/);
+ assert.match(element('#valuation-detail').textContent,/1 笔已计现金的部分不重复/);
+ assert.equal(element('#valuation-detail').textContent.includes('99.00U'),false);
 });
 
 test('legacy normal snapshots keep figures and ready no-bid holdings stay before unavailable quotes',()=>{

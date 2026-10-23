@@ -22,5 +22,5 @@ jobs:
         with:
           node-version: '24.20.0'
       - run: node --check src/pm_nautilus/web/app.js
-      - run: node --test tests/ui-state.test.mjs
+      - run: node --test tests/*.test.mjs
       - run: docker build --target verify --build-arg GIT_REVISION=${{ github.sha }} .

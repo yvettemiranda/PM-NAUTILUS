@@ -1,4 +1,5 @@
-import { displayStatus, curveSegments, modeSwitchDecision, walletOriginSecure, liveWalletAccountVerified, liveRunSummary, redemptionApprovalAction, panelVisible, setMarkupIfChanged } from "./ui-state.js?v=20261021-freshness1";
+import { displayStatus, curveSegments, modeSwitchDecision, walletOriginSecure, liveWalletAccountVerified, liveRunSummary, redemptionApprovalAction, panelVisible, setMarkupIfChanged } from "./ui-state.js?v=20261023-ui1";
+import { curveTimeBounds, resolveCurveWindow, panCurveWindow, curveWindowPoints } from "./curve-window.js?v=20261023-ui1";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -17,6 +18,9 @@ const ui = {
   performanceLoading: false,
   performanceError: null,
   chartIndex: null,
+  curveEnd: null,
+  curveDrag: null,
+  curveAccountVisible: null,
   curveGranularity: "H",
   wallet: null,
   walletAt: 0,
@@ -285,6 +289,7 @@ function renderPortfolio(portfolio, positions = []) {
   $("#net-pnl-label").textContent = "累计盈亏估算";
   $("#position-value-label").textContent = unvalued ? "持仓估算（含暂计成本）" : "当前买盘可卖估值";
   $("#unpriced-position-cost-item").hidden = !portfolio || !unvalued;
+  $("#known-position-value-item").hidden = !portfolio || !unvalued;
   const valuationNote = $("#valuation-note");
   const notes = [];
   if (unvalued) notes.push(portfolio && "unpricedPositionCost" in portfolio
@@ -293,7 +298,12 @@ function renderPortfolio(portfolio, positions = []) {
   if (failed) notes.push(`另有 ${formatCount(failed)} 笔赎回处置待核查，浮盈亏暂记 0；${formatMoney(portfolio.failedRedemptionCostFallback)} 成本暂计${portfolio.failedRedemptionCashIncludedCount ? `，${formatCount(portfolio.failedRedemptionCashIncludedCount)} 笔已计现金的部分不重复计入` : ""}。`);
   if (notes.length) notes.push("曲线显示历史记录。");
   valuationNote.hidden = !portfolio || !notes.length;
-  valuationNote.textContent = notes.join(" ");
+  valuationNote.textContent = [
+    unvalued ? `${formatCount(unvalued)} 笔暂无报价 · 成本暂计${portfolio && "unpricedPositionCost" in portfolio ? ` ${formatMoney(portfolio.unpricedPositionCost)}` : ""} · 浮盈亏暂记 0` : "",
+    failed ? `${formatCount(failed)} 笔赎回待核查` : "",
+  ].filter(Boolean).join("；");
+  $("#valuation-detail").textContent = notes.join(" ");
+  $("#valuation-detail").hidden = valuationNote.hidden;
   const positionCount = ui.dashboard?.positionCount ?? currentPositions(positions).length;
   const count = $("#portfolio-position-count");
   count.textContent = liveAccountVisible() ? `${formatCount(positionCount)}单` : "—";
@@ -411,6 +421,7 @@ function renderLiveWallet() {
 
 function refreshWalletDependentViews() {
   renderLiveWallet();
+  drawCurve();
   if (ui.dashboard) {
     renderCashNote();
     renderPortfolio(ui.dashboard.portfolio, ui.dashboard.positions);
@@ -768,11 +779,12 @@ function renderPositions(positions = []) {
   $("#position-display-count").textContent =
     `当前显示 ${formatCount(visible.length)} / ${formatCount(totalCount)}`;
   toggle.textContent = ui.positionsExpanded
-    ? "收起至前20个"
-    : `展开其余${formatCount(totalCount - POSITION_PREVIEW_LIMIT)}个`;
+    ? "收起"
+    : `查看其余 ${formatCount(totalCount - POSITION_PREVIEW_LIMIT)} 笔`;
   toggle.setAttribute("aria-expanded", String(ui.positionsExpanded));
   if (!panelVisible(ui.activeTab, "positions")) return;
-  const openIds = new Set([...$("#positions").querySelectorAll("details[open]")].map(x => x.dataset.token));
+  const openIds = new Set([...$("#positions").querySelectorAll("details[data-token][open]")].map(x => x.dataset.token));
+  const strategyOpenIds = new Set([...$("#positions").querySelectorAll("details[data-token]")].filter(row => row.querySelector(".strategy-detail")?.open).map(row => row.dataset.token));
   const positionMarkup = visible.length
     ? visible
         .map((position) => {
@@ -786,14 +798,11 @@ function renderPositions(positions = []) {
           const targetLabel = targets.length > 1
             ? `${formatCents(targets[0])} 起 · ${targets.length}档`
             : formatCents(position.targetSellPrice);
-          const eventTitle = position.eventTitle && position.eventTitle !== position.marketQuestion
-            ? `<span class="event-title">${escapeHtml(position.eventTitle)}</span>`
-            : "";
           const currentSellPrice = formatCurrentSellPrice(position);
           const unpriced = positionUnpriced(position);
           const availability = position.marketAvailability;
           const unavailableNote = position.currentSellPriceStatus === "UNAVAILABLE"
-            ? `<p class="field-note market-unavailable">${availability?.reason === "archived" ? "市场已归档" : "市场已停用"}，报价不可用，处置安排待核查。${availability?.since ? ` 首次确认 ${escapeHtml(formatDate(availability.since))}。` : ""}</p>`
+            ? `<p class="field-note market-unavailable">${availability?.reason === "archived" ? "市场已归档" : "市场已停用"}，暂无报价，处置安排待核查。成本暂计、浮盈亏暂记 0。${availability?.since ? ` 确认于 ${escapeHtml(formatDate(availability.since))}。` : ""}</p>`
             : unpriced ? '<p class="field-note">报价暂未就绪，资产暂按剩余成本计入，浮盈亏暂记 0；恢复报价后重新计算。</p>' : "";
           const estimatedPnl = unpriced ? "0" : "estimatedUnrealizedPnl" in position ? position.estimatedUnrealizedPnl : position.unrealizedPnl;
           const positionPnl = `${formatMoney(estimatedPnl, true)}${unpriced ? "（暂计）" : ""}`;
@@ -808,21 +817,18 @@ function renderPositions(positions = []) {
           const stopLossSummary = position.stopLossThreshold === null
             ? ""
             : `<span>止损线 <strong>${formatCents(position.stopLossThreshold)} (${escapeHtml(position.stopLossMultiplier)}×)</strong></span>`;
+          const marketLink = position.marketUrl ? `<a class="detail-market-link" href="${escapeHtml(position.marketUrl)}" target="_blank" rel="noreferrer">查看市场 ↗</a>` : "";
+          const activeExit = ["STOP_ARMED", "STOP_EXITING", "LEGACY_CONFLICT"].includes(position.cycleStatus)
+            ? `<span class="position-action-state">${escapeHtml(cycleStatus)}</span>` : "";
           return `<details class="position-row${unpriced ? " is-unpriced" : ""}" data-token="${escapeHtml(position.tokenId)}" ${openIds.has(position.tokenId) ? "open" : ""}>
-            <summary class="position-summary"><div class="market-copy"><span class="position-title">${escapeHtml(position.marketQuestion || position.eventTitle)}</span><span class="position-sub">${escapeHtml(position.direction)} · 买入均价 ${formatCents(position.averageBuyPrice)}${position.currentSellPriceStatus === "UNAVAILABLE" ? " · 处置待核查" : ""}</span></div><div class="position-price"><strong>${currentSellPrice}</strong><span>目标 ${targetLabel}</span></div></summary>
+            <summary class="position-summary"><div class="market-copy"><span class="position-title">${escapeHtml(position.marketQuestion || position.eventTitle)}</span><span class="position-sub"><span class="direction-label">${escapeHtml(position.direction)}</span><span>均价 ${formatCents(position.averageBuyPrice)}</span>${activeExit}</span></div><div class="position-price"><span class="price-caption">可卖价</span><strong>${currentSellPrice}</strong></div></summary>
             <div class="position-detail">
               ${unavailableNote}
-              <div class="row-heading"><div class="market-copy">${marketTitleMarkup(position)}${eventTitle}</div></div>
-              <div class="cycle-summary"><span>持仓数量 <strong>${formatQuantity(position.quantity)}</strong></span><span>当前买盘可卖 <strong>${unpriced ? "暂无报价" : `${formatQuantity(position.executableSellQuantity)} · ${formatMoney(position.executableSellValue)}`}</strong></span><span>各档目标 <strong>${targets.map(formatCents).join("、") || "—"}</strong></span></div>
-              <div class="cycle-summary"><span>剩余成本 <strong>${formatMoney(position.remainingCost)}</strong></span><span>浮盈亏 <strong data-tone="${positionPnlTone}">${positionPnl}</strong></span></div>
-            <div class="cycle-summary">
-              <span>Event 周期 <strong>${escapeHtml(cycleStatus)}</strong></span>
-              <span>冻结预算 <strong>${position.cycleBudget === null ? "—" : formatMoney(position.cycleBudget)}</strong></span>
-              <span>本轮已用 <strong>${formatMoney(position.cycleSpent)}</strong></span>
-              ${stopLossSummary}
-            </div>
-            <div class="progress-heading"><span>市场生命周期</span><strong>${progressText}</strong></div>
-            ${progressMarkup(position.progressPercent, "市场生命周期")}
+              <div class="position-metrics cycle-summary"><span>持仓数量 <strong>${formatQuantity(position.quantity)}</strong></span><span>剩余成本 <strong>${formatMoney(position.remainingCost)}</strong></span><span>浮盈亏 <strong data-tone="${positionPnlTone}">${positionPnl}</strong></span><span>目标卖价 <strong>${targetLabel}</strong></span></div>
+              <div class="detail-actions">${marketLink}<details class="strategy-detail" ${strategyOpenIds.has(position.tokenId) ? "open" : ""}><summary>策略详情</summary>
+                <div class="cycle-summary"><span>当前买盘可卖 <strong>${unpriced ? "暂无报价" : `${formatQuantity(position.executableSellQuantity)} · ${formatMoney(position.executableSellValue)}`}</strong></span><span>各档目标 <strong>${targets.map(formatCents).join("、") || "—"}</strong></span><span>事件状态 <strong>${escapeHtml(cycleStatus)}</strong></span><span>冻结预算 <strong>${position.cycleBudget == null ? "—" : formatMoney(position.cycleBudget)}</strong></span><span>本轮已用 <strong>${formatMoney(position.cycleSpent)}</strong></span>${stopLossSummary}</div>
+                <div class="progress-heading"><span>市场进度</span><strong>${progressText}</strong></div>${progressMarkup(position.progressPercent, "市场进度")}
+              </details></div>
             </div>
           </details>`;
         })
@@ -830,23 +836,19 @@ function renderPositions(positions = []) {
     : '<p class="empty-state">暂无已成交持仓</p>';
   // Keep focused/open details stable on unchanged 500ms refreshes.
   if ($("#positions").dataset.markup !== positionMarkup) {
-    const focused = document.activeElement?.closest("details[data-token]")?.dataset.token;
+    const active = document.activeElement;
+    const focused = active?.closest("details[data-token]")?.dataset.token;
+    const focusTarget = active?.closest(".strategy-detail") ? ".strategy-detail > summary" : active?.closest("a") ? ".detail-market-link" : "summary";
     setMarkupIfChanged($("#positions"), positionMarkup);
-    if (focused) [...$("#positions").querySelectorAll("details")].find(x => x.dataset.token === focused)?.querySelector("summary").focus({preventScroll:true});
+    if (focused) [...$("#positions").querySelectorAll("details[data-token]")].find(row => row.dataset.token === focused)?.querySelector(focusTarget)?.focus({preventScroll:true});
   }
 }
 
 function renderTradeRecords() {
-  const toggle = $("#trade-records-toggle");
   const content = $("#trade-records-content");
   const count = $("#trade-records-count");
   $("#more-records").hidden = ui.tradeRecords.length >= ui.tradeRecordTotalCount;
   $("#more-records").disabled = ui.tradeRecordsLoading;
-  toggle.setAttribute("aria-expanded", String(ui.tradeRecordsExpanded));
-  toggle.setAttribute(
-    "aria-label",
-    ui.tradeRecordsExpanded ? "收起交易记录" : "展开交易记录",
-  );
   content.hidden = !ui.tradeRecordsExpanded;
   const locked = ui.displayMode === "LIVE" && (ui.tradeRecordsLocked || ui.dashboard?.positionsAvailable === false);
   count.textContent = locked
@@ -854,8 +856,8 @@ function renderTradeRecords() {
     : ui.tradeRecordsLoading && !ui.tradeRecordsLoaded
     ? "读取中"
     : ui.tradeRecordsLoaded
-      ? `${formatCount(ui.tradeRecordTotalCount)}条`
-      : "展开";
+      ? `${formatCount(ui.tradeRecordTotalCount)} 条`
+      : ui.tradeRecordsError ? "更新失败" : "读取中";
   if (!ui.tradeRecordsExpanded || !panelVisible(ui.activeTab, "records")) return;
 
   if (locked) {
@@ -880,13 +882,18 @@ function renderTradeRecords() {
     return;
   }
   if (ui.tradeRecordsRendered === ui.tradeRecords) return;
+  const openIds = new Set([...$("#trade-records").querySelectorAll("details[data-record-detail][open]")].map(row => row.dataset.recordDetail));
+  const active = document.activeElement;
+  const focused = active?.closest(".trade-record-row")?.dataset.record;
+  const focusTarget = active?.closest("a") ? ".trade-record-copy .market-link" : ".record-details > summary";
   setMarkupIfChanged($("#trade-records"), ui.tradeRecords.length
-    ? ui.tradeRecords.map(tradeRecordMarkup).join("")
+    ? ui.tradeRecords.map(record => tradeRecordMarkup(record,openIds.has(String(record.id)))).join("")
     : '<p class="empty-state">暂无交易记录</p>');
+  if (focused) [...$("#trade-records").querySelectorAll(".trade-record-row")].find(row=>row.dataset.record===focused)?.querySelector(focusTarget)?.focus({preventScroll:true});
   ui.tradeRecordsRendered = ui.tradeRecords;
 }
 
-function tradeRecordMarkup(record) {
+function tradeRecordMarkup(record, open = false) {
   const typeLabel = {
     OPEN: "开仓",
     ADD: "加仓",
@@ -914,17 +921,18 @@ function tradeRecordMarkup(record) {
   const amount = `<span>${amountLabel} <strong>${formatMoney(record.amount)}</strong></span>`;
   const realizedPnl = record.realizedPnl === null
     ? ""
-    : `<span>盈亏 <strong data-tone="${Number(record.realizedPnl) > 0 ? "positive" : Number(record.realizedPnl) < 0 ? "negative" : "neutral"}">${formatMoney(record.realizedPnl, true)}</strong></span>`;
+    : `<span>已实现 <strong data-tone="${Number(record.realizedPnl) > 0 ? "positive" : Number(record.realizedPnl) < 0 ? "negative" : "neutral"}">${formatMoney(record.realizedPnl, true)}</strong></span>`;
   const settlementResult = record.type === "SETTLEMENT" && record.winningOutcome
     ? `<span>结果 <strong>${escapeHtml(record.winningOutcome)}</strong></span>`
     : "";
-  return `<article class="trade-record-row">
+  return `<article class="trade-record-row" data-record="${escapeHtml(record.id)}">
     <div class="trade-record-main">
       <span class="trade-record-kind trade-record-kind-${escapeHtml(record.type.toLowerCase())}">${escapeHtml(typeLabel)}</span>
-      <div class="trade-record-copy">${marketTitleMarkup(record)}${eventTitle}</div>
+      <div class="trade-record-copy">${marketTitleMarkup(record)}</div>
       <time datetime="${escapeHtml(record.occurredAt)}">${formatDate(record.occurredAt)}</time>
     </div>
-    <div class="trade-record-meta">${direction}${price}${quantity}${amount}${realizedPnl}${settlementResult}</div>
+    <div class="trade-record-meta">${direction}${amount}${realizedPnl}</div>
+    <details class="record-details" data-record-detail="${escapeHtml(record.id)}" ${open ? "open" : ""}><summary>成交明细</summary><div class="trade-record-meta">${price}${quantity}${settlementResult}</div>${eventTitle}</details>
   </article>`;
 }
 
@@ -1004,10 +1012,11 @@ function renderCandidates() {
   loadMore.textContent = allVisible ? "已全部显示" : "再显示20个";
   if (!panelVisible(ui.activeTab, "market")) return;
 
-  setMarkupIfChanged($("#candidates"), visible.length
+  const openIds = new Set([...$("#candidates").querySelectorAll("details[data-event][open]")].map(row => row.dataset.event));
+  const candidateMarkup = visible.length
     ? visible
         .map((event) => {
-          const candidate = event.winner || event.representative;
+          const candidate = event.winner || event.representative || {};
           const progress = Number(event.progressPercent);
           const progressText = Number.isFinite(progress) ? `${progress.toFixed(1)}%` : "待更新";
           const labels = Array.isArray(candidate.categoryLabels)
@@ -1019,9 +1028,9 @@ function renderCandidates() {
             .map((label) => `<span class="meta-pill">${escapeHtml(label)}</span>`)
             .join("");
           const statusText = {
-            READY: event.locked ? "本轮已锁定" : "Winner已确定",
-            INCOMPLETE: "等待兄弟盘口",
-            NO_WINNER: event.locked ? "本轮已锁定·等待退出" : "暂无合格Winner",
+            READY: event.locked ? "本轮已锁定" : "已选中",
+            INCOMPLETE: "盘口未齐",
+            NO_WINNER: event.locked ? "本轮已锁定·等待退出" : "暂无合格结果",
             LEGACY_CONFLICT: "旧仓冲突·仅退出",
           }[event.status] || "等待评估";
           const outcomeChips = (event.outcomes || [])
@@ -1034,30 +1043,30 @@ function renderCandidates() {
             ? `<a class="market-link" href="${escapeHtml(event.marketUrl)}" target="_blank" rel="noreferrer">${eventTitle}<span>↗</span></a>`
             : `<span class="market-link">${eventTitle}</span>`;
           const isReady = event.status === "READY" && event.winner;
-          const buyLabel = isReady ? "Winner可买" : "参考买价";
-          const sellLabel = isReady ? "Winner可卖" : "参考卖价";
-          return `<article class="market-row event-row${isReady ? "" : " is-stale"}">
-            <div class="row-heading">
-              <div class="market-copy">
-                ${eventLink}
-                <div class="market-meta">${category}<span>${escapeHtml(event.resultCount)}元市场</span><span>${escapeHtml(event.eligibleTokenCount)}合格 / ${escapeHtml(event.tokenCount)} Token</span><span>${escapeHtml(event.marketCount)}市场</span><span class="event-status event-status-${escapeHtml(String(event.status).toLowerCase())}">${escapeHtml(statusText)}</span></div>
-              </div>
-              <span class="market-outcome">${event.winner ? `WIN ${escapeHtml(candidate.direction || "—")}` : "待定"}</span>
+          const buyLabel = isReady ? "可买" : "参考买价";
+          const sellLabel = isReady ? "可卖" : "参考卖价";
+          const selectedTitle = candidate.marketQuestion && candidate.marketQuestion !== (event.eventTitle || candidate.eventTitle)
+            ? `<span class="selected-outcome">${escapeHtml(candidate.marketQuestion)}</span>` : "";
+          return `<details class="market-row event-row${isReady ? "" : " is-stale"}" data-event="${escapeHtml(event.eventId || event.eventTitle || "")}" ${openIds.has(String(event.eventId || event.eventTitle || "")) ? "open" : ""}>
+            <summary class="market-summary"><div class="market-copy"><span class="position-title">${eventTitle}</span>${selectedTitle}<span class="position-sub"><span class="direction-label">${escapeHtml(candidate.direction || "待定")}</span><span class="event-status event-status-${escapeHtml(String(event.status).toLowerCase())}">${escapeHtml(statusText)}</span></span></div>
+              <div class="market-summary-prices"><span>${buyLabel}<strong>${formatCents(candidate.executableBuyPrice)}</strong></span><span>${sellLabel}<strong>${formatCents(candidate.bestBid)}</strong></span></div>
+            </summary>
+            <div class="market-detail">${eventLink}
+              <div class="market-meta">${category}<span>${escapeHtml(event.resultCount)} 元市场</span><span>${escapeHtml(event.eligibleTokenCount)} / ${escapeHtml(event.tokenCount)} 个结果合格</span><span>${escapeHtml(event.marketCount)} 个市场</span></div>
+              <div class="market-dates"><span>开始 ${formatDate(event.openedAt)}</span><span>结束 ${formatDate(event.endsAt)}</span></div>
+              <div class="event-outcomes">${outcomeChips}${remainingOutcomeCount > 0 ? `<span class="outcome-chip">+${remainingOutcomeCount}</span>` : ""}</div>
+              <div class="progress-heading"><span>市场进度</span><strong>${progressText}</strong></div>${progressMarkup(event.progressPercent, "市场进度")}
             </div>
-            <div class="event-winner-title"><span>${event.winner ? "当前 Winner" : "当前代表"}</span><strong>${escapeHtml(candidate.marketQuestion || candidate.direction || "暂无")}</strong></div>
-            <div class="quote-grid candidate-quotes">
-              <div><span>${buyLabel}</span><strong>${formatCents(candidate.executableBuyPrice)}</strong></div>
-              <div><span>${sellLabel}</span><strong>${formatCents(candidate.bestBid)}</strong></div>
-              <div class="market-time"><span>开始</span><strong>${formatDate(event.openedAt)}</strong></div>
-              <div class="market-time"><span>结束</span><strong>${formatDate(event.endsAt)}</strong></div>
-            </div>
-            <div class="event-outcomes">${outcomeChips}${remainingOutcomeCount > 0 ? `<span class="outcome-chip">+${remainingOutcomeCount}</span>` : ""}</div>
-            <div class="progress-heading"><span>市场生命周期</span><strong>${progressText}</strong></div>
-            ${progressMarkup(event.progressPercent, "市场生命周期")}
-          </article>`;
+          </details>`;
         })
         .join("")
-    : '<p class="empty-state">当前没有符合配置的事件</p>');
+    : '<p class="empty-state">当前没有符合配置的事件</p>';
+  const active = document.activeElement;
+  const focused = active?.closest("details[data-event]")?.dataset.event;
+  const focusTarget = active?.closest("a") ? ".market-detail .market-link" : "summary";
+  if (setMarkupIfChanged($("#candidates"), candidateMarkup) && focused) {
+    [...$("#candidates").querySelectorAll("details[data-event]")].find(row => row.dataset.event === focused)?.querySelector(focusTarget)?.focus({preventScroll:true});
+  }
 }
 
 function renderScanStatus(status) {
@@ -1089,7 +1098,7 @@ function renderScanStatus(status) {
   }
 
   if (status?.lastScanAt) {
-    element.textContent = `扫描完成 · 监控 ${formatCount(status.tokenCount ?? diagnostics?.monitoredTokenCount)} Token · 可交易 ${formatCount(status.eventCount ?? status.candidateCount)} 个事件`;
+    element.textContent = `更新于 ${formatClock(status.lastScanAt)}`;
     return;
   }
   element.textContent = "等待首次扫描";
@@ -1209,6 +1218,7 @@ function clearTradeRecordView() {
 function applyDashboard(dashboard) {
   if ((ui.dashboard?.generation && ui.dashboard.generation !== dashboard.generation) ||
       (ui.recordGeneration && ui.recordGeneration !== dashboard.generation)) clearTradeRecordView();
+  if (ui.dashboard?.generation && ui.dashboard.generation !== dashboard.generation) resetCurveView();
   ui.dashboard = dashboard;
   ui.dashboardAt = Date.now();
   ui.dashboardError = null;
@@ -1547,6 +1557,7 @@ $("#reset-test").addEventListener("click", async () => {
     recordMutation();
     ui.visibleCandidateCount = 20;
     ui.configDirty = false;
+    resetCurveView();
     ui.performance = null; ui.performanceAt = 0; ui.recordLimit = 20; ui.recordCursor = null; ui.recordHead = null; ui.recordGeneration = null;
     ui.tradeRecords = [];
     ui.tradeRecordTotalCount = 0;
@@ -1576,6 +1587,7 @@ $("#mode-toggle").addEventListener("click", () => {
   ui.tradeRecordsLoaded = false; ui.tradeRecordsLoading = false; ui.tradeRecordsLocked = false; ui.tradeRecordsLoadedAt = 0; ui.tradeRecords = [];
   ui.visibleCandidateCount = 20;
   ui.displayMode = decision.nextMode;
+  resetCurveView();
   ui.positionSnapshot = null;
   ui.dashboard = null; ui.dashboardAt = 0; ui.dashboardError = null; ui.strategyStatus = "STOPPED"; ui.preferences = null;
   ui.events = []; ui.candidateCount = 0; ui.displayCandidateCount = 0; ui.staleCandidateCount = 0;
@@ -1633,17 +1645,6 @@ $("#toggle-positions").addEventListener("click", () => {
   void loadDashboard({silent: true});
 });
 
-$("#trade-records-toggle").addEventListener("click", () => {
-  ui.tradeRecordsExpanded = !ui.tradeRecordsExpanded;
-  renderTradeRecords();
-  if (
-    ui.tradeRecordsExpanded &&
-    (!ui.tradeRecordsLoaded ||
-      Date.now() - ui.tradeRecordsLoadedAt >= TRADE_RECORD_REFRESH_MS)
-  ) {
-    void loadTradeRecords();
-  }
-});
 
 $("#load-more").addEventListener("click", async () => {
   ui.visibleCandidateCount = Math.min(ui.displayCandidateCount, ui.visibleCandidateCount + 20);
@@ -1658,6 +1659,8 @@ function renderStatus() {
   $("#live-run-indicator").dataset.tone = live.tone;
   const currentDashboard = ui.dashboard?.executionMode === ui.displayMode ? ui.dashboard : null;
   const state = displayStatus(currentDashboard, { lastSuccess: ui.dashboardAt, error: ui.dashboardError });
+  const curveVisible = ui.displayMode !== "LIVE" || liveAccountVisible();
+  if (ui.curveAccountVisible !== curveVisible) drawCurve();
   const records = ui.tradeRecordsLocked || ui.displayMode === "LIVE" && ui.dashboard?.positionsAvailable === false ? "locked" : ui.tradeRecordsError ? "error" : ui.tradeRecordsLoadedAt ? "ready" : ui.tradeRecordsLoading ? "waiting" : "unknown";
   for (const [id, value] of [["run-dot", state.run], ["positions-dot", state.positions || state.feed], ["market-dot", state.scan], ["records-dot", records]]) {
     const dot = $(`#${id}`); dot.dataset.state = value;
@@ -1678,9 +1681,10 @@ function renderStatus() {
   const runText = state.run === "error" ? state.warning : !ui.dashboardAt ? "运行状态未确认" : ui.displayMode === "LIVE" && !ui.wallet?.configured ? "实盘钱包未连接" : ui.displayMode === "LIVE" && !ui.wallet?.unlocked ? "实盘钱包已锁定" : ui.displayMode === "LIVE" && !ui.wallet?.enabled ? "实盘尚未启用" : ui.strategyStatus === "RUNNING" ? "运行中" : "已暂停新买入；已有仓位仍继续退出和赎回。";
   $("#runtime-status").textContent = runText;
   $("#status-toggle").setAttribute("aria-label", `查看运行状态：${runText}`);
+  $("#run-state-label").textContent = state.run === "error" ? "需关注" : !ui.dashboardAt ? "未确认" : ui.strategyStatus === "RUNNING" ? "运行中" : "已暂停";
   const liveFeedSummary = groups.length ? `${groups.filter(g=>g.state === "READY").length}/${groups.length} 组就绪 · ${groups.reduce((n,g)=>n+g.readyBookCount,0)}/${groups.reduce((n,g)=>n+g.tokenCount,0)} 盘口完整` : state.feed === "unavailable" ? "当前没有可接收报价的订阅；停用持仓仍保留并低频核查。" : "当前没有已确认就绪的行情订阅。";
   const unavailableSummary = state.unavailableCount ? `另有 ${formatCount(state.unavailableCount)} 笔持仓的市场已停用或归档，报价不可用，处置安排待核查。` : "";
-  const info = ui.activeTab === "positions" ? ["行情", liveFeedSummary, ...(unavailableSummary ? [unavailableSummary] : []), ...groups.map((g,i)=>`组${i+1}：${g.state}，心跳 ${formatClock(g.lastPongAt)}${g.error ? `，${g.error}` : ""}`)] : ui.activeTab === "market" ? ["扫描", `最近完成 ${formatDate(s.lastScanAt)} · ${s.scanning ? "扫描中" : "等待下一轮"}`, s.lastError || s.categoryError || `监控 ${formatCount(ui.displayCandidateCount)} 个事件，当前可交易 ${formatCount(ui.candidateCount)} 个`] : ["同步", `最近成功 ${formatClock(ui.tradeRecordsLoadedAt || null)}`, ui.tradeRecordsError || (ui.tradeRecordsLoaded ? "记录已同步；无新成交也属于正常。" : "打开记录后读取")];
+  const info = ui.activeTab === "positions" ? ["行情", liveFeedSummary, ...(unavailableSummary ? [unavailableSummary] : []), ...groups.map((g,i)=>`组${i+1}：${g.state}，心跳 ${formatClock(g.lastPongAt)}${g.error ? `，${g.error}` : ""}`)] : ui.activeTab === "market" ? ["扫描", `最近完成 ${formatDate(s.lastScanAt)} · ${s.scanning ? "扫描中" : "等待下一轮"}`, s.lastError || s.categoryError || `监控 ${formatCount(ui.displayCandidateCount)} 个事件，当前可交易 ${formatCount(ui.candidateCount)} 个`] : ["记录", `最近成功 ${formatClock(ui.tradeRecordsLoadedAt || null)}`, ui.tradeRecordsError || (ui.tradeRecordsLoaded ? "记录已同步；无新成交也属于正常。" : "打开记录后读取")];
   const freshness = currentDashboard?.serviceFreshness;
   if (freshness && ui.dashboardAt && !ui.dashboardError && Date.now() - ui.dashboardAt <= 10000) {
     const key = ui.activeTab === "positions" ? "settlement" : ui.activeTab === "market" ? "discovery" : null;
@@ -1691,7 +1695,7 @@ function renderStatus() {
       info.push(`${label}：${status}；最近成功 ${formatDate(query.lastSuccessAt)}；连续失败 ${formatCount(query.consecutiveFailures)} 次${query.error ? `（${query.error}）` : ""}${query.affectedMarketCount ? `；影响 ${formatCount(query.affectedMarketCount)} 个市场` : ""}`);
     }
   }
-  $("#module-status-label").textContent = `${info[0]} · ${ui.activeTab === "records" ? ({ready:"已同步",error:"更新失败",waiting:"读取中",locked:"已锁定",unknown:"未读取"}[records]) : ({ready:"正常",error:"需关注",warning:"需关注",waiting:"更新中",unavailable:"报价不可用",off:"未连接",unknown:"未确认"}[ui.activeTab === "market" ? state.scan : state.feed])}${ui.activeTab === "positions" && state.unavailableCount ? ` · ${formatCount(state.unavailableCount)}笔处置待核查` : ""}`;
+  $("#module-status-label").textContent = `${info[0]}${ui.activeTab === "records" ? ({ready:"已同步",error:"更新失败",waiting:"读取中",locked:"已锁定",unknown:"未读取"}[records]) : ({ready:"正常",error:"需关注",warning:"需关注",waiting:"更新中",unavailable:"报价不可用",off:"未连接",unknown:"未确认"}[ui.activeTab === "market" ? state.scan : state.feed])}${ui.activeTab === "positions" && state.unavailableCount ? ` · ${formatCount(state.unavailableCount)} 笔暂无报价` : ""}`;
   $("#module-status-detail").textContent = info.slice(1).join("\n");
 }
 
@@ -1702,59 +1706,167 @@ async function loadPerformance() {
   try {
     const result=await api(`/api/${mode}/performance`);
     if (mode !== ui.displayMode || version !== ui.mutationVersion) return;
+    if (result.generation && ui.dashboard?.generation && result.generation !== ui.dashboard.generation) return;
+    if (ui.performance?.generation && ui.performance.generation !== result.generation) resetCurveView();
     ui.performance = result; ui.performanceError = result.error; ui.performanceAt=Date.now(); ui.chartIndex=null; drawCurve();
   } catch(error) {
     if (mode === ui.displayMode && version === ui.mutationVersion) { ui.performanceError=error.message; ui.performanceAt=Date.now(); drawCurve(); }
   } finally { ui.performanceLoading=false; }
 }
 
-function drawCurve() {
-  const svg=$("#equity-svg"), button=$("#equity-chart");
-  const points=curvePoints(), segments=curveSegments(points), valid=segments.flat();
-  const w=Math.max(180,button.getBoundingClientRect().width),h=112,left=30,right=10,top=10,bottom=23;
-  svg.setAttribute("viewBox",`0 0 ${w} ${h}`); svg.replaceChildren();
-  const add=(tag,attrs,text)=>{const node=document.createElementNS("http://www.w3.org/2000/svg",tag);for(const [k,v] of Object.entries(attrs))node.setAttribute(k,String(v));if(text!==undefined)node.textContent=text;svg.appendChild(node);return node;};
-  const note=$("#curve-note");
-  note.hidden=!ui.performanceError;
-  note.textContent=ui.performanceError ? `曲线更新失败：${ui.performanceError}` : "";
-  $("#curve-status").textContent = valid.length ? "" : ui.performanceError ? "更新失败" : "";
-  if (!valid.length) {add("text",{x:w/2,y:58,"text-anchor":"middle"},ui.displayMode === "LIVE" && (ui.performance?.locked || ui.dashboard?.positionsAvailable === false) ? "LIVE 已锁定，历史暂不可读" : !ui.dashboard ? "正在读取收益状态…" : "暂无收益数据");return;}
-  const values=valid.map(p=>Number(p.pnl)),min=Math.min(0,...values),max=Math.max(0,...values),pad=Math.max((max-min)*.15,.01);
-  const from=points[0].at,to=points.at(-1).at;
-  const x=t=>left+(to === from ? 0.5 : (t-from)/(to-from))*(w-left-right), y=v=>top+(max+pad-v)/(max-min+2*pad)*(h-top-bottom);
-  add("line",{x1:left,x2:w-right,y1:y(0),y2:y(0),class:"curve-zero"});add("text",{x:0,y:y(0)+4},"0");
-  for (const segment of segments) {
-    if(segment.length>1)add("polyline",{points:segment.map(p=>`${x(p.at)},${y(Number(p.pnl))}`).join(" "),class:"curve-line"});
-    else add("circle",{cx:x(segment[0].at),cy:y(Number(segment[0].pnl)),r:2,class:"curve-point"});
-  }
-  const selected=ui.chartIndex===null?valid.at(-1):valid[Math.min(valid.length-1,ui.chartIndex)];
-  add("circle",{cx:x(selected.at),cy:y(Number(selected.pnl)),r:3,class:"curve-point"});
-  const utcDay=p=>utcDayFormatter.format(p.bucket*86400000);
-  if(ui.chartIndex!==null){add("line",{x1:x(selected.at),x2:x(selected.at),y1:top,y2:h-bottom,class:"curve-guide"});$("#curve-status").textContent=`${ui.curveGranularity==="D"?`${utcDay(selected)} UTC`:formatDate(selected.at)} · ${formatMoney(selected.pnl,true)}`;}
-  const dateLabel=p=>ui.curveGranularity==="D"?utcDay(p):from===to?formatClock(p.at):new Date(from).toDateString()===new Date(to).toDateString()?formatClock(p.at).slice(0,5):formatDate(p.at);
-  add("text",{x:left,y:h-3,"text-anchor":"start"},dateLabel(points[0]));if(to!==from)add("text",{x:w-right,y:h-3,"text-anchor":"end"},dateLabel(points.at(-1)));
-}
-
 function curvePoints() {
+  if (ui.displayMode === "LIVE" && !liveAccountVisible()) return [];
   return ui.performance?.series?.[ui.curveGranularity] || ui.performance?.points || [];
 }
 
+function curveBounds() {
+  if (ui.displayMode === "LIVE" && !liveAccountVisible()) return null;
+  const series = ui.performance?.series;
+  return curveTimeBounds(series ? [...(series.H || []), ...(series.D || [])] : ui.performance?.points || []);
+}
+
+function currentCurveWindow() {
+  return resolveCurveWindow(curveBounds(), ui.curveEnd);
+}
+
+function resetCurveView() {
+  ui.curveEnd = null;
+  ui.curveDrag = null;
+  ui.chartIndex = null;
+  $("#equity-chart").classList.remove("is-dragging");
+}
+
+function moveCurve(days) {
+  const view = currentCurveWindow();
+  if (!view) return;
+  const next = resolveCurveWindow(curveBounds(), view.to + days * 86400000);
+  ui.curveEnd = next.atLatest ? null : next.to;
+  ui.chartIndex = null;
+  drawCurve();
+}
+
+function drawCurve() {
+  ui.curveAccountVisible = ui.displayMode !== "LIVE" || liveAccountVisible();
+  const svg = $("#equity-svg"), button = $("#equity-chart"), view = currentCurveWindow();
+  const segments = curveSegments(curveWindowPoints(curvePoints(), view));
+  const valid = segments.flat().filter(point => point.at >= view.from && point.at <= view.to);
+  const w = Math.max(180, button.getBoundingClientRect().width), h = 200, left = 12, right = 12, top = 16, bottom = 28;
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  svg.replaceChildren();
+  const add = (tag, attrs, text, parent = svg) => {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value));
+    if (text !== undefined) node.textContent = text;
+    parent.appendChild(node);
+    return node;
+  };
+  $("#curve-older").disabled = !view?.canOlder;
+  $("#curve-newer").disabled = !view?.canNewer;
+  $("#curve-latest").hidden = !view || view.atLatest;
+  $("#curve-period").textContent = !view || view.atLatest ? "近 7 天" : "历史";
+  $("#curve-status").textContent = view?.canOlder || view?.canNewer ? "左右拖动查看历史" : "";
+  $("#curve-note").hidden = !ui.performanceError;
+  $("#curve-note").textContent = ui.performanceError ? "历史更新失败，暂显示上次记录。" : "";
+  $("#curve-note").title = ui.performanceError || "";
+  if (!view || !valid.length) {
+    add("text", {x:w/2,y:90,"text-anchor":"middle"}, ui.displayMode === "LIVE" && !liveAccountVisible()
+      ? "钱包未就绪，历史暂不可读" : !ui.dashboard ? "读取中…" : view ? "这段时间暂无记录" : "暂无收益记录");
+    return;
+  }
+  const values = valid.map(point => Number(point.pnl));
+  const min = Math.min(...values), max = Math.max(...values), pad = Math.max((max-min)*0.18, 0.02);
+  const x = at => left + (view.to === view.from ? 0.5 : (at-view.from)/(view.to-view.from)) * (w-left-right);
+  const y = value => top + (max+pad-value)/(max-min+2*pad) * (h-top-bottom);
+  const clip = add("clipPath", {id:"curve-clip"});
+  add("rect", {x:left,y:top,width:w-left-right,height:h-top-bottom}, undefined, clip);
+  const plot = {"clip-path":"url(#curve-clip)"};
+  if (min-pad <= 0 && max+pad >= 0) add("line", {x1:left,x2:w-right,y1:y(0),y2:y(0),class:"curve-zero"});
+  for (const segment of segments) {
+    if (segment.length > 1) add("polyline", {...plot,points:segment.map(point=>`${x(point.at)},${y(Number(point.pnl))}`).join(" "),class:"curve-line"});
+    else add("circle", {...plot,cx:x(segment[0].at),cy:y(Number(segment[0].pnl)),r:2,class:"curve-point"});
+  }
+  const selected = ui.chartIndex === null ? valid.at(-1) : valid[Math.min(valid.length-1,ui.chartIndex)];
+  add("circle", {...plot,cx:x(selected.at),cy:y(Number(selected.pnl)),r:3.5,class:"curve-point"});
+  if (ui.chartIndex !== null) {
+    add("line", {x1:x(selected.at),x2:x(selected.at),y1:top,y2:h-bottom,class:"curve-guide"});
+    const date = ui.curveGranularity === "D" && Number.isInteger(selected.bucket) ? `${utcDayFormatter.format(selected.bucket * 86400000)} UTC` : formatDate(selected.at);
+    $("#curve-status").textContent = `${date} · ${formatMoney(selected.pnl,true)}`;
+  }
+  const dateFormat = new Intl.DateTimeFormat("zh-CN", {month:"2-digit",day:"2-digit",...(ui.curveGranularity === "D" ? {timeZone:"UTC"} : {})});
+  add("text", {x:left,y:h-4,"text-anchor":"start"}, dateFormat.format(view.from));
+  if (view.to !== view.from) add("text", {x:w-right,y:h-4,"text-anchor":"end"}, dateFormat.format(view.to));
+  button.setAttribute("aria-label", `${dateFormat.format(view.from)}至${dateFormat.format(view.to)}盈亏估算曲线，可左右拖动查看历史`);
+}
+
+function selectCurvePoint(clientX) {
+  const view = currentCurveWindow();
+  if (!view) return;
+  const points = curveSegments(curveWindowPoints(curvePoints(),view)).flat().filter(point=>point.at >= view.from && point.at <= view.to);
+  if (!points.length) return;
+  const box = $("#equity-chart").getBoundingClientRect();
+  const target = view.from + Math.max(0,Math.min(1,(clientX-box.left-12)/Math.max(1,box.width-24))) * (view.to-view.from);
+  ui.chartIndex = points.reduce((best,point,index)=>Math.abs(point.at-target)<Math.abs(points[best].at-target)?index:best,0);
+  drawCurve();
+}
+
 for (const scale of document.querySelectorAll("[data-curve-scale]")) scale.addEventListener("click", () => {
-  ui.curveGranularity=scale.dataset.curveScale;
-  ui.chartIndex=null;
+  ui.curveGranularity = scale.dataset.curveScale;
+  ui.chartIndex = null;
   for (const other of document.querySelectorAll("[data-curve-scale]")) other.setAttribute("aria-pressed",String(other===scale));
   drawCurve();
 });
-
-$("#equity-chart").addEventListener("pointermove",event=>{
-  if(event.pointerType!=="mouse"&&!event.buttons)return;
-  const all=curvePoints(),points=curveSegments(all).flat();if(!points.length)return;
-  const box=event.currentTarget.getBoundingClientRect();
-  const target=all[0].at+Math.max(0,Math.min(1,(event.clientX-box.left-30)/(box.width-40)))*(all.at(-1).at-all[0].at);
-  ui.chartIndex=points.reduce((best,p,i)=>Math.abs(p.at-target)<Math.abs(points[best].at-target)?i:best,0);drawCurve();
+$("#curve-older").addEventListener("click",()=>moveCurve(-7));
+$("#curve-newer").addEventListener("click",()=>moveCurve(7));
+$("#curve-latest").addEventListener("click",()=>{resetCurveView();drawCurve();});
+$("#equity-chart").addEventListener("pointerdown",event=>{
+  if (event.button !== 0 || event.isPrimary === false) return;
+  const view = currentCurveWindow();
+  if (!view) return;
+  ui.curveDrag = {id:event.pointerId,x:event.clientX,y:event.clientY,view,moved:false};
+  event.currentTarget.setPointerCapture(event.pointerId);
 });
-$("#equity-chart").addEventListener("pointerleave",()=>{ui.chartIndex=null;drawCurve();});
-$("#equity-chart").addEventListener("keydown",e=>{if(!["ArrowLeft","ArrowRight"].includes(e.key))return;e.preventDefault();const n=curveSegments(curvePoints()).flat().length;if(!n)return;ui.chartIndex=Math.max(0,Math.min(n-1,(ui.chartIndex??n-1)+(e.key==="ArrowLeft"?-1:1)));drawCurve();});
+$("#equity-chart").addEventListener("pointermove",event=>{
+  const drag = ui.curveDrag;
+  if (drag && drag.id === event.pointerId) {
+    const dx = event.clientX-drag.x, dy = event.clientY-drag.y;
+    if (!drag.moved && (Math.abs(dx)<6 || Math.abs(dx)<Math.abs(dy))) return;
+    drag.moved = true;
+    const end = panCurveWindow(drag.view,dx,Math.max(1,event.currentTarget.getBoundingClientRect().width-24));
+    ui.curveEnd = end === drag.view.historyTo ? null : end;
+    ui.chartIndex = null;
+    event.currentTarget.classList.add("is-dragging");
+    drawCurve();
+  } else if (event.pointerType === "mouse") selectCurvePoint(event.clientX);
+});
+function finishCurveDrag(event) {
+  const drag = ui.curveDrag;
+  if (!drag || drag.id !== event.pointerId) return;
+  ui.curveDrag = null;
+  event.currentTarget.classList.remove("is-dragging");
+  if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  if (event.type === "pointerup" && !drag.moved) selectCurvePoint(event.clientX);
+}
+$("#equity-chart").addEventListener("pointerup",finishCurveDrag);
+$("#equity-chart").addEventListener("pointercancel",finishCurveDrag);
+$("#equity-chart").addEventListener("lostpointercapture",finishCurveDrag);
+$("#equity-chart").addEventListener("pointerleave",()=>{if(!ui.curveDrag){ui.chartIndex=null;drawCurve();}});
+$("#equity-chart").addEventListener("keydown",event=>{
+  if (event.shiftKey && ["ArrowLeft", "ArrowRight"].includes(event.key)) {
+    event.preventDefault();
+    const view = currentCurveWindow();
+    if (!view) return;
+    const count = curveSegments(curveWindowPoints(curvePoints(),view)).flat().filter(point=>point.at>=view.from && point.at<=view.to).length;
+    if (!count) return;
+    ui.chartIndex = Math.max(0,Math.min(count-1,(ui.chartIndex ?? count-1)+(event.key === "ArrowLeft" ? -1 : 1)));
+    drawCurve();
+    return;
+  }
+  const days = {ArrowLeft:-1,ArrowRight:1,PageUp:-7,PageDown:7}[event.key];
+  if (days) {event.preventDefault();moveCurve(days);}
+  else if (event.key === "Home" || event.key === "End") {
+    event.preventDefault();ui.curveEnd = event.key === "End" ? null : curveBounds()?.from;ui.chartIndex=null;drawCurve();
+  }
+});
 new ResizeObserver(drawCurve).observe($("#equity-chart"));
 $("#status-toggle").addEventListener("click",()=>{const el=$("#runtime-status");el.hidden=!el.hidden;$("#status-toggle").setAttribute("aria-expanded",String(!el.hidden));});
 for (const tab of document.querySelectorAll('.view-tabs [role="tab"]')) tab.addEventListener("click",()=>{

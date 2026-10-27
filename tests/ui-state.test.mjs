@@ -166,7 +166,7 @@ for (const [control,eventType,url] of [
  const page=pageHarness(), {ui,element,context}=page;
  seedTestDashboard(page);
  let resolveMutation,requests=0;
- context.fetch=(path)=>path===url?new Promise(resolve=>{requests++;resolveMutation=resolve;}):new Promise(()=>{});
+ context.fetch=(path)=>path.split('?')[0]===url?new Promise(resolve=>{requests++;resolveMutation=resolve;}):new Promise(()=>{});
  const pending=element(`#${control}`).handlers[eventType]({preventDefault(){}});
  assert.equal(requests,1);
  assert.equal(ui.controlPending,true);
@@ -192,7 +192,7 @@ test('a failed stale sort reply does not read cleared preferences or show anothe
  const page=pageHarness(), {ui,element,context}=page;
  seedTestDashboard(page);
  let resolveSort;
- context.fetch=path=>path==='/api/test/preferences'?new Promise(resolve=>{resolveSort=resolve;}):new Promise(()=>{});
+ context.fetch=path=>path.split('?')[0]==='/api/test/preferences'?new Promise(resolve=>{resolveSort=resolve;}):new Promise(()=>{});
  const pending=element('#sort-toggle').handlers.click();
  ui.displayMode='LIVE';ui.mutationVersion++;ui.preferences=null;ui.dashboard=null;
  const message=element('#message').textContent;

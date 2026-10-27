@@ -7,7 +7,7 @@ export PATH
 app_dir=/opt/pm-nautilus
 
 printf '%s\n' '=== PM-NAUTILUS READ-ONLY SNAPSHOT ==='
-printf '%s\n' 'monitor_version=3'
+printf '%s\n' 'monitor_version=4'
 printf 'checked_at='; date -Is
 printf 'host='; hostname
 printf 'uptime='; uptime -p
@@ -56,6 +56,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from contextlib import closing
 
 app_dir = Path(sys.argv[1])
 maintenance = Path("/var/lib/pm-nautilus-maintenance/status.json")
@@ -178,6 +179,60 @@ if database.exists():
         print(f"sqlite_error={type(exc).__name__}: {exc}")
 else:
     print("sqlite_error=database not found")
+
+# Keep the legacy account-1 snapshot above stable. Additional accounts emit only
+# health and storage metadata, never wallet, position or transaction contents.
+for account_id in range(1, 11):
+    summary = {"accountId": account_id}
+    try:
+        data = get_json(
+            f"/api/dashboard?mode=TEST&account_id={account_id}&limit=1&details=summary",
+            authenticated=True,
+        )
+        scan = data.get("marketScan") or {}
+        summary.update(
+            returnedAccountId=data.get("accountId"),
+            status=(data.get("strategy") or {}).get("status"),
+            accountError=data.get("accountError"),
+            scanning=scan.get("scanning"),
+            backgroundErrors={key: scan[key] for key in (
+                "serviceError", "streamError", "lastError", "categoryError"
+            ) if scan.get(key)},
+        )
+        if account_id != 1:
+            started = time.monotonic()
+            result = get_json(
+                f"/api/TEST/validation?account_id={account_id}",
+                authenticated=True,
+                timeout=180,
+            )
+            summary["validationOk"] = result.get("ok")
+            summary["validationErrorCount"] = len(result.get("errors") or [])
+            summary["validationSeconds"] = round(time.monotonic() - started, 3)
+    except Exception as exc:
+        summary["applicationError"] = type(exc).__name__
+    account_root = app_dir / "runtime" / "server" / "TEST"
+    account_database = (
+        account_root / "state.sqlite" if account_id == 1
+        else account_root / "accounts" / str(account_id) / "state.sqlite"
+    )
+    try:
+        # mode=ro includes committed WAL changes without creating missing files.
+        with closing(sqlite3.connect(
+            account_database.resolve().as_uri() + "?mode=ro", uri=True, timeout=10
+        )) as connection:
+            summary["sqliteQuickCheck"] = connection.execute("PRAGMA quick_check(1)").fetchone()[0]
+        summary["storageBytes"] = {
+            name: path.stat().st_size if path.exists() else 0
+            for name, path in (
+                ("database", account_database),
+                ("wal", Path(str(account_database) + "-wal")),
+                ("shm", Path(str(account_database) + "-shm")),
+            )
+        }
+    except Exception as exc:
+        summary["sqliteError"] = type(exc).__name__
+    print("test_account_health=" + json.dumps(summary, ensure_ascii=False, sort_keys=True))
 PY
 
 printf '%s\n' '--- recent application errors (last 4h, max 80 lines) ---'

@@ -5,8 +5,9 @@ import vm from 'node:vm';
 const web = new URL('../src/pm_nautilus/web/', import.meta.url);
 export const profile = JSON.parse(readFileSync(new URL('../config/strategy-profile.json', import.meta.url), 'utf8'));
 
-export function pageHarness() {
+export function pageHarness({savedAccount = null} = {}) {
   const nodes = new Map();
+  const sessionStore = new Map(savedAccount === null ? [] : [['pm-test-account', String(savedAccount)]]);
   let svgId = 0;
   function matches(node, selector) {
     const parts = selector.trim().split(/\s*(>)\s*|\s+/).filter(Boolean);
@@ -122,6 +123,7 @@ export function pageHarness() {
     ResizeObserver: class { observe() {} },
     window: {
       location: {protocol: 'https:', hostname: 'localhost'},
+      sessionStorage: {getItem(key) { return sessionStore.get(key) ?? null; }, setItem(key, value) { sessionStore.set(key, String(value)); }},
       setTimeout() { return 1; }, clearTimeout() {}, intervals: [], setInterval(fn) { this.intervals.push(fn); }, confirm() { return true; },
     },
     document: {
@@ -137,13 +139,13 @@ export function pageHarness() {
   const helpers = ['ui-state.js', 'curve-window.js'].map(file => readFileSync(new URL(file, web), 'utf8').replace(/export (function|const) /g, '$1 ')).join('\n');
   const app = readFileSync(new URL('app.js', web), 'utf8').replace(/^import .*\n/gm, '');
   vm.runInContext(`${helpers}\n${app}\nglobalThis.pageUi = ui; globalThis.renderCandidatesForTest = renderCandidates; globalThis.loadTradeRecordsForTest = loadTradeRecords; globalThis.renderCategoriesForTest = renderCategories; globalThis.applyDashboardForTest = applyDashboard;`, context);
-  return {context, element, ui: context.pageUi, requests, html};
+  return {context, element, ui: context.pageUi, requests, html, sessionStore};
 }
 
 export function seedTestDashboard(page) {
   const {ui, element} = page;
   ui.preferences = {...profile};
-  ui.dashboard = {executionMode: 'TEST', preferences: ui.preferences, strategy: {status: 'PAUSED'}, capitalEditable: true};
+  ui.dashboard = {executionMode: 'TEST', accountId: ui.testAccountId, preferences: ui.preferences, strategy: {status: 'PAUSED'}, capitalEditable: true};
   ui.dashboardAt = Date.now();
   ui.strategyStatus = 'PAUSED';
   for (const kind of ['binary', 'ternary', 'multi']) element(`#${kind}-market`).checked = true;

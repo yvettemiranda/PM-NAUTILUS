@@ -21,6 +21,7 @@ class TestAccountContext:
     sampler: object = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     error: str | None = None
+    resetting: bool = False
 
 
 class TestAccounts:

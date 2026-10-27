@@ -511,15 +511,27 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             return None
         return test_accounts.account_id(account_id)
 
+    def test_context(account_id):
+        context = test_accounts.contexts[test_accounts.account_id(account_id)]
+        if shutting_down:
+            raise HTTPException(503, "服务正在关闭")
+        if context.error:
+            raise HTTPException(503, "该TEST账户需重新启动程序后恢复")
+        if context.resetting:
+            raise HTTPException(503, "该TEST账户正在重置，请稍后重试")
+        if context.runtime is None or getattr(context.runtime.store, "_closed", False):
+            raise HTTPException(503, "该TEST账户暂不可用")
+        return context
+
     async def test_operation(account_id, operation):
         context = test_accounts.contexts[test_accounts.account_id(account_id)]
         # The context/lock survives reset. Every TEST request resolves its runtime
-        # only after acquiring this account's lock, never from a global selection.
+        # after acquiring this account's lock, never from a global selection.
+        # Synchronous reads and PAUSE instead use test_context without awaiting:
+        # they remain responsive during an integrity reader, and PAUSE invalidates
+        # the epoch of an in-flight START. A reset gates these through its phase.
         async with context.lock:
-            if shutting_down:
-                raise HTTPException(503, "服务正在关闭")
-            if context.error:
-                raise HTTPException(503, "该TEST账户需重新启动程序后恢复")
+            test_context(account_id)
             # A canceled HTTP request must not release ownership while its native,
             # integrity worker or reset finalizer can still access the old store.
             return await _finish_before_cancel(operation(context))
@@ -974,7 +986,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         mode = mode_name(mode)
         number = account_number(mode, account_id)
 
-        async def read(_context=None):
+        def read():
             data = view(
                 mode,
                 limit if details in {"all", "market"} else 0,
@@ -984,7 +996,9 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             data["details"] = details
             return data
 
-        return await test_operation(number, read) if number is not None else await read()
+        if number is not None:
+            test_context(number)
+        return read()
 
     @app.get("/api/live/wallet")
     async def get_live_wallet():
@@ -1352,11 +1366,8 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         mode = mode_name(mode)
         number = account_number(mode, account_id)
         if number is not None:
-
-            async def read(context):
-                return view(mode, account_id=context.account_id)
-
-            return await test_operation(number, read)
+            context = test_context(number)
+            return view(mode, account_id=context.account_id)
         return view(mode)
 
     @app.put("/api/{mode}/preferences")
@@ -1423,12 +1434,9 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         mode = mode_name(mode)
         number = account_number(mode, account_id)
         if number is not None:
-
-            async def pause_test(context):
-                context.runtime.pause()
-                return view("TEST", account_id=number)
-
-            return await test_operation(number, pause_test)
+            context = test_context(number)
+            context.runtime.pause()
+            return view("TEST", account_id=number)
         if mode in runtimes:
             runtimes[mode].pause()
         return view(mode)
@@ -1447,6 +1455,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             runtime = context.runtime
             if runtime.status != "PAUSED":
                 raise ValueError("先暂停该TEST账户再重置")
+            context.resetting = True
             try:
                 context.sampler.task.cancel()
                 await asyncio.gather(context.sampler.task, return_exceptions=True)
@@ -1463,6 +1472,8 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 # lock. No orphan service may keep using a failed/closed ledger.
                 await quarantine_test_account(context, exc)
                 raise
+            finally:
+                context.resetting = False
             return view("TEST", account_id=number)
 
         return await test_operation(number, reset_test)
@@ -1508,7 +1519,10 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         if number is not None:
 
             async def validate_test(context):
-                return test_identity(context, await context.runtime.validate_async())
+                result = await context.runtime.validate_async()
+                # Preserve the legacy validation shape when no account was
+                # selected. New clients explicitly identify even account one.
+                return test_identity(context, result) if account_id is not None else result
 
             return await test_operation(number, validate_test)
         if mode not in runtimes:

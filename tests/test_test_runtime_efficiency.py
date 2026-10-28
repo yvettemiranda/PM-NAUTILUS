@@ -98,7 +98,8 @@ def test_paused_full_exit_and_callback_keep_unowned_previews_dirty(tmp_path, mon
         runtime.add_tokens([other])
         quote(runtime, "2")
         dashboard(runtime)
-        assert "other" not in runtime.dirty
+        assert "other" in runtime.dirty
+        assert "other" not in runtime.test_market_pending_events()
         original_fill = runtime.apply_fill
 
         def callback_fill(event, intent, current_token):
@@ -110,6 +111,7 @@ def test_paused_full_exit_and_callback_keep_unowned_previews_dirty(tmp_path, mon
         assert not runtime.business["cycles"]
         assert len(runtime.native.cache.orders()) == 2
         assert {"event", "other"} <= runtime.dirty
+        assert {"event", "other"} <= runtime.test_market_pending_events()
         assert runtime.cash() == 100_750_000
         assert runtime.validate()["ok"]
         before = runtime.store.db.total_changes

@@ -60,6 +60,13 @@ def test_target_tick_cap_and_actual_fill():
     ] == [30000, 45000]
 
 
+@pytest.mark.parametrize("tick,expected", [(10_000, 60_000), (1_000, 51_000), (100, 50_100)])
+def test_three_cent_fill_target_respects_market_price_step(tick, expected):
+    config = Preferences(targetSellPriceIncreaseCents="1", targetSellPriceMultiplier="1.67")
+    # max(3c + 1c, 3c * 1.67) = 5.01c before rounding up to a legal order price.
+    assert target_price(30_000, tick, config) == expected
+
+
 def test_buy_fee_is_cash_and_all_in_budget_is_not_exceeded():
     fills = plan_buy(
         [(100_000, 100_000_000)],

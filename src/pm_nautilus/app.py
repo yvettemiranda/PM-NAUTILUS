@@ -19,8 +19,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import Preferences
-from .market import MarketService
 from .test_market import TestMarketHub as PublicMarketHub
+from .test_market import create_market_service as MarketService
 from .redemption import RedemptionService
 from .store import Store
 from .test_runtime import create_runtime as Runtime
@@ -234,6 +234,17 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         }
 
     async def attach(mode, runtime, wallet=None, *, account_id=1):
+        check_start = getattr(runtime, "_check_start_readiness", None)
+
+        def check_application_start():
+            # Also rechecked by the original async START after its worker ends.
+            # Keep accepted requests from entering RUNNING during shutdown.
+            if shutting_down:
+                raise ValueError("服务正在关闭，不能启动交易")
+            check_start()
+
+        if check_start is not None:
+            runtime._check_start_readiness = check_application_start
         context = test_accounts.attach_runtime(account_id, runtime) if mode == "TEST" else None
         if context is None or account_id == 1:
             runtimes[mode] = runtime
@@ -378,57 +389,96 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
 
             async def shutdown():
                 try:
-                    async with wallet_lock, test_accounts.quiesce():
+                    async with wallet_lock:
                         failures = []
-                        if retention_task is not None:
-                            retention_task.cancel()
-                            await asyncio.gather(retention_task, return_exceptions=True)
-                        owned_runtimes = activating | dict(runtime_items(include_failed=True))
-                        for sampler in sampler_values():
-                            sampler.task.cancel()
-                        await asyncio.gather(
-                            *(s.task for s in sampler_values()), return_exceptions=True
-                        )
-                        for r in owned_runtimes.values():
+                        # Stop new trading before waiting for TEST readers. A
+                        # large simulation audit must not postpone LIVE pause
+                        # or private-client cleanup. Keep its SQLite open until
+                        # the original client has drained native callbacks.
+                        owned = activating | dict(runtime_items(include_failed=True))
+                        paused = set()
+                        for r in sorted(owned.values(), key=lambda r: r.mode != "LIVE"):
                             if getattr(r.store, "_closed", False):
                                 continue
                             try:
                                 r.pause()
+                                paused.add(id(r))
                             except Exception as exc:
                                 failures.append(exc)
-                        for _, service in service_items(include_failed=True):
+                        live = owned.get("LIVE")
+                        live_service = services.get("LIVE")
+                        if live is not None and not getattr(live.store, "_closed", False):
+                            sampler = samplers.get("LIVE")
+                            if sampler is not None:
+                                sampler.task.cancel()
+                                await asyncio.gather(sampler.task, return_exceptions=True)
+                            if live_service is not None:
+                                try:
+                                    await live_service.close()
+                                except Exception as exc:
+                                    failures.append(exc)
                             try:
-                                await service.close()
-                            except Exception as exc:
-                                failures.append(exc)
-                        if market_hub is not None:
-                            try:
-                                await market_hub.close()
-                            except Exception as exc:
-                                failures.append(exc)
-                        for r in owned_runtimes.values():
-                            if getattr(r.store, "_closed", False):
-                                continue
-                            try:
-                                if r.mode == "LIVE":
-                                    # shutdown drains native callbacks while SQLite is still open.
-                                    await r.client.shutdown()
-                                else:
-                                    r.native.stop()
+                                await live.client.shutdown()
                             except Exception as exc:
                                 failures.append(exc)
                             finally:
-                                r.store.close()
-                        for s in cold.values():
-                            s.close()
-                        if failures:
-                            kinds = ",".join(sorted({type(error).__name__ for error in failures}))
-                            raise RuntimeError(f"组件关闭失败 ({kinds})") from None
+                                live.store.close()
+                        await finish_test_shutdown(failures, paused, live_service)
                 finally:
                     try:
                         await storage_guard.close()
                     finally:
                         lock.close()
+
+            async def finish_test_shutdown(failures, paused, live_service):
+                async with test_accounts.quiesce():
+                    if retention_task is not None:
+                        retention_task.cancel()
+                        await asyncio.gather(retention_task, return_exceptions=True)
+                    owned_runtimes = activating | dict(runtime_items(include_failed=True))
+                    for sampler in sampler_values():
+                        sampler.task.cancel()
+                    await asyncio.gather(
+                        *(s.task for s in sampler_values()), return_exceptions=True
+                    )
+                    for r in owned_runtimes.values():
+                        if getattr(r.store, "_closed", False):
+                            continue
+                        if id(r) not in paused:
+                            try:
+                                r.pause()
+                            except Exception as exc:
+                                failures.append(exc)
+                    for _, service in service_items(include_failed=True):
+                        if service is live_service:
+                            continue
+                        try:
+                            await service.close()
+                        except Exception as exc:
+                            failures.append(exc)
+                    if market_hub is not None:
+                        try:
+                            await market_hub.close()
+                        except Exception as exc:
+                            failures.append(exc)
+                    for r in owned_runtimes.values():
+                        if getattr(r.store, "_closed", False):
+                            continue
+                        try:
+                            if r.mode == "LIVE":
+                                # shutdown drains native callbacks while SQLite is still open.
+                                await r.client.shutdown()
+                            else:
+                                r.native.stop()
+                        except Exception as exc:
+                            failures.append(exc)
+                        finally:
+                            r.store.close()
+                    for s in cold.values():
+                        s.close()
+                    if failures:
+                        kinds = ",".join(sorted({type(error).__name__ for error in failures}))
+                        raise RuntimeError(f"组件关闭失败 ({kinds})") from None
 
             # Retain process ownership until every private worker and component
             # has finished, even if lifespan itself is cancelled repeatedly.
@@ -1413,8 +1463,17 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         mode = mode_name(mode)
         number = account_number(mode, account_id)
         if number is not None:
+            requested = test_context(number).runtime
+            requested_generation = requested.store.generation
+            requested_epoch = requested._start_epoch
 
             async def start_test(context):
+                if (
+                    context.runtime is not requested
+                    or context.runtime.store.generation != requested_generation
+                    or context.runtime._start_epoch != requested_epoch
+                ):
+                    raise ValueError("启动排队期间状态已更改，请重新点击 START")
                 await context.service.start_async()
                 return view("TEST", account_id=number)
 

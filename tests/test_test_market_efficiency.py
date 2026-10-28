@@ -10,16 +10,17 @@ import pytest
 
 from pm_nautilus.market import MarketService, PublicMarketHub
 from pm_nautilus.strategy import Runtime
-from pm_nautilus.test_market import TestMarketHub
+from pm_nautilus.test_market import TestMarketHub, TestMarketService, create_market_service
 from pm_nautilus.test_runtime import TestRuntime
 
 from test_live_recovery import controlled_runtime
 from test_market_efficiency import IdleSocket, public_book, settle_tasks
 from test_runtime import setup
+from test_lifecycle import controlled_factory
 
 
 @asynccontextmanager
-async def complete_hub(path, monkeypatch, count=2):
+async def complete_hub(path, monkeypatch, count=2, service_type=MarketService):
     reference, clock, token = setup(path / "reference")
     reference.close()
     sockets = []
@@ -37,7 +38,7 @@ async def complete_hub(path, monkeypatch, count=2):
             runtime = TestRuntime(path / str(number) / "test.sqlite", clock=clock)
             runtime.add_tokens([token])
             runtimes.append(runtime)
-            services.append(MarketService(runtime, hub=hub))
+            services.append(service_type(runtime, hub=hub))
         await hub.sync_subscriptions()
         await settle_tasks()
         hub.message(public_book(token), {token.token_id})
@@ -258,5 +259,58 @@ def test_any_live_consumer_always_runs_the_unchanged_parent_plan(tmp_path, monke
                     await hub.sync_subscriptions()
                 assert parent_calls == [hub] * 5 and hub.plan_skips == skips
                 await service.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", ["metadata", "tick", "preferences", "recovery", "missing"])
+def test_mixed_live_keeps_original_entry_and_invalidates_test_reuse(tmp_path, monkeypatch, change):
+    async def run():
+        async with complete_hub(tmp_path, monkeypatch, service_type=TestMarketService) as state:
+            hub, runtimes, services, _, token, clock = state
+            live = Runtime(
+                tmp_path / "live.sqlite", mode="LIVE", clock=clock, live_factory=controlled_factory
+            )
+            try:
+                live.add_tokens([token])
+                service = create_market_service(live, hub=hub)
+                assert type(service) is MarketService
+                assert type(services[0]) is TestMarketService
+                services.append(service)
+                await service.sync_subscriptions()
+                assert live.books["1"].ready
+                assert hub._complete_test_plan is not None
+                plans, skips = hub.plan_runs, hub.plan_skips
+                for _ in range(5):
+                    for test_service in services[:-1]:
+                        await test_service.sync_subscriptions()
+                assert hub.plan_runs == plans
+                assert hub.plan_skips == skips + 10
+                # LIVE and generic control requests always use the original
+                # complete planner, even after a valid TEST cache hit.
+                await service.sync_subscriptions()
+                await hub.sync_subscriptions()
+                assert hub.plan_runs == plans + 2
+                assert hub._test_sync_requester is None
+                plans, skips = hub.plan_runs, hub.plan_skips
+                if change == "metadata":
+                    live.tokens["1"] = replace(token, event_title="same ID, different metadata")
+                elif change == "tick":
+                    live.tokens["1"] = replace(token, tick=10_000)
+                elif change == "preferences":
+                    live.update_preferences({"orderAmount": "2"})
+                elif change == "recovery":
+                    service._availability_fresh_pending.add("1")
+                else:
+                    live.disconnect(["1"])
+                await services[0].sync_subscriptions()
+                assert hub.plan_runs == plans + 1
+                assert hub.plan_skips == skips
+                assert live.client._submit_order.await_count == 0
+                assert live.client._cancel_order.await_count == 0
+                # Close the LIVE subscription before closing its ledger.
+                await service.close()
+            finally:
+                live.close()
 
     asyncio.run(run())

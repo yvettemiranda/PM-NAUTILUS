@@ -63,6 +63,8 @@ const ui = {
   liveStrategyStatus: null,
   liveStatusAt: 0,
   configDirty: false,
+  configRevision: 0,
+  viewResponseError: null,
   loading: false,
   dashboardRequest: 0,
   reloadRequested: false,
@@ -137,6 +139,15 @@ function responseForView(data, target = viewContext()) {
 
 function accountLabel(target = viewContext()) {
   return target.mode === "TEST" ? `TEST 账户 ${target.accountId}` : "LIVE";
+}
+
+function acceptViewResponse(data, target) {
+  if (!sameView(target)) return false;
+  if (responseForView(data, target)) return true;
+  const message = "账户或版本响应与当前视图不兼容，请刷新页面后再操作。";
+  clearCurrentView({ responseError: message });
+  showMessage(message, true);
+  return false;
 }
 
 async function api(path, options = {}, target = viewContext()) {
@@ -747,7 +758,7 @@ function renderRunControls() {
     runToggle.textContent = running ? "Ⅱ" : "▶";
   }
   const storageBlocked = ui.dashboard?.storage?.canOpen === false;
-  runToggle.disabled = !ui.dashboard || !ui.dashboardAt || Boolean(ui.dashboardError) || ui.controlPending || (!running && storageBlocked) || (liveView && !running && (!liveStartAvailable() || ui.walletPending));
+  runToggle.disabled = !ui.dashboard || !ui.dashboardAt || Boolean(ui.dashboardError) || Boolean(ui.viewResponseError) || ui.controlPending || (!running && storageBlocked) || (liveView && !running && (!liveStartAvailable() || ui.walletPending));
   runToggle.title = !running && storageBlocked ? "存储保护中，暂不能开始新增买入" : runToggle.disabled && liveView ? "请先在下方连接、检查并启用实盘钱包" : "";
   runToggle.setAttribute(
     "aria-label",
@@ -769,14 +780,14 @@ function renderRunControls() {
       ? "修改总模拟资金前请先暂停TEST"
       : "总模拟资金仅能在暂停且没有交易记录时修改；如已有记录请先重置TEST";
   const reset = $("#reset-test");
-  reset.disabled = !paused || ui.controlPending || liveView;
+  reset.disabled = !paused || ui.controlPending || liveView || Boolean(ui.viewResponseError);
   $("#capital-label").textContent = liveView ? "实际账户余额（只读）" : "总模拟资金";
   $("#settings-mode").textContent = `${accountLabel()} 设置`;
   if (!reset.classList.contains("is-pending")) reset.textContent = ui.displayMode === "TEST" ? `重置账户 ${ui.testAccountId}` : "重置TEST";
   reset.title = paused ? "" : "重置前必须先暂停TEST";
-  $("#config-toggle").disabled = !ui.dashboard;
-  $("#save-config").disabled = !ui.dashboard || !ui.preferences || ui.controlPending;
-  $("#sort-toggle").disabled = !ui.dashboard || !ui.preferences || ui.controlPending;
+  $("#config-toggle").disabled = !ui.dashboard || Boolean(ui.viewResponseError);
+  $("#save-config").disabled = !ui.dashboard || !ui.preferences || ui.controlPending || Boolean(ui.viewResponseError);
+  $("#sort-toggle").disabled = !ui.dashboard || !ui.preferences || ui.controlPending || Boolean(ui.viewResponseError);
 }
 
 function renderPositions(positions = []) {
@@ -987,7 +998,7 @@ function tradeRecordMarkup(record, open = false) {
 }
 
 async function loadTradeRecords({ silent = false, more = false } = {}) {
-  if (ui.tradeRecordsLoading) return;
+  if (ui.tradeRecordsLoading || ui.viewResponseError) return;
   const target = viewContext();
   const request = ++ui.recordRequest;
   ui.tradeRecordsLoading = true;
@@ -998,7 +1009,7 @@ async function loadTradeRecords({ silent = false, more = false } = {}) {
     const since = !more ? ui.recordHead : null;
     const query = `limit=20&paged=true${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${since ? `&since=${encodeURIComponent(since)}` : ""}`;
     const response = await api(`/api/test/trade-records?${query}`, {}, target);
-    if (!sameView(target) || !responseForView(response, target) || request !== ui.recordRequest) return;
+    if (!sameView(target) || request !== ui.recordRequest || !acceptViewResponse(response, target)) return;
     if (response.generation && ui.dashboard?.generation && response.generation !== ui.dashboard.generation) return;
     const rows = Array.isArray(response.records) ? response.records : [];
     if (ui.recordGeneration !== response.generation) {
@@ -1312,6 +1323,7 @@ function applyDashboard(dashboard) {
 }
 
 async function loadDashboard({ silent = false } = {}) {
+  if (ui.viewResponseError) return;
   if (ui.loading) {
     ui.reloadRequested = true;
     return;
@@ -1324,7 +1336,7 @@ async function loadDashboard({ silent = false } = {}) {
     const details = ui.activeTab === "records" ? "summary" : ui.activeTab;
     const positions = ui.positionsExpanded ? "" : `&position_limit=${POSITION_PREVIEW_LIMIT}`;
     const dashboard = await api(`/api/dashboard?limit=${ui.visibleCandidateCount}&details=${details}${positions}`, {}, target);
-    if (sameView(target) && responseForView(dashboard, target) && requestedTab === ui.activeTab && request === ui.dashboardRequest) applyDashboard(dashboard);
+    if (sameView(target) && requestedTab === ui.activeTab && request === ui.dashboardRequest && acceptViewResponse(dashboard, target)) applyDashboard(dashboard);
   } catch (error) {
     if (!sameView(target) || request !== ui.dashboardRequest) return;
     ui.dashboardError = error.message; renderStatus(); renderRunControls();
@@ -1468,6 +1480,7 @@ $("#config-close").addEventListener("click", () => {
 
 $("#config-form").addEventListener("input", () => {
   ui.configDirty = true;
+  ui.configRevision += 1;
   renderTargetSellFormula();
   if (ui.displayMode === "LIVE") renderLiveWallet();
 });
@@ -1518,6 +1531,7 @@ $("#config-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (ui.controlPending || !ui.preferences || !ui.dashboard) return;
   const target = viewContext(), request = ++ui.controlRequest;
+  const submittedRevision = ui.configRevision;
   const submit = event.submitter || $("#save-config");
   ui.controlPending = true;
   setButtonPending(submit, true, "保存中");
@@ -1527,21 +1541,22 @@ $("#config-form").addEventListener("submit", async (event) => {
       method: "PUT",
       body: JSON.stringify(collectConfigPayload()),
     }, target);
-    if (!sameView(target) || !responseForView(response, target)) return;
+    if (!acceptViewResponse(response, target)) return;
     recordMutation();
     ui.preferences = response.preferences;
     ui.strategyStatus = response.strategy.status;
     ui.visibleCandidateCount = 20;
-    ui.configDirty = false;
+    const newerDraft = ui.configRevision !== submittedRevision;
+    ui.configDirty = newerDraft;
     if (ui.dashboard) {
       ui.dashboard.preferences = response.preferences;
       ui.dashboard.strategy = response.strategy;
       ui.dashboard.capitalEditable = response.capitalEditable;
-      renderPreferences(response.preferences, response.strategy, true);
+      if (!newerDraft) renderPreferences(response.preferences, response.strategy, true);
     }
-    setConfigOpen(false);
+    if (!newerDraft) setConfigOpen(false);
     showMessage(
-      response.cancelledBuyCount > 0
+      newerDraft ? "配置已保存；后续编辑尚未保存。" : response.cancelledBuyCount > 0
         ? `配置已保存，已撤销 ${response.cancelledBuyCount} 张不再适用的旧买单`
         : "配置已保存，市场正在按新条件重新扫描",
     );
@@ -1571,7 +1586,7 @@ $("#run-toggle").addEventListener("click", async () => {
   renderRunControls();
   try {
     const response = await api(wasRunning ? "/api/test/pause" : "/api/test/start", { method: "POST" }, target);
-    if (!sameView(target) || !responseForView(response, target)) return;
+    if (!acceptViewResponse(response, target)) return;
     recordMutation();
     ui.strategyStatus = response.strategy.status;
     showMessage(wasRunning ? `${accountLabel(target)}已暂停新买入；已有仓位仍继续退出和赎回` : `${accountLabel(target)}已开始`);
@@ -1608,7 +1623,7 @@ $("#reset-test").addEventListener("click", async () => {
         finalConfirmation: "RESET TEST AGAIN",
       }),
     }, target);
-    if (!sameView(target) || !responseForView(response, target)) return;
+    if (!acceptViewResponse(response, target)) return;
     recordMutation();
     ui.visibleCandidateCount = 20;
     ui.configDirty = false;
@@ -1632,7 +1647,8 @@ $("#reset-test").addEventListener("click", async () => {
   }
 });
 
-function clearCurrentView() {
+function clearCurrentView({ responseError = null } = {}) {
+  ui.viewResponseError = responseError;
   recordMutation();
   ui.dashboardRequest += 1; ui.loading = false; ui.reloadRequested = false;
   ui.performanceRequest += 1; ui.performanceLoading = false;
@@ -1642,7 +1658,7 @@ function clearCurrentView() {
   ui.positionsExpanded = false;
   resetCurveView();
   ui.positionSnapshot = null;
-  ui.dashboard = null; ui.dashboardAt = 0; ui.dashboardError = null; ui.strategyStatus = "STOPPED"; ui.preferences = null;
+  ui.dashboard = null; ui.dashboardAt = 0; ui.dashboardError = responseError; ui.strategyStatus = "STOPPED"; ui.preferences = null;
   ui.events = []; ui.candidateCount = 0; ui.displayCandidateCount = 0; ui.staleCandidateCount = 0;
   ui.performance = null; ui.performanceAt = 0; ui.performanceError = null; ui.recordLimit = 20; ui.recordCursor = null; ui.recordHead = null; ui.recordGeneration = null;
   setConfigOpen(false);
@@ -1705,7 +1721,7 @@ $("#sort-toggle").addEventListener("click", async () => {
       method: "PUT",
       body: JSON.stringify(savedPreferencePayload({ candidateSortDirection: direction })),
     }, target);
-    if (!sameView(target) || !responseForView(response, target)) return;
+    if (!acceptViewResponse(response, target)) return;
     recordMutation();
     ui.preferences = response.preferences;
     ui.visibleCandidateCount = 20;
@@ -1783,12 +1799,12 @@ function renderStatus() {
 }
 
 async function loadPerformance() {
-  if (ui.performanceLoading) return;
+  if (ui.performanceLoading || ui.viewResponseError) return;
   ui.performanceLoading = true;
   const target = viewContext(), request = ++ui.performanceRequest;
   try {
     const result=await api(`/api/${target.mode}/performance`, {}, target);
-    if (!sameView(target) || !responseForView(result, target) || request !== ui.performanceRequest) return;
+    if (!sameView(target) || request !== ui.performanceRequest || !acceptViewResponse(result, target)) return;
     if (result.generation && ui.dashboard?.generation && result.generation !== ui.dashboard.generation) return;
     if (ui.performance?.generation && ui.performance.generation !== result.generation) resetCurveView();
     ui.performance = result; ui.performanceError = result.error; ui.performanceAt=Date.now(); ui.chartIndex=null; drawCurve();

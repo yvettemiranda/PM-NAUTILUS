@@ -1,6 +1,7 @@
 """TEST-only scheduling: defer unowned previews while preserving every quote."""
 
 from .strategy import Runtime, TokenRegistry
+from .test_construction import construct_test_runtime
 
 
 class TestTokenRegistry(TokenRegistry):
@@ -38,8 +39,16 @@ class TestRuntime(Runtime):
         self.test_market_epoch = 0
         self._paused_dirty_capture = None
         self._test_can_defer = True
+        self._test_preview_pending = set()
         super().__init__(path, mode, clock, live_factory, storage_guard)
         self.tokens = TestTokenRegistry(self.tokens)
+        self.native.bus.subscribe("data.book.deltas.*", self._mark_test_preview_quote)
+
+    def _mark_test_preview_quote(self, deltas):
+        token_id = self.instrument_tokens.get(str(deltas.instrument_id))
+        token = self.tokens.get(token_id)
+        if token is not None:
+            self._test_preview_pending.add(token.event_id)
 
     def add_tokens(self, tokens, official_tags=None):
         # Shared-feed planning may cache unchanged consumers. Metadata/tick
@@ -50,6 +59,7 @@ class TestRuntime(Runtime):
     def refresh_eligibility(self):
         previous = self.monitored
         result = super().refresh_eligibility()
+        self._test_preview_pending.update(self.dirty)
         self._test_can_defer = self.status == "PAUSED"
         if previous != self.monitored:
             self.test_market_epoch += 1
@@ -57,7 +67,9 @@ class TestRuntime(Runtime):
 
     def evaluate(self, event_id, dispatch=True):
         try:
-            return super().evaluate(event_id, dispatch)
+            result = super().evaluate(event_id, dispatch)
+            self._test_preview_pending.discard(event_id)
+            return result
         finally:
             if self._paused_dirty_capture is not None:
                 # Original drain intentionally clears callback dirtiness at its
@@ -106,7 +118,16 @@ class TestRuntime(Runtime):
                 # A failing ledger must not erase pending work or replace the
                 # original exception merely because rights cannot be reread.
                 deferred.update(captured)
+            self._test_preview_pending.update(captured & deferred)
             self.dirty.update(deferred)
+
+    def disconnect(self, token_ids):
+        token_ids = tuple(token_ids)
+        result = super().disconnect(token_ids)
+        self._test_preview_pending.update(
+            self.tokens[token_id].event_id for token_id in token_ids if token_id in self.tokens
+        )
+        return result
 
     def pause(self):
         result = super().pause()
@@ -118,21 +139,44 @@ class TestRuntime(Runtime):
         if self.faulted or self.status != "PAUSED":
             return
         maintenance = self._maintenance_events()
-        pending = self.dirty - maintenance
+        pending = self._test_preview_pending - maintenance
         pending.update(self._time_sensitive_events & self.events.keys() - maintenance)
         for event_id in pending:
             self.evaluate(event_id, dispatch=False)
-        # Never consume held-position maintenance work from a page read. START
-        # changes control status and the original refresh_eligibility marks all
-        # current events dirty again before the unchanged cross-event drain.
-        self.dirty.difference_update(pending)
+        # Preview completion belongs only to the page. Trading dirtiness must
+        # survive reads so a quote seen while PAUSED is still pending at START.
+
+    def _finish_start(self, result):
+        if result["ok"]:
+            # PAUSE followed by START can happen before the next control tick,
+            # leaving the old control cache at RUNNING. Every explicit START
+            # must rebuild the complete current candidate ordering regardless
+            # of that cache, prior page reads or deferred quotation work.
+            self._refresh_control = None
+        return super()._finish_start(result)
+
+    async def start_async(self):
+        # A PAUSE during even the first storage await invalidates this START.
+        # The original LIVE implementation remains untouched by this TEST guard.
+        epoch = self._start_epoch
+        if self.storage_guard is not None:
+            await self.storage_guard.refresh()
+        if epoch != self._start_epoch:
+            raise ValueError("启动核对期间状态已更改，请重新点击 START")
+        self._check_start_readiness()
+        result = await self.validate_async()
+        if epoch != self._start_epoch:
+            raise ValueError("启动核对期间状态已更改，请重新点击 START")
+        self._check_start_readiness()
+        self._finish_start(result)
 
     def test_market_pending_events(self):
         # Summary responses must not present an old READY preview as current.
-        return self.dirty if self.status == "PAUSED" else ()
+        return self._test_preview_pending if self.status == "PAUSED" else ()
 
 
 def create_runtime(path, mode="TEST", clock=None, live_factory=None, storage_guard=None):
     """Retain the app's Runtime factory seam and the original LIVE construction."""
-    runtime_type = TestRuntime if mode == "TEST" else Runtime
-    return runtime_type(path, mode, clock, live_factory, storage_guard)
+    if mode == "TEST":
+        return construct_test_runtime(TestRuntime, path, mode, clock, live_factory, storage_guard)
+    return Runtime(path, mode, clock, live_factory, storage_guard)

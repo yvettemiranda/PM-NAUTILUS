@@ -1,15 +1,33 @@
 """Conservative TEST-only reuse of an already complete public subscription plan."""
 
 from .market import MarketService, PublicMarketHub
+from .strategy import Runtime, TokenRegistry
 from .test_runtime import TestRuntime, TestTokenRegistry
+
+
+class TestMarketService(MarketService):
+    """Identify redundant TEST requests without changing LIVE's entry point."""
+
+    __test__ = False
+
+    async def sync_subscriptions(self):
+        if type(self.hub) is TestMarketHub:
+            await self.hub.sync_test_subscriptions(self)
+        else:
+            await super().sync_subscriptions()
+
+
+def create_market_service(runtime, transport=None, hub=None):
+    kind = TestMarketService if type(runtime) is TestRuntime else MarketService
+    return kind(runtime, transport=transport, hub=hub)
 
 
 class TestMarketHub(PublicMarketHub):
     """Skip redundant planning only when it cannot repair or change anything.
 
     Sockets, heartbeat, quote delivery and recovery remain the original hub's
-    implementation. A LIVE/legacy consumer, an unknown state or any incomplete
-    baseline always executes the original subscription path without waiting.
+    implementation. LIVE requests always execute the original subscription path.
+    Only redundant TEST requests may reuse a completely ready mixed plan.
     """
 
     __test__ = False
@@ -19,6 +37,23 @@ class TestMarketHub(PublicMarketHub):
         self._complete_test_plan = None
         self.plan_runs = 0
         self.plan_skips = 0
+        self._test_sync_requester = None
+
+    async def sync_test_subscriptions(self, requester):
+        # Same lock as the original entry point. Never leak a TEST request's
+        # permission to skip into a concurrent LIVE/control/recovery request.
+        async with self.subscription_lock:
+            eligible = (
+                type(requester) is TestMarketService
+                and requester.hub is self
+                and requester in self.services
+                and not requester.closed
+            )
+            self._test_sync_requester = requester if eligible else None
+            try:
+                await self._sync_subscriptions()
+            finally:
+                self._test_sync_requester = None
 
     @staticmethod
     def _has_recovery(owner):
@@ -38,13 +73,15 @@ class TestMarketHub(PublicMarketHub):
             return None
         try:
             services = tuple(sorted(self.services, key=id))
-            # Check every registered consumer, including a closing LIVE owner.
-            # No optimization of a mixed source may change its old behavior.
+            # Check every consumer, including a closing LIVE owner. Unknown
+            # runtimes/services must use the complete original planning path.
             if any(
-                type(service) is not MarketService
+                type(service) not in (MarketService, TestMarketService)
                 or service.closed
-                or type(service.runtime) is not TestRuntime
-                or service.runtime.mode != "TEST"
+                or not (
+                    (type(service.runtime) is TestRuntime and service.runtime.mode == "TEST")
+                    or (type(service.runtime) is Runtime and service.runtime.mode == "LIVE")
+                )
                 for service in services
             ):
                 return None
@@ -82,11 +119,23 @@ class TestMarketHub(PublicMarketHub):
             desired = set()
             for service in services:
                 runtime = service.runtime
+                if type(runtime) is TestRuntime:
+                    if (
+                        type(runtime.tokens) is not TestTokenRegistry
+                        or type(runtime.test_market_epoch) is not int
+                        or type(runtime.tokens.test_version) is not int
+                    ):
+                        return None
+                    metadata = (runtime.test_market_epoch, runtime.tokens.test_version)
+                else:
+                    if type(runtime.tokens) is not TokenRegistry:
+                        return None
+                    # Original LIVE has no TEST version counters. Tokens are
+                    # immutable; retain their complete contents so same-ID
+                    # tick/metadata replacements cannot hit an old signature.
+                    metadata = tuple(runtime.tokens.items())
                 if (
-                    type(runtime.tokens) is not TestTokenRegistry
-                    or type(runtime.test_market_epoch) is not int
-                    or type(runtime.tokens.test_version) is not int
-                    or runtime.store._closed
+                    runtime.store._closed
                     or runtime.faulted
                     or not runtime.storage_can_open
                     or service.scan_status.get("scanning")
@@ -114,8 +163,7 @@ class TestMarketHub(PublicMarketHub):
                         runtime,
                         runtime.tokens,
                         runtime.store.generation,
-                        runtime.test_market_epoch,
-                        runtime.tokens.test_version,
+                        metadata,
                         runtime._start_epoch,
                         runtime.status,
                         runtime.preferences.model_dump_json(),
@@ -141,7 +189,13 @@ class TestMarketHub(PublicMarketHub):
 
     async def _sync_subscriptions(self):
         signature = self._complete_signature()
-        if signature is not None and signature == self._complete_test_plan:
+        test_request = self._test_sync_requester is not None
+        mixed = any(service.runtime.mode == "LIVE" for service in self.services)
+        if (
+            (test_request or not mixed)
+            and signature is not None
+            and signature == self._complete_test_plan
+        ):
             self.plan_skips += 1
             return
         self._complete_test_plan = None

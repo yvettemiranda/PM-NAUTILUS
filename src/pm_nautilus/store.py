@@ -114,11 +114,12 @@ class Store:
         self._business_target_events = {}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.path, isolation_level=None)
-        self.db.row_factory = sqlite3.Row
-        self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("PRAGMA synchronous=FULL")
-        self.db.execute("PRAGMA foreign_keys=ON")
-        self.db.executescript("""
+        try:
+            self.db.row_factory = sqlite3.Row
+            self.db.execute("PRAGMA journal_mode=WAL")
+            self.db.execute("PRAGMA synchronous=FULL")
+            self.db.execute("PRAGMA foreign_keys=ON")
+            self.db.executescript("""
         CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS native_events(
           seq INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT UNIQUE NOT NULL,
@@ -136,29 +137,33 @@ class Store:
           WHERE json_extract(payload,'$.terminal')=0;
         CREATE INDEX IF NOT EXISTS intents_token ON intents(token_id);
         CREATE INDEX IF NOT EXISTS native_fill_order ON native_events(kind,json_extract(CAST(payload AS TEXT),'$.client_order_id'));
-        """)
-        self.ensure_token_index(self.db)
-        self.serializer = MsgSpecSerializer(encoding=msgspec.json)
-        if self.get("mode") not in (None, mode):
-            raise ValueError("禁止复用其他模式数据库")
-        if self.get("mode") is None:
-            with self.transaction():
-                self.put("mode", mode)
-                self.put("generation", str(uuid4()))
-                self.put("preferences", Preferences().model_dump(mode="json"))
-                self.put("initial_capital", 100_000_000 if mode == "TEST" else None)
-                self.put("business", self.empty_business())
-        self.mode = mode
-        raw_business = self._get_meta("business")
-        try:
+            """)
+            self.ensure_token_index(self.db)
+            self.serializer = MsgSpecSerializer(encoding=msgspec.json)
+            if self.get("mode") not in (None, mode):
+                raise ValueError("禁止复用其他模式数据库")
+            if self.get("mode") is None:
+                with self.transaction():
+                    self.put("mode", mode)
+                    self.put("generation", str(uuid4()))
+                    self.put("preferences", Preferences().model_dump(mode="json"))
+                    self.put("initial_capital", 100_000_000 if mode == "TEST" else None)
+                    self.put("business", self.empty_business())
+            self.mode = mode
+            raw_business = self._get_meta("business")
             if raw_business is not None and self._business_version(raw_business) is None:
                 # Upgrade atomically; every legacy collection remains in the ledger.
                 with self.transaction():
                     self._save_business(self.read_business(self.db), force=True)
+            self.put("status", "PAUSED")
         except BaseException:
-            self.close()
+            # The constructor can fail before a caller receives its Store. The
+            # opened connection must not wait for a traceback/GC cycle to close.
+            try:
+                self.close()
+            except Exception:
+                pass  # Preserve the original initialization failure.
             raise
-        self.put("status", "PAUSED")
 
     @staticmethod
     def empty_business():

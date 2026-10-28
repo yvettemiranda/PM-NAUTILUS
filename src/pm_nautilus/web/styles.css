@@ -714,8 +714,30 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 .live-run-indicator { flex:1 1 auto; min-width:0; padding:0 4px; text-align:right; font-size:11px; line-height:1.2; color:var(--muted); }
 .live-run-indicator[data-tone="negative"] { color:var(--negative); font-weight:700; }
 .mode-toggle, .mode-toggle[data-mode="TEST"], .mode-toggle[data-mode="LIVE"] { min-width:48px; min-height:44px; border:0; background:transparent; color:var(--text); font-size:12px; font-weight:500; }
-.test-account-select { width:46px; height:36px; padding:0 3px; border:1px solid var(--line); border-radius:7px; background:var(--surface); color:var(--text); font:inherit; font-size:12px; cursor:pointer; }
+.test-account-select {
+  -webkit-appearance:none;
+  appearance:none;
+  width:50px;
+  height:32px;
+  padding:0 20px 0 12px;
+  border:1px solid transparent;
+  border-radius:999px;
+  background-color:var(--accent-soft);
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='m2 4 3 3 3-3' fill='none' stroke='%23087967' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;
+  background-position:right 8px center;
+  color:var(--accent);
+  font:inherit;
+  font-size:12px;
+  font-weight:650;
+  font-variant-numeric:tabular-nums;
+  cursor:pointer;
+}
+.test-account-select:hover:not(:disabled) { background-color:#d9eee7; }
 .test-account-select:disabled { cursor:wait; opacity:0.55; }
+@media (forced-colors: active) {
+  .test-account-select { appearance:auto; padding:0 3px; border-color:ButtonText; background-image:none; color:ButtonText; }
+}
 .topbar .icon-button { width:40px; height:44px; padding:0; border:0; background:transparent; font-size:20px; }
 .status-button { display:flex; align-items:center; justify-content:center; gap:7px; min-width:72px; height:44px; padding:0 8px; border:0; background:transparent; color:var(--muted); font-size:12px; }
 .status-dot { display:inline-block; width:6px; height:6px; flex:none; border-radius:50%; background:#a0aaa6; vertical-align:middle; }

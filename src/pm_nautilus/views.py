@@ -199,6 +199,10 @@ def portfolio_view(r, position_limit=None):
 
 
 def dashboard(r, service=None, limit=20, live_enabled=False, position_limit=None):
+    test_preview = getattr(r, "refresh_test_market_preview", None) if r.mode == "TEST" else None
+    if limit and test_preview is not None:
+        test_preview()
+    pending_previews = r.test_market_pending_events() if test_preview is not None else ()
     positions, portfolio = portfolio_view(r, position_limit)
     settled = set(r.business["settled"])
     position_cycles = [
@@ -213,6 +217,8 @@ def dashboard(r, service=None, limit=20, live_enabled=False, position_limit=None
         if not ids:
             continue
         status, winner = r.evaluations.get(eid, ("INCOMPLETE", None))
+        if eid in pending_previews:
+            status, winner = "INCOMPLETE", None
         tid = winner.token.token_id if winner else min(ids)
         missing = sorted(x for x in ids if not r.books[x].ready)
         summaries.append(

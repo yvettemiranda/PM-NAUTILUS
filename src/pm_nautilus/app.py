@@ -19,10 +19,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import Preferences
-from .market import MarketService, PublicMarketHub
+from .market import MarketService
+from .test_market import TestMarketHub as PublicMarketHub
 from .redemption import RedemptionService
 from .store import Store
-from .strategy import Runtime
+from .test_runtime import create_runtime as Runtime
 from .views import dashboard, records_async, records_page_async
 from .performance import PerformanceSampler
 from .wallet_vault import VaultError, derive_signer, read_public_metadata, read_vault, write_vault

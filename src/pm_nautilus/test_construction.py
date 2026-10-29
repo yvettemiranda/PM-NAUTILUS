@@ -1,4 +1,4 @@
-"""Explicit disposal of failed TEST constructions; LIVE uses its original path."""
+"""Explicit TEST construction/close cleanup; LIVE uses its original path."""
 
 from .native import Native
 from .strategy import Runtime
@@ -20,15 +20,93 @@ def _partial_native(runtime, error):
     return None
 
 
-def _attempt(owner, operation):
-    action = getattr(owner, operation, None)
-    if callable(action):
+def _attempt(owner, operation, *args):
+    try:
+        action = getattr(owner, operation, None)
+        if callable(action):
+            action(*args)
+    except BaseException:
+        # Disposal cannot replace the original exception or prevent independent
+        # components/the database from being closed.
+        pass
+
+
+def release_test_runtime(runtime):
+    """Break stopped TEST references without invoking clock-wide SDK disposal.
+
+    Call after the ordinary financial callbacks and store close. Each Native
+    owns its bus/cache/portfolio; no external clock callbacks are cleared here.
+    This is also safe to repeat from shutdown/quarantine cleanup.
+    """
+    if getattr(runtime, "mode", None) != "TEST":
+        raise ValueError("TEST资源释放器不接受LIVE")
+    native = getattr(runtime, "native", None)
+    bus = getattr(native, "bus", None)
+    # Explicitly remove owner callbacks even if bus disposal itself fails.
+    for topic, owner, name in (
+        ("events.order.*", runtime, "on_native"),
+        ("data.book.deltas.*", runtime, "_mark_test_preview_quote"),
+        ("data.book.deltas.*", getattr(runtime, "strategy", None), "on_order_book_deltas"),
+    ):
+        handler = getattr(owner, name, None)
+        if handler is not None:
+            _attempt(bus, "unsubscribe", topic, handler)
+    _attempt(bus, "dispose")
+    _attempt(getattr(native, "portfolio", None), "dispose")
+    _attempt(getattr(native, "cache", None), "reset")
+    _attempt(getattr(native, "cache", None), "dispose")
+    # Python owners can participate in Cython/Rust cycles invisible to Python
+    # GC. Their callbacks have finished; detach this TEST account only.
+    for resource in (
+        getattr(runtime, "strategy", None),
+        getattr(native, "strategy", None),
+        getattr(runtime, "client", None),
+        native,
+    ):
+        if resource is not None and getattr(resource, "owner", None) is runtime:
+            try:
+                resource.owner = None
+            except BaseException:
+                pass
+
+
+def close_test_runtime(runtime):
+    """Preserve pause -> Native.stop -> Store.close, then release TEST owners."""
+    if getattr(runtime, "mode", None) != "TEST":
+        raise ValueError("TEST关闭器不接受LIVE")
+    if getattr(runtime, "_test_close_started", False):
+        return
+    runtime._test_close_started = True
+    error = None
+    for owner, operation in ((runtime, "pause"), (runtime.native, "stop")):
         try:
-            action()
-        except BaseException:
-            # Disposal cannot replace the original constructor exception or
-            # prevent independent components/the database from being closed.
-            pass
+            getattr(owner, operation)()
+        except BaseException as exc:
+            if error is None:
+                error = exc
+    # A failing stop callback must not leave other account-local engines active.
+    # Complete these stops while the journal remains open, as Native.stop does.
+    for component in (
+        getattr(runtime.native, "strategy", None),
+        getattr(runtime.native, "execution", None),
+        getattr(runtime.native, "risk", None),
+        getattr(runtime.native, "data", None),
+    ):
+        if any(
+            getattr(component, state, False)
+            for state in ("is_running", "is_starting", "is_degraded")
+        ):
+            _attempt(component, "stop")
+    try:
+        runtime.store.close()
+    except BaseException as exc:
+        if error is None:
+            error = exc
+        _attempt(getattr(runtime.store, "db", None), "close")
+    finally:
+        release_test_runtime(runtime)
+    if error is not None:
+        raise error
 
 
 def _dispose_failed_test(runtime, error):

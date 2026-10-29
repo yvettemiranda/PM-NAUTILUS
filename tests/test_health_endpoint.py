@@ -20,14 +20,16 @@ def test_health_reports_runtime_faults_and_recovers(tmp_path, monkeypatch):
 
         runtime.faulted = "private RPC URL or exception detail"
         response = client.get("/api/health")
-        assert response.status_code == 503
+        assert response.status_code == 200
+        assert response.json()["status"] == "attention"
         assert response.json()["backgroundErrors"] == {"TEST": "runtime_faulted"}
+        assert response.json()["accountErrors"] == {"TEST": "runtime_faulted"}
         assert "private" not in response.text
 
         runtime.faulted = None
         runtime.business["recovery_error"] = "private account detail"
         response = client.get("/api/health")
-        assert response.status_code == 503
+        assert response.status_code == 200
         assert response.json()["backgroundErrors"] == {"TEST": "recovery_error"}
         assert "private" not in response.text
 

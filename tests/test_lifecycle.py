@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+import httpx
 from fastapi.testclient import TestClient
 
 import pm_nautilus.app as app_module
@@ -206,7 +207,9 @@ def test_health_reports_background_service_failure(tmp_path, monkeypatch):
         service = app.state.services["TEST"]
         service.scan_status["serviceError"] = "ValueError"
         response = client.get("/api/health")
-        assert response.status_code == 503
+        assert response.status_code == 200
+        assert response.json()["status"] == "attention"
+        assert response.json()["accountErrors"] == {"TEST": "ValueError"}
         assert response.json()["backgroundErrors"] == {"TEST": "ValueError"}
         service.scan_status.pop("serviceError")
         assert client.get("/api/health").status_code == 200
@@ -224,9 +227,14 @@ def test_public_hub_closes_when_initial_runtime_cannot_start(tmp_path, monkeypat
 
     async def run():
         app = app_module.create_app(tmp_path, public_data=True)
-        with pytest.raises(RuntimeError, match="controlled store failure"):
-            async with app.router.lifespan_context(app):
-                pytest.fail("Broken runtime must abort startup")
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            ) as client:
+                response = await client.get("/api/health")
+                assert response.status_code == 503
+                assert response.json()["availableTestAccountCount"] == 0
+                assert len(response.json()["accountErrors"]) == 10
         hub.close.assert_awaited_once()
         with (tmp_path / "process.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -260,8 +268,9 @@ def test_app_modes_share_public_hub_and_close_their_own_services(tmp_path, monke
 
         async def close(self):
             self.closed = True
-            self.loop_task.cancel()
-            await asyncio.gather(self.loop_task, return_exceptions=True)
+            if self.loop_task is not None:
+                self.loop_task.cancel()
+                await asyncio.gather(self.loop_task, return_exceptions=True)
 
     monkeypatch.setattr(app_module, "MarketService", ControlledService)
 
@@ -279,7 +288,9 @@ def test_app_modes_share_public_hub_and_close_their_own_services(tmp_path, monke
             assert {s.runtime.mode for s in services} == {"TEST", "LIVE"}
             assert all(s.hub is hub for s in services)
             assert services[0].runtime.store is not services[1].runtime.store
-        assert all(s.closed and s.loop_task.done() for s in services)
+            assert all(s.loop_task is None for s in services if s.runtime.mode == "TEST")
+            assert all(s.loop_task is not None for s in services if s.runtime.mode == "LIVE")
+        assert all(s.closed and (s.loop_task is None or s.loop_task.done()) for s in services)
         hub.close.assert_awaited_once()
 
     asyncio.run(run())

@@ -1,7 +1,10 @@
 """TEST-only scheduling: defer unowned previews while preserving every quote."""
 
+from sqlite3 import Connection
+
+from .store import Store
 from .strategy import Runtime, TokenRegistry
-from .test_construction import construct_test_runtime
+from .test_construction import close_test_runtime, construct_test_runtime
 
 
 class TestTokenRegistry(TokenRegistry):
@@ -40,6 +43,7 @@ class TestRuntime(Runtime):
         self._paused_dirty_capture = None
         self._test_can_defer = True
         self._test_preview_pending = set()
+        self._test_empty_paused_proof = None
         super().__init__(path, mode, clock, live_factory, storage_guard)
         self.tokens = TestTokenRegistry(self.tokens)
         self.native.bus.subscribe("data.book.deltas.*", self._mark_test_preview_quote)
@@ -92,9 +96,61 @@ class TestRuntime(Runtime):
         )
         return events
 
+    def _empty_paused_without_work(self):
+        """Skip only a previously proven empty PAUSED owner with no DB changes.
+
+        Each quote still checks foreign SQLite commits. Transaction snapshots
+        cannot establish or reuse a proof: a later rollback may restore rights.
+        Financial objects, cash, holdings and orders are never shared or cached.
+        """
+        business = self.business
+        store = self.store
+        if (
+            self.mode != "TEST"
+            or type(business) is not dict
+            or any(
+                type(business.get(key)) is not dict or business[key]
+                for key in ("cycles", "targets", "claims")
+            )
+            or "recovery_error" not in business
+            or business["recovery_error"] is not None
+            or self._paused_dirty_capture is not None
+            or type(store) is not Store
+            or store._closed
+            or type(store.db) is not Connection
+        ):
+            self._test_empty_paused_proof = None
+            return False
+        db = store.db
+        try:
+            if db.in_transaction:
+                self._test_empty_paused_proof = None
+                return False
+            version = db.execute("PRAGMA data_version").fetchone()[0]
+            stamp = (store, db, db.total_changes, version, self._start_epoch)
+            proof = self._test_empty_paused_proof
+            if proof is not None and proof[0] == stamp:
+                return True
+            self._test_empty_paused_proof = None
+            if self.status != "PAUSED" or store.intents(active_only=True):
+                return False
+            generation = store.generation
+            # A writer can commit between the separate reads above. Such an
+            # uncertain observation must retain the original complete path.
+            after = db.execute("PRAGMA data_version").fetchone()[0]
+            if stamp != (store, db, db.total_changes, after, self._start_epoch):
+                return False
+            self._test_empty_paused_proof = (stamp, generation)
+            return True
+        except Exception:
+            self._test_empty_paused_proof = None
+            return False
+
     def drain(self):
         if self.faulted or not self._test_can_defer:
             return super().drain()
+        if self._empty_paused_without_work():
+            return
         if self.status != "PAUSED":
             self._test_can_defer = False
             return super().drain()
@@ -130,6 +186,7 @@ class TestRuntime(Runtime):
         return result
 
     def pause(self):
+        self._test_empty_paused_proof = None
         result = super().pause()
         self._test_can_defer = True
         return result
@@ -147,6 +204,7 @@ class TestRuntime(Runtime):
         # survive reads so a quote seen while PAUSED is still pending at START.
 
     def _finish_start(self, result):
+        self._test_empty_paused_proof = None
         if result["ok"]:
             # PAUSE followed by START can happen before the next control tick,
             # leaving the old control cache at RUNNING. Every explicit START
@@ -173,6 +231,9 @@ class TestRuntime(Runtime):
     def test_market_pending_events(self):
         # Summary responses must not present an old READY preview as current.
         return self._test_preview_pending if self.status == "PAUSED" else ()
+
+    def close(self):
+        return close_test_runtime(self)
 
 
 def create_runtime(path, mode="TEST", clock=None, live_factory=None, storage_guard=None):

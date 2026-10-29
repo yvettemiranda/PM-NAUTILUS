@@ -27,6 +27,11 @@ with httpx.Client(base_url=base, timeout=5) as public:
         raise RuntimeError("Container did not become healthy")
     status = health.json()
     assert status["revision"] == args.expected_revision, status
+    # A local TEST failure keeps process liveness green. Release acceptance must
+    # still require every configured account, rather than accepting HTTP alone.
+    assert status["status"] == "ok", status
+    assert status["backgroundErrors"] == status["accountErrors"] == {}, status
+    assert status["testAccountCount"] == status["availableTestAccountCount"] == 10, status
     assert status["strategyStatus"] == "PAUSED" and not status["liveExecutionEnabled"]
     assert public.get("/api/dashboard").status_code == 401
 with httpx.Client(base_url=base, auth=("pm", os.environ["PM_UI_PASSWORD"]), timeout=5) as client:

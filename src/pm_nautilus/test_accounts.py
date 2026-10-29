@@ -62,6 +62,8 @@ class TestAccounts:
         store = Store(self.path(number), "TEST")
         try:
             if not store.get("test_account_initialized", False):
+                if source is None:
+                    raise ValueError("1号账户不可用，不能推断新增账户的初始参数")
                 # This marker also completes initialization after an interrupted
                 # first boot. Never replace an unexpectedly populated ledger.
                 if self.has_uninitialized_state(store):

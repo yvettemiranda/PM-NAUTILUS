@@ -361,7 +361,9 @@ def test_failed_account_reset_is_quarantined_without_stopping_other_accounts(tmp
             assert old.store._closed
             assert app.state.test_services[2].closed
             health = await client.get("/api/health")
-            assert health.status_code == 503
+            assert health.status_code == 200
+            assert health.json()["status"] == "attention"
+            assert health.json()["accountErrors"] == {"TEST:2": "test_account_unavailable"}
             assert health.json()["backgroundErrors"] == {"TEST:2": "test_account_unavailable"}
             assert (await client.get("/api/dashboard?account_id=2")).status_code == 503
             for number, snapshot in unaffected.items():
@@ -449,3 +451,56 @@ def test_synthetic_shared_feed_ten_account_load_and_http_responsiveness(tmp_path
             assert elapsed < 60
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("stage", ["construct", "attach"])
+def test_account_one_startup_failure_does_not_disable_existing_siblings(
+    tmp_path, monkeypatch, stage
+):
+    from fastapi.testclient import TestClient
+
+    # Existing sibling settings cannot depend on a broken primary account.
+    with TestClient(create_app(tmp_path, public_data=False)) as client:
+        headers = {"x-pm-csrf": client.get("/api/dashboard").headers["x-pm-csrf"]}
+        assert (
+            client.put(
+                "/api/TEST/preferences?account_id=2",
+                json={"initialCapital": "234", "orderAmount": "2"},
+                headers=headers,
+            ).status_code
+            == 200
+        )
+    original_runtime = app_module.Runtime
+    original_sampler = app_module.PerformanceSampler
+    primary = tmp_path / "TEST" / "state.sqlite"
+
+    def runtime(path, *args, **kwargs):
+        if stage == "construct" and path == primary:
+            raise ValueError("controlled primary constructor failure")
+        return original_runtime(path, *args, **kwargs)
+
+    def sampler(runtime):
+        if stage == "attach" and runtime.store.path == primary:
+            raise ValueError("controlled primary sampler failure")
+        return original_sampler(runtime)
+
+    monkeypatch.setattr(app_module, "Runtime", runtime)
+    monkeypatch.setattr(app_module, "PerformanceSampler", sampler)
+    app = create_app(tmp_path, public_data=False)
+    with TestClient(app) as client:
+        health = client.get("/api/health")
+        assert health.status_code == 200
+        assert health.json()["status"] == "attention"
+        assert health.json()["availableTestAccountCount"] == 9
+        assert "TEST" in health.json()["accountErrors"]
+        assert client.get("/api/dashboard?account_id=1").status_code == 503
+        response = client.get("/api/dashboard?account_id=2")
+        assert response.status_code == 200
+        assert response.json()["strategy"]["initialCapital"] == "234"
+        assert response.json()["preferences"]["orderAmount"] == "2"
+        headers = {"x-pm-csrf": response.headers["x-pm-csrf"]}
+        started = client.post("/api/TEST/start?account_id=2", headers=headers)
+        assert started.status_code == 200
+        assert started.json()["strategy"]["status"] == "RUNNING"
+        assert client.get("/api/dashboard?account_id=3").json()["strategy"]["status"] == "PAUSED"
+        assert client.get("/api/dashboard?mode=LIVE").status_code == 200

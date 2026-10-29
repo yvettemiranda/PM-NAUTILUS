@@ -526,6 +526,11 @@ class Store:
         # retain all execution identities without scanning cold discovery JSON.
         query = _ACTIVE_TOKENS_SQL if active_only else "SELECT token_id,payload FROM tokens"
         for row in self.db.execute(query):
+            if self.mode == "TEST":
+                from .test_metadata import decode_test_token
+
+                out[row[0]] = decode_test_token(row[0], row[1], self.decode_token_payload)
+                continue
             data = self.decode_token_payload(row[1])
             if data["token_id"] != row[0]:
                 raise ValueError("代币元数据身份与主键不一致")

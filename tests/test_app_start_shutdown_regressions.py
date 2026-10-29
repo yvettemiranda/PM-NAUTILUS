@@ -259,8 +259,18 @@ async def live_pause_waits_for_test_lock(factory, path):
 
             test.validate_async = gated
             live.pause = observe_pause
-            reader = asyncio.create_task(client.get("/api/TEST/validation?account_id=1"))
-            await entered.wait()
+            # LIVE ownership now rejects new TEST validation through the API.
+            # Retain this regression's older in-flight lock directly so shutdown
+            # must still drain LIVE before waiting on any TEST owner.
+            rejected = await client.get("/api/TEST/validation?account_id=1")
+            assert rejected.status_code == 400
+
+            async def held_validation():
+                async with app.state.test_accounts.contexts[1].lock:
+                    return await test.validate_async()
+
+            reader = asyncio.create_task(held_validation())
+            await asyncio.wait_for(entered.wait(), 5)
             stopping = asyncio.create_task(lifespan.__aexit__(None, None, None))
             for _ in range(20):
                 await asyncio.sleep(0)

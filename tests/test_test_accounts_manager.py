@@ -228,7 +228,20 @@ def test_additional_account_boot_failure_keeps_other_accounts_and_live(
                     for consumer in app.state.market_hub.services
                 )
         assert all(runtime.store._closed for runtime in created_runtimes)
-        assert all(service.closed and service.loop_task.done() for service in created_services)
+        assert all(
+            service.closed and (service.loop_task is None or service.loop_task.done())
+            for service in created_services
+        )
+        assert all(
+            service.loop_task is None
+            for service in created_services
+            if service.runtime.mode == "TEST"
+        )
+        assert all(
+            service.loop_task is not None and service.loop_task.done()
+            for service in created_services
+            if service.runtime.mode == "LIVE"
+        )
         assert not app.state.market_hub.services
         live = next(runtime for runtime in created_runtimes if runtime.mode == "LIVE")
         assert live.native.execution.get_cmd_queue_task().done()

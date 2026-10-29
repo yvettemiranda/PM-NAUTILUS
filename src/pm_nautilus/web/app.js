@@ -315,6 +315,18 @@ function liveAccountVisible() {
   });
 }
 
+function testExecutionSuspended() {
+  return ui.displayMode === "TEST" && responseForView(ui.dashboard) && ui.dashboard?.testExecutionSuspended === true;
+}
+
+function testBackgroundRestorable() {
+  return testExecutionSuspended() && ui.strategyStatus === "PAUSED" && ui.dashboard.liveExecutionEnabled === false && ui.dashboard.modeSwitchInProgress === false && ui.dashboard.canRestoreTestBackground === true;
+}
+
+function testSuspendedNotice() {
+  return "TEST后台已停用；不再接收行情或执行模拟交易、退出、结算，收益曲线不再更新。保留数据仅供查看。";
+}
+
 function renderPortfolio(portfolio, positions = []) {
   if (!liveAccountVisible()) { portfolio = null; positions = []; }
   const value = (current, previous) => portfolio && current in portfolio ? portfolio[current] : portfolio?.[previous];
@@ -340,9 +352,10 @@ function renderPortfolio(portfolio, positions = []) {
   $("#known-position-value-item").hidden = !portfolio || !unvalued;
   const valuationNote = $("#valuation-note");
   const notes = [];
+  const quoteNext = testExecutionSuspended() ? "TEST后台已停用，当前不接收行情。" : "恢复报价后重新计算。";
   if (unvalued) notes.push(portfolio && "unpricedPositionCost" in portfolio
-    ? `${formatCount(unvalued)} 笔暂无报价，资产暂按剩余成本 ${formatMoney(portfolio.unpricedPositionCost)} 计入，浮盈亏暂记 0；恢复报价后重新计算。`
-    : `${formatCount(unvalued)} 笔持仓暂无报价，浮盈亏暂记 0，恢复报价后重新计算。`);
+    ? `${formatCount(unvalued)} 笔暂无报价，资产暂按剩余成本 ${formatMoney(portfolio.unpricedPositionCost)} 计入，浮盈亏暂记 0；${quoteNext}`
+    : `${formatCount(unvalued)} 笔持仓暂无报价，浮盈亏暂记 0，${quoteNext}`);
   if (failed) notes.push(`另有 ${formatCount(failed)} 笔赎回处置待核查，浮盈亏暂记 0；${formatMoney(portfolio.failedRedemptionCostFallback)} 成本暂计${portfolio.failedRedemptionCashIncludedCount ? `，${formatCount(portfolio.failedRedemptionCashIncludedCount)} 笔已计现金的部分不重复计入` : ""}。`);
   if (notes.length) notes.push("曲线显示历史记录。");
   valuationNote.hidden = !portfolio || !notes.length;
@@ -753,16 +766,18 @@ function renderRunControls() {
   const running = ui.strategyStatus === "RUNNING";
   const paused = ui.strategyStatus === "PAUSED";
   const liveView = ui.displayMode === "LIVE";
+  const suspended = testExecutionSuspended();
+  const restorable = testBackgroundRestorable();
   const runToggle = $("#run-toggle");
   if (!runToggle.classList.contains("is-pending")) {
-    runToggle.textContent = running ? "Ⅱ" : "▶";
+    runToggle.textContent = restorable ? "↺" : running ? "Ⅱ" : "▶";
   }
   const storageBlocked = ui.dashboard?.storage?.canOpen === false;
-  runToggle.disabled = !ui.dashboard || !ui.dashboardAt || Boolean(ui.dashboardError) || Boolean(ui.viewResponseError) || ui.controlPending || (!running && storageBlocked) || (liveView && !running && (!liveStartAvailable() || ui.walletPending));
-  runToggle.title = !running && storageBlocked ? "存储保护中，暂不能开始新增买入" : runToggle.disabled && liveView ? "请先在下方连接、检查并启用实盘钱包" : "";
+  runToggle.disabled = suspended && !restorable || !ui.dashboard || !ui.dashboardAt || Boolean(ui.dashboardError) || Boolean(ui.viewResponseError) || ui.controlPending || (!running && storageBlocked) || (liveView && !running && (!liveStartAvailable() || ui.walletPending));
+  runToggle.title = restorable ? "恢复TEST后台（保持暂停）" : suspended ? testSuspendedNotice() : !running && storageBlocked ? "存储保护中，暂不能开始新增买入" : runToggle.disabled && liveView ? "请先在下方连接、检查并启用实盘钱包" : "";
   runToggle.setAttribute(
     "aria-label",
-    liveView && !running && !liveStartAvailable()
+    restorable ? "恢复TEST后台（保持暂停）" : suspended ? `${accountLabel()}后台已停用，仅供查看` : liveView && !running && !liveStartAvailable()
       ? "请先连接、检查并启用实盘钱包"
       : running
         ? `暂停 ${accountLabel()} 自动买入`
@@ -771,8 +786,8 @@ function renderRunControls() {
 
   const capital = $("#initial-capital");
   const capitalEditable = ui.dashboard?.capitalEditable === true;
-  capital.disabled = !capitalEditable;
-  capital.title = capitalEditable
+  capital.disabled = suspended || !capitalEditable;
+  capital.title = suspended ? "TEST后台已停用，资金与设置仅供查看" : capitalEditable
     ? ""
     : liveView
       ? "实际余额由服务器账户查询更新，不能在页面修改"
@@ -780,14 +795,14 @@ function renderRunControls() {
       ? "修改总模拟资金前请先暂停TEST"
       : "总模拟资金仅能在暂停且没有交易记录时修改；如已有记录请先重置TEST";
   const reset = $("#reset-test");
-  reset.disabled = !paused || ui.controlPending || liveView || Boolean(ui.viewResponseError);
+  reset.disabled = suspended || !paused || ui.controlPending || liveView || Boolean(ui.viewResponseError);
   $("#capital-label").textContent = liveView ? "实际账户余额（只读）" : "总模拟资金";
   $("#settings-mode").textContent = `${accountLabel()} 设置`;
   if (!reset.classList.contains("is-pending")) reset.textContent = ui.displayMode === "TEST" ? `重置账户 ${ui.testAccountId}` : "重置TEST";
-  reset.title = paused ? "" : "重置前必须先暂停TEST";
+  reset.title = suspended ? testSuspendedNotice() : paused ? "" : "重置前必须先暂停TEST";
   $("#config-toggle").disabled = !ui.dashboard || Boolean(ui.viewResponseError);
-  $("#save-config").disabled = !ui.dashboard || !ui.preferences || ui.controlPending || Boolean(ui.viewResponseError);
-  $("#sort-toggle").disabled = !ui.dashboard || !ui.preferences || ui.controlPending || Boolean(ui.viewResponseError);
+  $("#save-config").disabled = suspended || !ui.dashboard || !ui.preferences || ui.controlPending || Boolean(ui.viewResponseError);
+  $("#sort-toggle").disabled = suspended || !ui.dashboard || !ui.preferences || ui.controlPending || Boolean(ui.viewResponseError);
 }
 
 function renderPositions(positions = []) {
@@ -861,7 +876,9 @@ function renderPositions(positions = []) {
           const currentSellPrice = formatCurrentSellPrice(position);
           const unpriced = positionUnpriced(position);
           const availability = position.marketAvailability;
-          const unavailableNote = position.currentSellPriceStatus === "UNAVAILABLE"
+          const unavailableNote = testExecutionSuspended()
+            ? `<p class="field-note">${testSuspendedNotice()}</p>`
+            : position.currentSellPriceStatus === "UNAVAILABLE"
             ? `<p class="field-note market-unavailable">${availability?.reason === "archived" ? "市场已归档" : "市场已停用"}，暂无报价，处置安排待核查。成本暂计、浮盈亏暂记 0。${availability?.since ? ` 确认于 ${escapeHtml(formatDate(availability.since))}。` : ""}</p>`
             : unpriced ? '<p class="field-note">报价暂未就绪，资产暂按剩余成本计入，浮盈亏暂记 0；恢复报价后重新计算。</p>' : "";
           const estimatedPnl = unpriced ? "0" : "estimatedUnrealizedPnl" in position ? position.estimatedUnrealizedPnl : position.unrealizedPnl;
@@ -1132,6 +1149,13 @@ function renderCandidates() {
 
 function renderScanStatus(status) {
   const element = $("#scan-refresh-state");
+  if (testExecutionSuspended()) {
+    element.classList.remove("is-refreshing");
+    element.classList.remove("is-error");
+    element.textContent = "TEST后台已停用";
+    element.title = testSuspendedNotice();
+    return;
+  }
   const diagnostics = status?.diagnostics;
   element.classList.toggle("is-refreshing", status?.scanning === true);
   element.classList.toggle("is-error", Boolean(status?.lastError));
@@ -1529,6 +1553,7 @@ $("#market-progress-filter").addEventListener("input", (event) => {
 
 $("#config-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (testExecutionSuspended()) { showMessage("TEST后台已停用，设置仅供查看。", true); return; }
   if (ui.controlPending || !ui.preferences || !ui.dashboard) return;
   const target = viewContext(), request = ++ui.controlRequest;
   const submittedRevision = ui.configRevision;
@@ -1576,20 +1601,25 @@ $("#run-toggle").addEventListener("click", async () => {
   if (ui.controlPending || $("#run-toggle").disabled) return;
   const target = viewContext(), request = ++ui.controlRequest;
   const wasRunning = ui.strategyStatus === "RUNNING";
+  const restoring = testBackgroundRestorable();
   if (ui.displayMode === "LIVE" && !wasRunning && (!liveStartAvailable() || ui.walletPending)) {
     showMessage("请先连接、检查并启用实盘钱包", true);
     return;
   }
   const button = $("#run-toggle");
   ui.controlPending = true;
-  setButtonPending(button, true, wasRunning ? "暂停中" : "启动中");
+  setButtonPending(button, true, restoring ? "恢复中" : wasRunning ? "暂停中" : "启动中");
   renderRunControls();
   try {
-    const response = await api(wasRunning ? "/api/test/pause" : "/api/test/start", { method: "POST" }, target);
+    const response = await api(restoring ? "/api/test/restore-background" : wasRunning ? "/api/test/pause" : "/api/test/start", {
+      method: "POST",
+      ...(restoring ? {body: JSON.stringify({confirmation: "RESTORE TEST"})} : {}),
+    }, target);
     if (!acceptViewResponse(response, target)) return;
     recordMutation();
     ui.strategyStatus = response.strategy.status;
-    showMessage(wasRunning ? `${accountLabel(target)}已暂停新买入；已有仓位仍继续退出和赎回` : `${accountLabel(target)}已开始`);
+    if (restoring) applyDashboard(response);
+    showMessage(restoring ? "TEST后台已恢复；全部账户保持暂停，未启动新增买入。" : wasRunning ? `${accountLabel(target)}已暂停新买入；已有仓位仍继续退出和赎回` : `${accountLabel(target)}已开始`);
     await loadDashboard();
   } catch (error) {
     if (!sameView(target)) return;
@@ -1757,7 +1787,10 @@ function renderStatus() {
   $("#live-run-indicator").textContent = live.text;
   $("#live-run-indicator").dataset.tone = live.tone;
   const currentDashboard = responseForView(ui.dashboard) && ui.dashboard?.executionMode === ui.displayMode ? ui.dashboard : null;
-  const state = displayStatus(currentDashboard, { lastSuccess: ui.dashboardAt, error: ui.dashboardError });
+  const suspended = testExecutionSuspended();
+  const state = suspended && ui.dashboardAt && !ui.dashboardError && Date.now() - ui.dashboardAt <= 10000
+    ? {run:"off",feed:"off",scan:"off",positions:"off",warning:testSuspendedNotice(),serviceWarning:""}
+    : displayStatus(currentDashboard, { lastSuccess: ui.dashboardAt, error: ui.dashboardError });
   const curveVisible = ui.displayMode !== "LIVE" || liveAccountVisible();
   if (ui.curveAccountVisible !== curveVisible) drawCurve();
   const records = ui.tradeRecordsLocked || ui.displayMode === "LIVE" && ui.dashboard?.positionsAvailable === false ? "locked" : ui.tradeRecordsError ? "error" : ui.tradeRecordsLoadedAt ? "ready" : ui.tradeRecordsLoading ? "waiting" : "unknown";
@@ -1777,10 +1810,10 @@ function renderStatus() {
   $("#storage-warning").hidden = !storageWarning;
   $(".equity-panel").classList.toggle("is-stale", Boolean(ui.dashboardAt && (ui.dashboardError || Date.now() - ui.dashboardAt > 10000)));
   const s = ui.dashboard?.marketScan || {}, groups = s.diagnostics?.streams?.groups || [];
-  const runText = state.run === "error" ? state.warning : !ui.dashboardAt ? "运行状态未确认" : ui.displayMode === "LIVE" && !ui.wallet?.configured ? "实盘钱包未连接" : ui.displayMode === "LIVE" && !ui.wallet?.unlocked ? "实盘钱包已锁定" : ui.displayMode === "LIVE" && !ui.wallet?.enabled ? "实盘尚未启用" : ui.strategyStatus === "RUNNING" ? "运行中" : "已暂停新买入；已有仓位仍继续退出和赎回。";
+  const runText = state.run === "error" ? state.warning : suspended ? testSuspendedNotice() : !ui.dashboardAt ? "运行状态未确认" : ui.displayMode === "LIVE" && !ui.wallet?.configured ? "实盘钱包未连接" : ui.displayMode === "LIVE" && !ui.wallet?.unlocked ? "实盘钱包已锁定" : ui.displayMode === "LIVE" && !ui.wallet?.enabled ? "实盘尚未启用" : ui.strategyStatus === "RUNNING" ? "运行中" : "已暂停新买入；已有仓位仍继续退出和赎回。";
   $("#runtime-status").textContent = runText;
   $("#status-toggle").setAttribute("aria-label", `查看运行状态：${runText}`);
-  $("#run-state-label").textContent = state.run === "error" ? "需关注" : !ui.dashboardAt ? "未确认" : ui.strategyStatus === "RUNNING" ? "运行中" : "已暂停";
+  $("#run-state-label").textContent = state.run === "error" ? "需关注" : suspended ? "后台已停用" : !ui.dashboardAt ? "未确认" : ui.strategyStatus === "RUNNING" ? "运行中" : "已暂停";
   const liveFeedSummary = groups.length ? `${groups.filter(g=>g.state === "READY").length}/${groups.length} 组就绪 · ${groups.reduce((n,g)=>n+g.readyBookCount,0)}/${groups.reduce((n,g)=>n+g.tokenCount,0)} 盘口完整` : state.feed === "unavailable" ? "当前没有可接收报价的订阅；停用持仓仍保留并低频核查。" : "当前没有已确认就绪的行情订阅。";
   const unavailableSummary = state.unavailableCount ? `另有 ${formatCount(state.unavailableCount)} 笔持仓的市场已停用或归档，报价不可用，处置安排待核查。` : "";
   const info = ui.activeTab === "positions" ? ["行情", liveFeedSummary, ...(unavailableSummary ? [unavailableSummary] : []), ...groups.map((g,i)=>`组${i+1}：${g.state}，心跳 ${formatClock(g.lastPongAt)}${g.error ? `，${g.error}` : ""}`)] : ui.activeTab === "market" ? ["扫描", `最近完成 ${formatDate(s.lastScanAt)} · ${s.scanning ? "扫描中" : "等待下一轮"}`, s.lastError || s.categoryError || `监控 ${formatCount(ui.displayCandidateCount)} 个事件，当前可交易 ${formatCount(ui.candidateCount)} 个`] : ["记录", `最近成功 ${formatClock(ui.tradeRecordsLoadedAt || null)}`, ui.tradeRecordsError || (ui.tradeRecordsLoaded ? "记录已同步；无新成交也属于正常。" : "打开记录后读取")];
@@ -1794,8 +1827,8 @@ function renderStatus() {
       info.push(`${label}：${status}；最近成功 ${formatDate(query.lastSuccessAt)}；连续失败 ${formatCount(query.consecutiveFailures)} 次${query.error ? `（${query.error}）` : ""}${query.affectedMarketCount ? `；影响 ${formatCount(query.affectedMarketCount)} 个市场` : ""}`);
     }
   }
-  $("#module-status-label").textContent = `${info[0]}${ui.activeTab === "records" ? ({ready:"已同步",error:"更新失败",waiting:"读取中",locked:"已锁定",unknown:"未读取"}[records]) : ({ready:"正常",error:"需关注",warning:"需关注",waiting:"更新中",unavailable:"报价不可用",off:"未连接",unknown:"未确认"}[ui.activeTab === "market" ? state.scan : state.feed])}${ui.activeTab === "positions" && state.unavailableCount ? ` · ${formatCount(state.unavailableCount)} 笔暂无报价` : ""}`;
-  $("#module-status-detail").textContent = info.slice(1).join("\n");
+  $("#module-status-label").textContent = suspended ? "TEST后台已停用" : `${info[0]}${ui.activeTab === "records" ? ({ready:"已同步",error:"更新失败",waiting:"读取中",locked:"已锁定",unknown:"未读取"}[records]) : ({ready:"正常",error:"需关注",warning:"需关注",waiting:"更新中",unavailable:"报价不可用",off:"未连接",unknown:"未确认"}[ui.activeTab === "market" ? state.scan : state.feed])}${ui.activeTab === "positions" && state.unavailableCount ? ` · ${formatCount(state.unavailableCount)} 笔暂无报价` : ""}`;
+  $("#module-status-detail").textContent = suspended ? testSuspendedNotice() : info.slice(1).join("\n");
 }
 
 async function loadPerformance() {

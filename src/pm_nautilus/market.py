@@ -677,15 +677,21 @@ class MarketService:
             self.scan_status["streamError"] = current
             self.runtime.store.put("scan", self.scan_status)
 
-    def message(self, msg, allowed):
+    def message(self, msg, allowed, *, _prepared=None):
         if self.closed:
             return
         r = self.runtime
+        # Optional TEST decoding is only a message-local value source. LIVE
+        # always uses the original raw parser and the same processing below.
+        if _prepared is not None and (
+            getattr(r, "mode", None) != "TEST" or _prepared.raw is not msg
+        ):
+            _prepared = None
         allowed = set(allowed) - getattr(r, "market_availability", {}).keys()
         kind = msg.get("event_type")
         ts = int(msg.get("timestamp", 0)) * 1_000_000
         if kind == "price_change":
-            for change in msg.get("price_changes", []):
+            for index, change in enumerate(msg.get("price_changes", [])):
                 tid = change.get("asset_id")
                 if tid not in allowed or msg.get("market") != r.tokens[tid].condition_id:
                     continue
@@ -698,7 +704,11 @@ class MarketService:
                     if change.get("side") == "SELL"
                     else None
                 )
-                levels = [(micros(change["price"]), micros(change["size"]))]
+                levels = (
+                    _prepared.change_level(index)
+                    if _prepared is not None
+                    else [(micros(change["price"]), micros(change["size"]))]
+                )
                 if side and b.delta(side, levels, ts):
                     r.checkpoint_shadow(tid, shadow)
                     r.native.feed_delta(r.tokens[tid], b, side, levels)
@@ -711,6 +721,8 @@ class MarketService:
                     return
 
                 def levels(side):
+                    if _prepared is not None:
+                        return _prepared.book_levels(side)
                     return [(micros(x["price"]), micros(x["size"])) for x in msg[side]]
 
                 before_revision = r.books[tid].revision
@@ -756,6 +768,9 @@ class MarketService:
     def baseline_consumers(self, group):
         return [self]
 
+    def consumer_subscription_ids(self, service):
+        return service.desired_subscription_ids()
+
     async def recover_consumer_baselines(self, group, ws):
         """Bounded escalation when an idempotent subscribe returned no snapshot.
 
@@ -775,7 +790,7 @@ class MarketService:
                             tid
                             for tid, requested_at in service._availability_fresh_requested_at.items()
                             if tid in service._availability_fresh_pending
-                            and tid in service.desired_subscription_ids()
+                            and tid in self.consumer_subscription_ids(service)
                             and now - requested_at >= FRESH_BASELINE_RECOVERY_SECONDS
                         }
                         for service in consumers
@@ -794,7 +809,7 @@ class MarketService:
                 )
             self.runtime.disconnect(due)
             for service in consumers:
-                ids = due & service.desired_subscription_ids()
+                ids = due & self.consumer_subscription_ids(service)
                 for tid in ids:
                     service._availability_timestamp_floor[tid] = max(
                         service._availability_timestamp_floor.get(tid, 0),
@@ -1176,7 +1191,7 @@ class PublicMarketHub(MarketService):
         return [
             service
             for service in tuple(self.services)
-            if not service.closed and ids & service.desired_subscription_ids()
+            if not service.closed and ids & self.consumer_subscription_ids(service)
         ]
 
     def baseline_consumers(self, group):
@@ -1210,7 +1225,7 @@ class PublicMarketHub(MarketService):
                 entry["error"]
                 for group, entry in self.streams.items()
                 if entry.get("error")
-                and self.active_groups.get(group, set()) & service.desired_subscription_ids()
+                and self.active_groups.get(group, set()) & self.consumer_subscription_ids(service)
             ]
             current = errors[-1] if errors else None
             if service.scan_status.get("streamError") != current:
@@ -1229,11 +1244,50 @@ class PublicMarketHub(MarketService):
                 except Exception as consumer_exc:
                     self.consumer_error(service, consumer_exc)
 
+    def _prepare_subscription_consumer(self, service, ids):
+        for tid in tuple(ids):
+            consumer = service.runtime.tokens[tid]
+            source = self.runtime.tokens.setdefault(tid, consumer)
+            if source.tick != consumer.tick:
+                try:
+                    # A mode which was not subscribed during a tick change
+                    # must receive that control event before its new baseline.
+                    service.message(
+                        dict(
+                            event_type="tick_size_change",
+                            asset_id=tid,
+                            market=consumer.condition_id,
+                            new_tick_size=f"{source.tick // 1_000_000}.{source.tick % 1_000_000:06d}",
+                        ),
+                        {tid},
+                    )
+                except ConnectionError:
+                    pass  # The existing shared source already owns recovery.
+                except Exception as exc:
+                    self.consumer_error(service, exc)
+        # A consumer can arrive with a previously connected book. Until the
+        # shared source has a complete baseline, that old book cannot accept
+        # deltas from the new connection as if it were still continuous.
+        missing = {
+            tid
+            for tid in ids
+            if (tid not in self.runtime.books or not self.runtime.books[tid].ready)
+            and service.runtime.books[tid].ready
+        }
+        if missing:
+            try:
+                service.runtime.disconnect(missing)
+            except Exception as exc:
+                self.consumer_error(service, exc)
+        return True
+
     async def _sync_subscriptions(self):
         if self.closed:
             return
         services = [s for s in self.services if not s.closed]
-        consumer_ids = {service: service.desired_subscription_ids() for service in services}
+        consumer_ids = {service: self.consumer_subscription_ids(service) for service in services}
+        services = [service for service in services if not service.closed]
+        consumer_ids = {service: consumer_ids[service] for service in services}
         monitored = set().union(*consumer_ids.values())
         # Keep connections still used by an unchanged consumer. A TEST reset or
         # filter reduction must not invalidate another mode's continuous books.
@@ -1246,40 +1300,12 @@ class PublicMarketHub(MarketService):
         )
         self.runtime.monitored = monitored
         for service in services:
-            for tid in tuple(consumer_ids[service]):
-                consumer = service.runtime.tokens[tid]
-                source = self.runtime.tokens.setdefault(tid, consumer)
-                if source.tick != consumer.tick:
-                    try:
-                        # A mode which was not subscribed during a tick change
-                        # must receive that control event before its new baseline.
-                        service.message(
-                            dict(
-                                event_type="tick_size_change",
-                                asset_id=tid,
-                                market=consumer.condition_id,
-                                new_tick_size=f"{source.tick // 1_000_000}.{source.tick % 1_000_000:06d}",
-                            ),
-                            {tid},
-                        )
-                    except ConnectionError:
-                        pass  # The existing shared source already owns recovery.
-                    except Exception as exc:
-                        self.consumer_error(service, exc)
-            # A consumer can arrive with a previously connected book. Until the
-            # shared source has a complete baseline, that old book cannot accept
-            # deltas from the new connection as if it were still continuous.
-            missing = {
-                tid
-                for tid in consumer_ids[service]
-                if (tid not in self.runtime.books or not self.runtime.books[tid].ready)
-                and service.runtime.books[tid].ready
-            }
-            if missing:
-                try:
-                    service.runtime.disconnect(missing)
-                except Exception as exc:
-                    self.consumer_error(service, exc)
+            if not self._prepare_subscription_consumer(service, consumer_ids[service]):
+                consumer_ids.pop(service)
+                monitored = set().union(*consumer_ids.values())
+                protected_ids.intersection_update(monitored)
+                self.runtime.monitored = monitored
+        services = [service for service in services if service in consumer_ids]
         # Existing sockets are subscription slots. Removing one consumer's IDs
         # changes subscriptions in place, so another consumer never reconnects
         # merely because TEST was cleared or closed.
@@ -1416,7 +1442,7 @@ class PublicMarketHub(MarketService):
     def diagnostics_for(self, service):
         groups = []
         for group in sorted(self.streams):
-            ids = self.active_groups.get(group, set()) & service.desired_subscription_ids()
+            ids = self.active_groups.get(group, set()) & self.consumer_subscription_ids(service)
             if not ids:
                 continue
             missing = [tid for tid in sorted(ids) if not service.runtime.books[tid].ready]
@@ -1437,7 +1463,10 @@ class PublicMarketHub(MarketService):
             )
         return {"groups": groups, "groupCount": len(groups)}
 
-    def message(self, msg, allowed):
+    def _deliver_message(self, service, msg, allowed, _prepared):
+        service.message(msg, allowed & self.consumer_subscription_ids(service))
+
+    def message(self, msg, allowed, *, _prepared=None):
         if self.closed:
             return
         allowed = set(allowed)
@@ -1449,13 +1478,21 @@ class PublicMarketHub(MarketService):
                 return
             if ts < self._availability_timestamp_floor.get(tid, 0):
                 return
-            bids = [(micros(x["price"]), micros(x["size"])) for x in msg["bids"]]
-            asks = [(micros(x["price"]), micros(x["size"])) for x in msg["asks"]]
+            bids = (
+                _prepared.book_levels("bids")
+                if _prepared is not None
+                else [(micros(x["price"]), micros(x["size"])) for x in msg["bids"]]
+            )
+            asks = (
+                _prepared.book_levels("asks")
+                if _prepared is not None
+                else [(micros(x["price"]), micros(x["size"])) for x in msg["asks"]]
+            )
             if not self.runtime.books[tid].snapshot(bids, asks, ts):
                 return
             self._availability_timestamp_floor.pop(tid, None)
         elif kind == "price_change":
-            for change in msg.get("price_changes", []):
+            for index, change in enumerate(msg.get("price_changes", [])):
                 tid = change.get("asset_id")
                 if tid not in allowed or msg.get("market") != self.runtime.tokens[tid].condition_id:
                     continue
@@ -1468,7 +1505,11 @@ class PublicMarketHub(MarketService):
                 )
                 if side:
                     self.runtime.books[tid].delta(
-                        side, [(micros(change["price"]), micros(change["size"]))], ts
+                        side,
+                        _prepared.change_level(index)
+                        if _prepared is not None
+                        else [(micros(change["price"]), micros(change["size"]))],
+                        ts,
                     )
         elif kind == "tick_size_change":
             tid = msg.get("asset_id")
@@ -1484,7 +1525,7 @@ class PublicMarketHub(MarketService):
             if service.closed:
                 continue
             try:
-                service.message(msg, allowed & service.desired_subscription_ids())
+                self._deliver_message(service, msg, allowed, _prepared)
             except ConnectionError:
                 if kind != "tick_size_change":
                     self.consumer_error(service, ConnectionError("消费者行情处理失败"))

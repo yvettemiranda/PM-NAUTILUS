@@ -14,6 +14,7 @@ from pm_nautilus.market import MarketService, PublicMarketHub
 from pm_nautilus.rules import Fees, Token
 from pm_nautilus.strategy import Runtime
 from pm_nautilus.test_runtime import TestRuntime, create_runtime
+from pm_nautilus.test_market import create_market_service
 from pm_nautilus.views import dashboard
 
 from test_market_efficiency import IdleSocket
@@ -234,8 +235,10 @@ async def idle_socket():
     await asyncio.Future()
 
 
-async def replay_workload(runtime_type, hub_type, root, running_accounts, messages=600):
-    tokens = token_set(642, siblings=False)
+async def replay_workload(
+    runtime_type, hub_type, root, running_accounts, messages=600, *, token_count=642
+):
+    tokens = token_set(token_count, siblings=False)
     allowed = {token.token_id for token in tokens}
     hub = hub_type()
     hub.runtime.add_tokens(tokens)
@@ -249,7 +252,7 @@ async def replay_workload(runtime_type, hub_type, root, running_accounts, messag
             runtime.add_tokens(tokens)
             accounts.append(runtime)
             clocks.append(clock)
-            services.append(MarketService(runtime, hub=hub))
+            services.append(create_market_service(runtime, hub=hub))
         for token in tokens:
             hub.message(book_message(token, DAY, levels=20), allowed)
         for runtime in accounts[:running_accounts]:
@@ -326,7 +329,7 @@ async def replay_workload(runtime_type, hub_type, root, running_accounts, messag
             runtime.close()
 
 
-@pytest.mark.parametrize("running_accounts", [0, 1, 10])
+@pytest.mark.parametrize("running_accounts", [0, 1, 2, 10])
 def test_ten_accounts_642_token_replay_preserves_every_financial_result(tmp_path, running_accounts):
     async def run():
         from pm_nautilus.test_market import TestMarketHub

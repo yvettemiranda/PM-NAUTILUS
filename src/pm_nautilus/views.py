@@ -213,12 +213,22 @@ def dashboard(r, service=None, limit=20, live_enabled=False, position_limit=None
     # Rank and diagnose every monitored event, but only build depth-backed token
     # projections for the visible page. The page size never changes eligibility.
     summaries = []
+    test_summary = r.mode == "TEST" and not limit
+    event_count = display_event_count = pending_event_count = 0
     for eid, ids in r.events.items():
         if not ids:
             continue
         status, winner = r.evaluations.get(eid, ("INCOMPLETE", None))
         if eid in pending_previews:
             status, winner = "INCOMPLETE", None
+        if test_summary:
+            # TEST positions/summary responses expose counts, not candidate
+            # details. Keep the current status without inspecting every book
+            # or constructing missing-token details that will not be returned.
+            display_event_count += 1
+            event_count += status == "READY"
+            pending_event_count += status == "INCOMPLETE"
+            continue
         tid = winner.token.token_id if winner else min(ids)
         missing = sorted(x for x in ids if not r.books[x].ready)
         summaries.append(
@@ -279,9 +289,11 @@ def dashboard(r, service=None, limit=20, live_enabled=False, position_limit=None
     scan = dict(service.scan_status) if service else r.store.get("scan", {})
     scan.update(
         events=events,
-        eventCount=sum(e["status"] == "READY" for e in summaries),
-        displayEventCount=len(summaries),
-        pendingEventCount=sum(e["status"] == "INCOMPLETE" for e in summaries),
+        eventCount=event_count if test_summary else sum(e["status"] == "READY" for e in summaries),
+        displayEventCount=display_event_count if test_summary else len(summaries),
+        pendingEventCount=pending_event_count
+        if test_summary
+        else sum(e["status"] == "INCOMPLETE" for e in summaries),
         tokenCount=len(r.monitored),
         diagnostics={
             "availableCategories": service.categories if service else r.store.get("categories", []),

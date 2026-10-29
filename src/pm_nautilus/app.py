@@ -24,6 +24,7 @@ from .test_market import create_market_service as MarketService
 from .redemption import RedemptionService
 from .store import Store
 from .test_runtime import create_runtime as Runtime
+from .test_construction import close_test_runtime, release_test_runtime
 from .views import dashboard, records_async, records_page_async
 from .performance import PerformanceSampler
 from .wallet_vault import VaultError, derive_signer, read_public_metadata, read_vault, write_vault
@@ -32,6 +33,7 @@ from .storage_guard import StorageGuard
 from .metadata_retention import prune_cold_metadata
 from .service_freshness import freshness_view
 from .test_accounts import TestAccounts
+from .execution_mode import ExecutionModeStore
 
 
 class _LiveBundleResponse(FileResponse):
@@ -82,6 +84,14 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
     market_hub = None
     shutting_down = False
     legacy_live_enabled = os.getenv("PM_LIVE_ENABLED") == "true"
+    mode_store = ExecutionModeStore(root)
+    requested_mode = mode_store.read()
+    execution_state = {
+        "testSuspended": legacy_live_enabled or requested_mode == "LIVE",
+        "transitioning": False,
+        "cleanupUnconfirmed": False,
+        "persistenceUnconfirmed": False,
+    }
     vault_path = root / "wallet" / "live.vault"
     wallet_lock = asyncio.Lock()
     wallet_state = {
@@ -100,24 +110,42 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         primary = tuple(
             (mode, runtime)
             for mode, runtime in runtimes.items()
-            if include_failed or mode != "TEST" or not test_accounts.contexts[1].error
+            if include_failed
+            or mode != "TEST"
+            or (not execution_state["testSuspended"] and not test_accounts.contexts[1].error)
         )
         return primary + tuple(
             (test_accounts.key(number), runtime)
             for number, runtime in test_accounts.runtimes.items()
-            if number != 1 and (include_failed or not test_accounts.contexts[number].error)
+            if number != 1
+            and (
+                include_failed
+                or (
+                    not execution_state["testSuspended"]
+                    and not test_accounts.contexts[number].error
+                )
+            )
         )
 
     def service_items(*, include_failed=False):
         primary = tuple(
             (mode, service)
             for mode, service in services.items()
-            if include_failed or mode != "TEST" or not test_accounts.contexts[1].error
+            if include_failed
+            or mode != "TEST"
+            or (not execution_state["testSuspended"] and not test_accounts.contexts[1].error)
         )
         return primary + tuple(
             (test_accounts.key(number), service)
             for number, service in test_accounts.services.items()
-            if number != 1 and (include_failed or not test_accounts.contexts[number].error)
+            if number != 1
+            and (
+                include_failed
+                or (
+                    not execution_state["testSuspended"]
+                    and not test_accounts.contexts[number].error
+                )
+            )
         )
 
     def sampler_values():
@@ -125,31 +153,43 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             sampler for number, sampler in test_accounts.samplers.items() if number != 1
         )
 
+    def maintain_runtime_metadata(mode, runtime, state):
+        if storage_guard.status != "WARNING" or not storage_guard.can_open:
+            state["status"] = "idle" if storage_guard.status == "OK" else "deferred"
+            return
+        if dict(service_items())[mode].scan_status.get("scanning"):
+            state["status"] = "scan_in_progress"
+            return
+        result = prune_cold_metadata(
+            runtime,
+            time.time_ns() - 90 * 86_400_000_000_000,
+            after_token_id=state["cursor"],
+        )
+        for token_id in result["removed_ids"]:
+            runtime.tokens.pop(token_id, None)
+            runtime._preview_cache.pop(token_id, None)
+        state.update(
+            removed=state["removed"] + result["removed"],
+            cursor=result["next_token_id"],
+            status=result["skipped"] or "checked",
+            lastCheckedAt=time.time_ns() // 1_000_000,
+            lastBatchRemoved=result["removed"],
+            lastBatchScanned=result["scanned"],
+        )
+        state.pop("error", None)
+
     def maintain_public_metadata_once():
         for mode, runtime in runtime_items():
             state = retention.setdefault(mode, {"removed": 0, "cursor": None})
-            if storage_guard.status != "WARNING" or not storage_guard.can_open:
-                state["status"] = "idle" if storage_guard.status == "OK" else "deferred"
+            if mode == "LIVE":
+                maintain_runtime_metadata(mode, runtime, state)
                 continue
-            if dict(service_items())[mode].scan_status.get("scanning"):
-                state["status"] = "scan_in_progress"
-                continue
-            result = prune_cold_metadata(
-                runtime,
-                time.time_ns() - 90 * 86_400_000_000_000,
-                after_token_id=state["cursor"],
-            )
-            for token_id in result["removed_ids"]:
-                runtime.tokens.pop(token_id, None)
-                runtime._preview_cache.pop(token_id, None)
-            state.update(
-                removed=state["removed"] + result["removed"],
-                cursor=result["next_token_id"],
-                status=result["skipped"] or "checked",
-                lastCheckedAt=time.time_ns() // 1_000_000,
-                lastBatchRemoved=result["removed"],
-                lastBatchScanned=result["scanned"],
-            )
+            try:
+                maintain_runtime_metadata(mode, runtime, state)
+            except Exception as exc:
+                # Public metadata cleanup is optional account-local work. Its
+                # failure cannot stop another account's maintenance or trading.
+                state.update(status="error", error=type(exc).__name__)
 
     async def maintain_public_metadata():
         # Bounded owner-loop work; SQLite free pages are reused without VACUUM.
@@ -168,11 +208,10 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             "retentionIntervalSeconds": 60,
         }
 
-    def market_data_view():
+    def market_data_view(*, test_errors=None):
         # Public health exposes aggregate availability only, never held token IDs,
         # market questions, wallet data, quantities or financial amounts.
-        result = {}
-        for mode, service in service_items():
+        def project(mode, service):
             runtime = dict(runtime_items())[mode]
             availability = getattr(runtime, "market_availability", {})
             unavailable = {
@@ -204,7 +243,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 or bool(service.scan_status.get("streamError"))
                 or ready_groups != len(groups)
             )
-            result[mode] = {
+            return {
                 "status": "attention"
                 if unavailable_positions
                 else "recovering"
@@ -217,33 +256,66 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 "readyBookCount": sum(group.get("readyBookCount", 0) for group in groups),
                 "tokenCount": sum(group.get("tokenCount", 0) for group in groups),
             }
+
+        result = {}
+        for mode, service in service_items():
+            if test_errors is None or mode == "LIVE":
+                result[mode] = project(mode, service)
+                continue
+            try:
+                result[mode] = project(mode, service)
+            except Exception:
+                # A broken simulation diagnostic is local to its owner. Do not
+                # claim zero missing books or expose its raw exception details.
+                test_errors.setdefault(mode, "account_diagnostic_error")
+                result[mode] = {"status": "unavailable", "error": "account_diagnostic_error"}
         return result
 
-    def service_freshness_view():
+    def service_freshness_view(*, test_errors=None):
         # Discovery belongs to the shared source, including its in-flight scan.
         # Settlement checks belong to each isolated runtime. Never replay stored
         # settlement_error as evidence of a currently failing process.
-        return {
-            mode: {
+        def project(service):
+            return {
                 "discovery": freshness_view(
                     getattr(getattr(service, "hub", None) or service, "discovery_status", {})
                 ),
                 "settlement": freshness_view(getattr(service, "resolution_status", {})),
             }
-            for mode, service in service_items()
-        }
+
+        result = {}
+        for mode, service in service_items():
+            if test_errors is None or mode == "LIVE":
+                result[mode] = project(service)
+                continue
+            try:
+                result[mode] = project(service)
+            except Exception:
+                test_errors.setdefault(mode, "account_diagnostic_error")
+                result[mode] = {
+                    query: {"status": "attention", "reason": "account_diagnostic_error"}
+                    for query in ("discovery", "settlement")
+                }
+        return result
 
     async def attach(mode, runtime, wallet=None, *, account_id=1):
-        check_start = getattr(runtime, "_check_start_readiness", None)
+        check_start = getattr(
+            runtime,
+            "_original_application_start_check",
+            getattr(runtime, "_check_start_readiness", None),
+        )
 
         def check_application_start():
             # Also rechecked by the original async START after its worker ends.
             # Keep accepted requests from entering RUNNING during shutdown.
             if shutting_down:
                 raise ValueError("服务正在关闭，不能启动交易")
+            if mode == "TEST":
+                require_test_execution()
             check_start()
 
         if check_start is not None:
+            runtime._original_application_start_check = check_start
             runtime._check_start_readiness = check_application_start
         context = test_accounts.attach_runtime(account_id, runtime) if mode == "TEST" else None
         if context is None or account_id == 1:
@@ -256,15 +328,101 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             services[mode] = service
         redeem = RedemptionService(runtime, service, wallet)
         service.on_resolution = redeem.run_once
-        if public_data:
+        background_enabled = mode != "TEST" or not execution_state["testSuspended"]
+        if public_data and background_enabled:
             service.loop_task = asyncio.create_task(service.run())
+        if not background_enabled and market_hub is not None:
+            getattr(market_hub, "services", set()).discard(service)
         sampler = PerformanceSampler(runtime)
         if context is not None:
             context.sampler = sampler
             test_accounts.samplers[account_id] = sampler
         if context is None or account_id == 1:
             samplers[mode] = sampler
-        sampler.task = asyncio.create_task(sampler.run())
+        if background_enabled:
+            sampler.task = asyncio.create_task(sampler.run())
+
+    def require_test_execution():
+        if (
+            execution_state["testSuspended"]
+            or execution_state["transitioning"]
+            or "LIVE" in runtimes
+        ):
+            raise ValueError("LIVE启用或切换期间TEST后台已停止；不能同时运行TEST和LIVE")
+
+    def active_execution_mode():
+        if "LIVE" in runtimes:
+            return "LIVE"
+        return "STOPPED" if execution_state["testSuspended"] else "TEST"
+
+    def can_restore_test_background():
+        return bool(
+            execution_state["testSuspended"]
+            and not execution_state["transitioning"]
+            and not execution_state["cleanupUnconfirmed"]
+            and not shutting_down
+            and not legacy_live_enabled
+            and not activating
+            and "LIVE" not in runtimes
+        )
+
+    def require_tests_paused():
+        running = []
+        for number, context in test_accounts.contexts.items():
+            if context.error or context.runtime is None:
+                continue
+            if context.runtime.status != "PAUSED":
+                running.append(str(number))
+        if running:
+            raise ValueError("启用LIVE前请先暂停TEST账户 " + "、".join(running))
+
+    async def suspend_test_background():
+        # Discard every TEST consumer synchronously before the first await.
+        # A regular PAUSE retains exits/settlement; this explicit mode switch
+        # additionally stops those background jobs, quotations and sampling.
+        execution_state["testSuspended"] = True
+        pending = []
+        for context in test_accounts.contexts.values():
+            service, sampler = context.service, context.sampler
+            if service is not None:
+                service.closed = True
+                if market_hub is not None:
+                    market_hub.services.discard(service)
+                pending.extend(getattr(service, "tasks", {}).values())
+                pending.extend(
+                    task
+                    for task in (
+                        getattr(service, "loop_task", None),
+                        getattr(service, "scan_task", None),
+                        getattr(service, "resolution_task", None),
+                    )
+                    if task is not None
+                )
+            if sampler is not None and sampler.task is not None:
+                pending.append(sampler.task)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        for context in test_accounts.contexts.values():
+            if context.service is not None:
+                await context.service.close()
+            if context.runtime is not None and not context.error:
+                context.runtime.disconnect(tuple(context.runtime.books))
+
+    async def restore_paused_test_background():
+        # Only undo a failed explicit LIVE enable after its private client has
+        # been fully drained. Never resume TEST BUY or a failed LIVE execution.
+        if "LIVE" in runtimes:
+            raise ValueError("LIVE尚未退出，不能恢复TEST后台")
+        execution_state["testSuspended"] = False
+        for number, context in test_accounts.contexts.items():
+            if context.error or context.runtime is None:
+                continue
+            try:
+                await attach("TEST", context.runtime, account_id=number)
+            except Exception as error:
+                await quarantine_test_account(context, error)
 
     async def quarantine_test_account(context, exc):
         """A failed additional account never takes ownership of another consumer."""
@@ -307,14 +465,11 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         runtime = context.runtime
         if runtime is not None and not getattr(runtime.store, "_closed", False):
             try:
-                runtime.pause()
+                close_test_runtime(runtime)
             except Exception:
                 pass
-            try:
-                runtime.native.stop()
-            except Exception:
-                pass
-            runtime.store.close()
+        elif runtime is not None:
+            release_test_runtime(runtime)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -335,12 +490,17 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             if public_data:
                 market_hub = PublicMarketHub()
                 app.state.market_hub = market_hub
-            await attach(
-                "TEST",
-                Runtime(
-                    root / "TEST" / "state.sqlite", clock=test_clock, storage_guard=storage_guard
-                ),
-            )
+            try:
+                await attach(
+                    "TEST",
+                    Runtime(
+                        root / "TEST" / "state.sqlite",
+                        clock=test_clock,
+                        storage_guard=storage_guard,
+                    ),
+                )
+            except Exception as error:
+                await quarantine_test_account(test_accounts.contexts[1], error)
             if legacy_live_enabled:
                 if not password:
                     raise ValueError("启用LIVE前必须配置UI身份验证")
@@ -374,7 +534,13 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 cold["LIVE"] = Store(root / "LIVE" / "state.sqlite", "LIVE")
             for account_id in range(2, test_accounts.count + 1):
                 try:
-                    path = test_accounts.prepare(account_id, runtimes["TEST"].store)
+                    primary = test_accounts.contexts[1]
+                    source = (
+                        primary.runtime.store
+                        if primary.runtime is not None and not primary.error
+                        else None
+                    )
+                    path = test_accounts.prepare(account_id, source)
                     await attach(
                         "TEST",
                         Runtime(path, clock=test_clock, storage_guard=storage_guard),
@@ -437,9 +603,11 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                         await asyncio.gather(retention_task, return_exceptions=True)
                     owned_runtimes = activating | dict(runtime_items(include_failed=True))
                     for sampler in sampler_values():
-                        sampler.task.cancel()
+                        if sampler.task is not None:
+                            sampler.task.cancel()
                     await asyncio.gather(
-                        *(s.task for s in sampler_values()), return_exceptions=True
+                        *(s.task for s in sampler_values() if s.task is not None),
+                        return_exceptions=True,
                     )
                     for r in owned_runtimes.values():
                         if getattr(r.store, "_closed", False):
@@ -469,11 +637,12 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                                 # shutdown drains native callbacks while SQLite is still open.
                                 await r.client.shutdown()
                             else:
-                                r.native.stop()
+                                close_test_runtime(r)
                         except Exception as exc:
                             failures.append(exc)
                         finally:
-                            r.store.close()
+                            if not getattr(r.store, "_closed", False):
+                                r.store.close()
                     for s in cold.values():
                         s.close()
                     if failures:
@@ -489,6 +658,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
     app.state.services = services
     app.state.samplers = samplers
     app.state.test_accounts = test_accounts
+    app.state.execution_state = execution_state
     app.state.test_runtimes = test_accounts.runtimes
     app.state.test_services = test_accounts.services
     app.state.test_samplers = test_accounts.samplers
@@ -913,18 +1083,32 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         mode = mode_name(mode)
         number = account_number(mode, account_id)
         live_status = runtimes["LIVE"].status if "LIVE" in runtimes else "LOCKED"
-        if mode in runtimes:
-            context = test_accounts.contexts[number] if number is not None else None
+        context = test_accounts.contexts[number] if number is not None else None
+        if context is not None or mode in runtimes:
             runtime = context.runtime if context is not None else runtimes[mode]
             service = context.service if context is not None else services[mode]
+            suspended = context is not None and execution_state["testSuspended"]
+            if suspended:
+                service, limit = None, 0
             data = dashboard(runtime, service, limit, "LIVE" in runtimes, position_limit)
+            data["activeExecutionMode"] = active_execution_mode()
+            data["testExecutionSuspended"] = execution_state["testSuspended"]
+            data["modeSwitchInProgress"] = execution_state["transitioning"]
+            data["canRestoreTestBackground"] = can_restore_test_background()
             data["liveStrategyStatus"] = live_status
             data["storage"] = storage_view()
-            data["serviceFreshness"] = service_freshness_view()[
-                test_accounts.key(number) if number is not None else mode
-            ]
             if context is not None:
+                # Only this TEST account is being displayed. Discovery still
+                # belongs to its shared source; settlement remains per account.
+                data["serviceFreshness"] = {
+                    "discovery": freshness_view(
+                        getattr(getattr(service, "hub", None) or service, "discovery_status", {})
+                    ),
+                    "settlement": freshness_view(getattr(service, "resolution_status", {})),
+                }
                 data.update(accountId=number, accountCount=test_accounts.count)
+            else:
+                data["serviceFreshness"] = service_freshness_view()[mode]
             if mode == "LIVE":
                 data["wallet"] = wallet_public()
                 data["liveError"] = bool(runtimes[mode].store.get("live_error"))
@@ -933,6 +1117,10 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         return {
             "version": "0.1.0",
             "executionMode": "LIVE",
+            "activeExecutionMode": active_execution_mode(),
+            "testExecutionSuspended": execution_state["testSuspended"],
+            "modeSwitchInProgress": execution_state["transitioning"],
+            "canRestoreTestBackground": can_restore_test_background(),
             "liveStrategyStatus": live_status,
             "generation": store.generation,
             "liveExecutionEnabled": False,
@@ -964,21 +1152,30 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 "eventCount": 0,
                 "displayEventCount": 0,
                 "pendingEventCount": 0,
-                "diagnostics": {"availableCategories": services["TEST"].categories},
+                "diagnostics": {
+                    "availableCategories": next(
+                        (service.categories for _, service in service_items()), []
+                    )
+                },
             },
         }
 
     @app.get("/api/health")
     async def health():
         failures = {}
+        account_errors = {}
         if not storage_guard.can_open:
             failures["storage"] = "storage_protection"
         if retention_task is not None and retention_task.done() and not shutting_down:
             failures["storageMaintenance"] = "metadata_maintenance_stopped"
         for number, context in test_accounts.contexts.items():
             if context.error:
-                failures[test_accounts.key(number)] = "test_account_unavailable"
-        for mode, service in service_items():
+                account_errors[test_accounts.key(number)] = "test_account_unavailable"
+        for mode, state in retention.items():
+            if mode != "LIVE" and state.get("error"):
+                account_errors.setdefault(mode, "metadata_maintenance_error")
+
+        def service_issues(mode, service):
             runtime = dict(runtime_items())[mode]
             issues = []
             if service.scan_status.get("serviceError"):
@@ -997,25 +1194,78 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 task = runtime.client.reconciliation_task
                 if task is None or task.done():
                     issues.append("live_maintenance_task_stopped")
-            if issues:
-                failures[mode] = ",".join(issues)
-        freshness = service_freshness_view()
+            return issues
+
+        for mode, service in service_items():
+            if mode == "LIVE":
+                issues = service_issues(mode, service)
+                if issues:
+                    failures[mode] = ",".join(issues)
+                continue
+            try:
+                issues = service_issues(mode, service)
+                if issues:
+                    account_errors[mode] = ",".join(issues)
+            except Exception:
+                account_errors.setdefault(mode, "account_diagnostic_error")
+        freshness = service_freshness_view(test_errors=account_errors)
+        market_data = market_data_view(test_errors=account_errors)
+        primary_status = "PAUSED"
+        primary = test_accounts.contexts[1]
+        if not primary.error and primary.runtime is not None:
+            try:
+                if not getattr(primary.runtime.store, "_closed", False):
+                    primary_status = primary.runtime.status
+            except Exception:
+                account_errors.setdefault("TEST", "account_diagnostic_error")
+        available_accounts = 0
+        for number, context in test_accounts.contexts.items():
+            try:
+                available = (
+                    not context.error
+                    and test_accounts.key(number) not in account_errors
+                    and context.runtime is not None
+                    and not getattr(context.runtime.store, "_closed", False)
+                )
+            except Exception:
+                account_errors.setdefault(test_accounts.key(number), "account_diagnostic_error")
+                available = False
+            if not available and "LIVE" not in runtimes and not execution_state["testSuspended"]:
+                account_errors.setdefault(test_accounts.key(number), "test_account_unavailable")
+            available_accounts += bool(available)
+        if (
+            not available_accounts
+            and "LIVE" not in runtimes
+            and not execution_state["testSuspended"]
+        ):
+            failures["testAccounts"] = "no_available_test_account"
+        if execution_state["cleanupUnconfirmed"] or execution_state["persistenceUnconfirmed"]:
+            failures["executionMode"] = "state_unconfirmed"
         attention = any(
             state["status"] == "attention" for mode in freshness.values() for state in mode.values()
         )
         body = {
-            "status": "degraded" if failures else "attention" if attention else "ok",
+            "status": "degraded"
+            if failures
+            else "attention"
+            if account_errors or attention
+            else "ok",
             "version": "0.1.0",
             "mode": "TEST",
-            "strategyStatus": (
-                "PAUSED" if test_accounts.contexts[1].error else runtimes["TEST"].status
-            ),
+            "strategyStatus": primary_status,
             "liveExecutionEnabled": "LIVE" in runtimes,
             "liveWalletStatus": wallet_public()["status"],
+            "activeExecutionMode": active_execution_mode(),
+            "testExecutionSuspended": execution_state["testSuspended"],
+            "modeSwitchInProgress": execution_state["transitioning"],
+            "canRestoreTestBackground": can_restore_test_background(),
             "revision": os.getenv("PM_GIT_REVISION", "local"),
-            "backgroundErrors": failures,
+            "backgroundErrors": failures | account_errors,
+            "accountErrors": account_errors,
+            "testAccountCount": test_accounts.count,
+            "availableTestAccountCount": available_accounts,
             "storage": storage_view(),
-            "marketData": market_data_view(),
+            "marketData": market_data,
             "serviceFreshness": freshness,
         }
         return JSONResponse(body, status_code=503 if failures else 200)
@@ -1253,8 +1503,20 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         async with wallet_lock:
             if "LIVE" in runtimes:
                 return wallet_public()
+            if execution_state["cleanupUnconfirmed"]:
+                raise ValueError("上次LIVE清理尚未确认，请核对并重启程序后再启用")
             if wallet_state["settings"] is None or wallet_state["metadata"] is None:
                 raise ValueError("请先导入或解锁钱包")
+            require_tests_paused()
+            execution_state["transitioning"] = True
+            try:
+                return await enable_live_after_test()
+            finally:
+                execution_state["transitioning"] = False
+
+    async def enable_live_after_test():
+        async with test_accounts.quiesce():
+            require_tests_paused()
             ensure_wallet_identity(wallet_state["metadata"])
             if not (await refresh_readiness())["ready"]:
                 raise ValueError("实盘检查未全部通过，暂不能启用 LIVE")
@@ -1263,7 +1525,17 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
 
             settings = wallet_state["settings"]
             runtime = None
+            cleanup_ok = True
+            previously_suspended = execution_state["testSuspended"]
             try:
+                await _finish_before_cancel(suspend_test_background())
+                try:
+                    # Persist ownership before any private activation. A crash
+                    # during reconciliation must reboot with TEST still stopped.
+                    mode_store.save("LIVE")
+                except Exception:
+                    execution_state["persistenceUnconfirmed"] = True
+                    raise
                 wallet = PolygonWallet(settings)
                 await asyncio.to_thread(wallet.preflight)
                 runtime = Runtime(
@@ -1283,6 +1555,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 wallet_state["error"] = f"LIVE 启用失败（{type(exc).__name__}）；未开始自动交易。"
 
                 async def cleanup():
+                    nonlocal cleanup_ok
                     try:
                         # Keep the cold dashboard available while cleanup awaits.
                         if "LIVE" not in cold:
@@ -1299,21 +1572,86 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                             try:
                                 await service.close()
                             except Exception:
-                                pass
+                                cleanup_ok = False
                         if runtime is not None:
                             try:
                                 await runtime.client.shutdown()
                             except Exception:
-                                pass
+                                cleanup_ok = False
                             finally:
                                 runtime.store.close()
 
-                await _finish_before_cancel(cleanup())
+                async def rollback():
+                    await cleanup()
+                    if (
+                        cleanup_ok
+                        and not execution_state["persistenceUnconfirmed"]
+                        and not shutting_down
+                        and not previously_suspended
+                    ):
+                        try:
+                            mode_store.save("TEST")
+                        except Exception:
+                            execution_state["persistenceUnconfirmed"] = True
+                            wallet_state["error"] += " 运行模式记录未确认，TEST后台保持停止。"
+                        else:
+                            await restore_paused_test_background()
+                    elif not cleanup_ok:
+                        execution_state["cleanupUnconfirmed"] = True
+                        wallet_state["error"] += " 清理尚未确认，TEST后台保持停止；请核对后重启。"
+                    elif execution_state["persistenceUnconfirmed"]:
+                        wallet_state["error"] += (
+                            " 运行模式记录未确认，后台保持停止；请核对存储后明确恢复。"
+                        )
+
+                # Cancellation must retain ownership through the entire
+                # rollback, not escape between private-client drain and TEST
+                # background restoration. No BUY state is ever resumed here.
+                await _finish_before_cancel(rollback())
                 if isinstance(exc, asyncio.CancelledError):
                     raise
                 raise ValueError(wallet_state["error"]) from None
             wallet_state["error"] = None
             return wallet_public()
+
+    @app.post("/api/{mode}/restore-background")
+    async def restore_test_background(mode: str, request: Request, account_id: str | None = None):
+        if mode_name(mode) != "TEST":
+            raise ValueError("此操作仅用于恢复TEST后台，不能启动LIVE")
+        number = account_number("TEST", account_id)
+        test_context(number)
+        payload = await request.json()
+        if payload != {"confirmation": "RESTORE TEST"}:
+            raise ValueError("请明确确认恢复TEST后台；账户仍保持暂停")
+        if execution_state["transitioning"]:
+            raise ValueError("运行模式正在切换，请完成后再明确恢复TEST")
+        async with wallet_lock:
+            if (
+                "LIVE" in runtimes
+                or activating
+                or legacy_live_enabled
+                or execution_state["transitioning"]
+                or execution_state["cleanupUnconfirmed"]
+            ):
+                raise ValueError("LIVE仍启用或尚未确认关闭，不能恢复TEST后台")
+            execution_state["transitioning"] = True
+            try:
+                async with test_accounts.quiesce():
+                    require_tests_paused()
+                    try:
+                        mode_store.save("TEST")
+                    except Exception:
+                        execution_state["persistenceUnconfirmed"] = True
+                        await _finish_before_cancel(suspend_test_background())
+                        raise ValueError(
+                            "运行模式记录未确认，TEST后台保持停止，请核对存储"
+                        ) from None
+                    execution_state["persistenceUnconfirmed"] = False
+                    if execution_state["testSuspended"]:
+                        await _finish_before_cancel(restore_paused_test_background())
+            finally:
+                execution_state["transitioning"] = False
+        return view("TEST", account_id=number)
 
     @app.post("/api/live/wallet/backup")
     async def backup_live_wallet(request: Request):
@@ -1435,6 +1773,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         if number is not None:
 
             async def save_test(context):
+                require_test_execution()
                 count = context.runtime.update_preferences(payload, capital)
                 if public_data:
                     await context.service.sync_subscriptions()
@@ -1463,11 +1802,13 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         mode = mode_name(mode)
         number = account_number(mode, account_id)
         if number is not None:
+            require_test_execution()
             requested = test_context(number).runtime
             requested_generation = requested.store.generation
             requested_epoch = requested._start_epoch
 
             async def start_test(context):
+                require_test_execution()
                 if (
                     context.runtime is not requested
                     or context.runtime.store.generation != requested_generation
@@ -1495,7 +1836,8 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         number = account_number(mode, account_id)
         if number is not None:
             context = test_context(number)
-            context.runtime.pause()
+            if not execution_state["testSuspended"]:
+                context.runtime.pause()
             return view("TEST", account_id=number)
         if mode in runtimes:
             runtimes[mode].pause()
@@ -1512,6 +1854,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             raise ValueError("必须完成TEST双重确认")
 
         async def reset_test(context):
+            require_test_execution()
             runtime = context.runtime
             if runtime.status != "PAUSED":
                 raise ValueError("先暂停该TEST账户再重置")
@@ -1579,6 +1922,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         if number is not None:
 
             async def validate_test(context):
+                require_test_execution()
                 result = await context.runtime.validate_async()
                 # Preserve the legacy validation shape when no account was
                 # selected. New clients explicitly identify even account one.

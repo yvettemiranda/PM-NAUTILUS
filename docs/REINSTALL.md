@@ -1,5 +1,107 @@
 # 新开发环境配置
 
+当前版本统一从 [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) 获取。十账户改造前的固定基准为 [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027)，提交 `4de107a4dc1a4abaaf08b330eb00803391268e2a`，仅供回看和对照，不是默认安装版本。旧开发分支不再作为入口；完整提交历史仍保留。
+
+已验收应用为 `2f6d6f6c860d87bd289300af9ce532f0f2045c74`，后续纯文档提交可使 `main` 比应用 SHA 更新；须核对差异只涉及文档。当前验证与服务器采样见 [HANDOFF](../HANDOFF.md) 和 [VALIDATION](VALIDATION.md)。
+
+本指南适用于新电脑、全新系统或独立开发目录，恢复开发环境不会自动迁移服务器参数、十个 TEST 历史、LIVE 账本或钱包。首次实盘另见[从 GitHub 到首次实盘](START_FRESH_LIVE.md)。
+
+新目录默认十个 TEST 均为 PAUSED，LIVE 未启用；恢复旧数据目录时还须保留 `execution-mode.json`。记录为 LIVE 的目录重启后保持 TEST 后台停止，钱包仍需解锁、核对和明确启用，不会自动恢复交易。明确恢复 TEST 后台也保持全部账户暂停。完整数据路径及迁移范围见[部署手册](DEPLOY.md)。
+
+## 1. 克隆项目
+
+在新电脑终端执行（公开克隆无需登录）：
+
+```sh
+mkdir -p ~/Projects
+cd ~/Projects
+git clone --branch main https://github.com/yvettemiranda/PM-NAUTILUS.git
+cd PM-NAUTILUS
+git status --short
+git log -5 --oneline
+```
+
+源码、提交历史、原始需求、设计、UI、测试、锁文件、Docker/CI、交接与运维文档都在仓库中。继续开发不依赖旧聊天、旧电脑绝对路径或 `.reference/`。需要推送修改时使用有仓库权限的 GitHub 账户。
+
+## 2. 重建开发环境
+
+原生 Mac 环境要求 macOS 26+ arm64；项目固定 Python 3.12.14、uv 0.8.22 和 NautilusTrader 1.231.0。不兼容的 Mac 使用仓库 Linux 容器，参见 [DEPLOY.md](DEPLOY.md)，不要复制旧 `.venv`。
+
+依照 [uv 官方安装说明](https://docs.astral.sh/uv/getting-started/installation/) 先安装下载工具 uv 0.12.10，然后重新打开终端。旧版 uv 0.8.22 的内置目录没有 Python 3.12.14，不能直接用它下载该 Python：
+
+```sh
+curl -LsSf https://astral.sh/uv/0.12.10/install.sh | sh
+```
+
+回到克隆目录执行：
+
+```sh
+uv python install 3.12.14
+# Python 下载完成后，把依赖管理工具恢复为项目验证过的版本：
+curl -LsSf https://astral.sh/uv/0.8.22/install.sh | sh
+uv --version  # 应为 0.8.22
+uv sync --frozen --extra dev
+uv run --frozen ruff check src tests scripts deploy/live-secrets.py
+uv run --frozen ruff format --check src tests scripts deploy/live-secrets.py
+uv run --frozen pytest -q
+uv run --frozen pm-nautilus --offline --data-dir runtime/environment-check
+```
+
+首次下载和加载原生依赖可能较慢；保持终端开启并等待服务显示启动完成，不要仅因短时间没有输出就判定失败。
+
+打开 http://127.0.0.1:8765 查看页面。首次使用新目录应建立十个独立 TEST，各为 PAUSED、100U、每轮 1U，LIVE 未启用。离线预览没有实时行情；检查完用 Ctrl+C 停止。准备连接公开行情时使用 `uv run --frozen pm-nautilus --data-dir runtime/local`，启动仍为 PAUSED，不自动开始正式长期测试。
+
+前端是静态 HTML/CSS/JS，启动无需 Node 或前端构建。需要前端验收时安装 Node 24.20.0，然后运行：
+
+```sh
+node --check src/pm_nautilus/web/app.js
+node --test tests/ui-state.test.mjs
+```
+
+前端测试会执行实际页面控制处理程序，覆盖模式与异步响应隔离、配置与运行操作互斥、未变化分类焦点、全仓摘要、隐藏页返回刷新和超过一万条的历史分页。GitHub Actions 还会验证 Linux x86_64/ARM64 与 Docker 构建。当前代码的测试数量、发布状态和通过证据以 [VALIDATION.md](VALIDATION.md) 最新章节及对应 CI 为准；历史版本的结果不能替代新版本验收。
+
+## 3. 仓库不保存的内容
+
+`.env`、密码、私钥、钱包/API/RPC凭据、加密凭据包、SQLite账本、runtime、日志、参考项目、虚拟机、虚拟环境以及本地 artifacts/backups 均不上传。GitHub 仓库不保存服务器正式 TEST/LIVE 账本；从仓库恢复会创建新的本地开发账本，不会复制服务器或其他电脑的成交历史。
+
+本仓库只保证项目开发材料可恢复。**若用户明确放弃旧 TEST 模拟历史，且本程序尚未产生真实 LIVE 订单、持仓或在途交易，新服务器可以从空白账本开始；旧模拟账本备份不是首次实盘的前提。**已获用户同意公开的 `config/strategy-profile.json` 保存当前交易设置，但空白账本不会因 GitHub 克隆而自动采用它；应先确认文件仍是想用的版本，首次启动前应用到空白 TEST 1／LIVE，再在首次建立的 TEST 2—10 及 LIVE 分别读回核对；已有账户不会同步改参数。钱包以前在本程序之外产生的挂单和持仓也不会因新建账本而消失，仍须在接入时核对。
+
+若要保留旧 TEST 历史，或本程序后来已经有真实 LIVE 交易，应按 [部署指南](DEPLOY.md)保存最新一致性账本及与之配套的加密钱包。网页 LIVE 页可下载、上传单个加密迁移包；新服务器仍须由管理员先配置 Docker、HTTPS 与登录。服务器完整运维备份还应包含整个 `runtime/server`（全部 11 份账本、`execution-mode.json`、钱包及持久状态）、`.env` 和本地 `compose.override.yaml`，解锁密码与备份文件分开保管。旧式 `compose.live.yaml`、`/etc/pm-nautilus/live.json.age` 和 `/run/pm-nautilus/live.json` 仅适用于旧部署，不是网页钱包流程。换电脑后克隆 GitHub 可继续开发或远程管理原服务器，不必把签名私钥复制到新电脑。
+
+若决定恢复旧账本，且快照使用 age 接收公钥加密，还须另行安全迁移对应的 identity 私钥；GitHub 无法恢复它。2026-09-23 的服务器快照采用此方式，解密身份文件与服务器备份位置见 `HANDOFF.md`。选择空白账本开始时，不需要该旧账本的解密 identity。
+
+迁移到新服务器时先暂停旧实例的新买、确认在途订单与链上交易，再停止旧实例，制作并验证**停机后的最终一致性备份**。随后在新服务器恢复加密备份和本地配置，核对账本、设置、代次及真实账户，在网页解锁钱包并重新检查；确保旧实例不会再次使用同一钱包后，才由用户手动启用 LIVE、另行 START。运行时下载的网页备份可能漏掉下载至停机之间的卖出或赎回，不能单独替代最终备份。服务器重启后 LIVE 锁定，须在网页重新人工解锁。
+
+当前 `Store` 会原子地将旧业务集合迁移为 v2 `business_parts`，新账本也采用该格式。新电脑继续开发时使用锁定的当前代码；若要运行历史提交，先在隔离副本上确认其能读取业务及原生账本格式，不能让不支持 v2 的旧代码直接打开已升级的生产数据库。账户待确认授权/赎回及 nonce 记录必须完整恢复，不能因换电脑或网页请求取消而清掉。升级、回滚及钱包工作取消的处理见 [DEPLOY.md 第 5、7 节](DEPLOY.md#5-备份升级回滚)。纯文档更新不改变应用版本，无需为文档同步重启服务器；源码 main SHA 可以比镜像/env/runtime 的固定代码 SHA 更新，须按 HANDOFF 核对差异仅为文档。
+
+需要重新生成完整源码文档或离线源码备份时：
+
+```sh
+uv run --frozen python scripts/full_source.py
+mkdir -p artifacts
+git archive --format=zip --prefix=PM-NAUTILUS/ --output=artifacts/PM-NAUTILUS-source.zip HEAD
+git bundle create artifacts/PM-NAUTILUS.bundle main
+```
+
+## 4. 在新环境接手开发
+
+在 Codex 中打开克隆目录，将以下文字作为接手请求：
+
+> 请完整阅读根目录 README.md、HANDOFF.md、PM-SMALL_Nautilus_Codex_Instructions.md，以及 docs/REINSTALL.md、MIGRATION.md、VALIDATION.md、DEPLOY.md。先核对 git status、版本、当前运行状态和验证记录，恢复锁定的开发环境并执行必要测试。迁移、UI、服务器部署和正式 TEST 已有实现与历史记录，不要从骨架重做或假定需要重新部署。全新目录默认十个 TEST 均 PAUSED；恢复旧目录须保留运行模式意图，LIVE 意图重启时 TEST 后台保持停止，明确恢复 TEST 后台也仍保持 PAUSED。除非我另行明确要求，不启用 LIVE、不读取真实钱包、不真实下单或进行链上写入。维护 HANDOFF.md，区分当前事实、历史记录和未验收部分。
+
+当前状态的权威入口是 HANDOFF.md；历史 `.reference/` 日志不随克隆恢复，已验证结论与复验方法在 VALIDATION.md。可选的本地辅助模板或技能不是应用依赖，缺失时不能阻塞源码恢复。
+
+## 5. 恢复后的工作方式
+
+本地环境通过测试后即可按正常 Git 工作流继续开发。不要把新电脑的 `runtime/local` 当作服务器账本，也不要因为本地环境恢复而自动修改、重启或重新部署服务器；涉及服务器时先读取 HANDOFF.md 的实际目标、版本和运行状态，再按 DEPLOY.md 备份、升级和验收。
+
+真实 LIVE 钱包、授权、资金与链上验收仍是独立阶段。除非用户明确提供对应信息并授权启用，不要将可控测试或正式 TEST 结果解释为实盘已可直接运行。
+
+<details>
+<summary>十账户改造前的历史发布与验收记录</summary>
+
+以下内容按原日期保留，旧应用 SHA、测试数量、两库结构及当时服务器状态仅用于追溯，不是当前部署指令或最新验收结论。当前入口为 `main`，现行状态见 [HANDOFF](../HANDOFF.md) 和 [VALIDATION](VALIDATION.md)。
+
 ## 2026-10-21 执行与查询恢复优化（已发布部署验收）
 
 重装应使用经发布验收的应用版本与其匹配的完整账本、配置及加密钱包备份。新增查询新鲜度只是内存观察，重启后重新核实；不改变持仓成本或自有权利。执行／查询恢复机制见 [执行与恢复优化](EXECUTION_RESILIENCE.md)，当前实际应用版本见 HANDOFF。
@@ -34,91 +136,4 @@
 
 历史 [PR #10](https://github.com/yvettemiranda/PM-NAUTILUS/pull/10) 应用代码 `fefcdb3963f57ceaea8f0eba93686c6024dc1f0f` 的本地 591/33 项回归、PR/main 双架构 CI 和服务器完整验收通过；2026-10-14 13:36 CST 当时状态 TEST/RUNNING、LIVE 未启用、钱包 LOCKED。旧 `512c8a2` 及本轮最新证据见交接/验证记录，历史状态不能代替当前核对。
 
-## 1. 克隆项目
-
-在新电脑终端执行（公开克隆无需登录）：
-
-```sh
-mkdir -p ~/Projects
-cd ~/Projects
-git clone https://github.com/yvettemiranda/PM-NAUTILUS.git
-cd PM-NAUTILUS
-git status --short
-git log -5 --oneline
-```
-
-源码、提交历史、原始需求、设计、UI、测试、锁文件、Docker/CI、交接与运维文档都在仓库中。继续开发不依赖旧聊天、旧电脑绝对路径或 `.reference/`。需要推送修改时使用有仓库权限的 GitHub 账户。
-
-## 2. 重建开发环境
-
-原生 Mac 环境要求 macOS 26+ arm64；项目固定 Python 3.12.14、uv 0.8.22 和 NautilusTrader 1.231.0。不兼容的 Mac 使用仓库 Linux 容器，参见 [DEPLOY.md](DEPLOY.md)，不要复制旧 `.venv`。
-
-依照 [uv 官方安装说明](https://docs.astral.sh/uv/getting-started/installation/) 先安装下载工具 uv 0.12.10，然后重新打开终端。旧版 uv 0.8.22 的内置目录没有 Python 3.12.14，不能直接用它下载该 Python：
-
-```sh
-curl -LsSf https://astral.sh/uv/0.12.10/install.sh | sh
-```
-
-回到克隆目录执行：
-
-```sh
-uv python install 3.12.14
-# Python 下载完成后，把依赖管理工具恢复为项目验证过的版本：
-curl -LsSf https://astral.sh/uv/0.8.22/install.sh | sh
-uv --version  # 应为 0.8.22
-uv sync --frozen --extra dev
-uv run --frozen ruff check src tests scripts deploy/live-secrets.py
-uv run --frozen ruff format --check src tests scripts deploy/live-secrets.py
-uv run --frozen pytest -q
-uv run --frozen pm-nautilus --offline --data-dir runtime/environment-check
-```
-
-首次下载和加载原生依赖可能较慢；保持终端开启并等待服务显示启动完成，不要仅因短时间没有输出就判定失败。
-
-打开 http://127.0.0.1:8765 查看页面。首次使用新目录应为 TEST + PAUSED、100U、每轮1U，LIVE未启用。离线预览没有实时行情；检查完用 Ctrl+C 停止。准备连接公开行情时使用 `uv run --frozen pm-nautilus --data-dir runtime/local`，启动仍为 PAUSED，不自动开始正式长期测试。
-
-前端是静态 HTML/CSS/JS，启动无需 Node 或前端构建。需要前端验收时安装 Node 24.20.0，然后运行：
-
-```sh
-node --check src/pm_nautilus/web/app.js
-node --test tests/ui-state.test.mjs
-```
-
-前端测试会执行实际页面控制处理程序，覆盖模式与异步响应隔离、配置与运行操作互斥、未变化分类焦点、全仓摘要、隐藏页返回刷新和超过一万条的历史分页。GitHub Actions 还会验证 Linux x86_64/ARM64 与 Docker 构建。当前代码的测试数量、发布状态和通过证据以 [VALIDATION.md](VALIDATION.md) 最新章节及对应 CI 为准；历史版本的结果不能替代新版本验收。
-
-## 3. 仓库不保存的内容
-
-`.env`、密码、私钥、钱包/API/RPC凭据、加密凭据包、SQLite账本、runtime、日志、参考项目、虚拟机、虚拟环境以及本地 artifacts/backups 均不上传。GitHub 仓库不保存服务器正式 TEST/LIVE 账本；从仓库恢复会创建新的本地开发账本，不会复制服务器或其他电脑的成交历史。
-
-本仓库只保证项目开发材料可恢复。**若用户明确放弃旧 TEST 模拟历史，且本程序尚未产生真实 LIVE 订单、持仓或在途交易，新服务器可以从空白账本开始；旧模拟账本备份不是首次实盘的前提。**已获用户同意公开的 `config/strategy-profile.json` 保存当前交易设置，但空白账本不会因 GitHub 克隆而自动采用它；应先确认文件仍是想用的版本，再分别应用并读回 TEST、LIVE。钱包以前在本程序之外产生的挂单和持仓也不会因新建账本而消失，仍须在接入时核对。
-
-若要保留旧 TEST 历史，或本程序后来已经有真实 LIVE 交易，应按 [部署指南](DEPLOY.md)保存最新一致性账本及与之配套的加密钱包。网页 LIVE 页可下载、上传单个加密迁移包；新服务器仍须由管理员先配置 Docker、HTTPS 与登录。服务器完整运维备份还应包含 `runtime/server`、`.env` 和本地 `compose.override.yaml`，解锁密码与备份文件分开保管。旧式 `compose.live.yaml`、`/etc/pm-nautilus/live.json.age` 和 `/run/pm-nautilus/live.json` 仅适用于旧部署，不是网页钱包流程。换电脑后克隆 GitHub 可继续开发或远程管理原服务器，不必把签名私钥复制到新电脑。
-
-若决定恢复旧账本，且快照使用 age 接收公钥加密，还须另行安全迁移对应的 identity 私钥；GitHub 无法恢复它。2026-09-23 的服务器快照采用此方式，解密身份文件与服务器备份位置见 `HANDOFF.md`。选择空白账本开始时，不需要该旧账本的解密 identity。
-
-迁移到新服务器时先暂停旧实例的新买、确认在途订单与链上交易，再停止旧实例，制作并验证**停机后的最终一致性备份**。随后在新服务器恢复加密备份和本地配置，核对账本、设置、代次及真实账户，在网页解锁钱包并重新检查；确保旧实例不会再次使用同一钱包后，才由用户手动启用 LIVE、另行 START。运行时下载的网页备份可能漏掉下载至停机之间的卖出或赎回，不能单独替代最终备份。服务器重启后 LIVE 锁定，须在网页重新人工解锁。
-
-当前 `Store` 会原子地将旧业务集合迁移为 v2 `business_parts`，新账本也采用该格式。新电脑继续开发时使用锁定的当前代码；若要运行历史提交，先在隔离副本上确认其能读取业务及原生账本格式，不能让不支持 v2 的旧代码直接打开已升级的生产数据库。账户待确认授权/赎回及 nonce 记录必须完整恢复，不能因换电脑或网页请求取消而清掉。升级、回滚及钱包工作取消的处理见 [DEPLOY.md 第 5、7 节](DEPLOY.md#5-备份升级回滚)。纯文档更新不改变应用版本，无需为文档同步重启服务器；源码 main SHA 可以比镜像/env/runtime 的固定代码 SHA 更新，须按 HANDOFF 核对差异仅为文档。
-
-需要重新生成完整源码文档或离线源码备份时：
-
-```sh
-uv run --frozen python scripts/full_source.py
-mkdir -p artifacts
-git archive --format=zip --prefix=PM-NAUTILUS/ --output=artifacts/PM-NAUTILUS-source.zip HEAD
-git bundle create artifacts/PM-NAUTILUS.bundle main
-```
-
-## 4. 在新环境接手开发
-
-在 Codex 中打开克隆目录，将以下文字作为接手请求：
-
-> 请完整阅读根目录 README.md、HANDOFF.md、PM-SMALL_Nautilus_Codex_Instructions.md，以及 docs/REINSTALL.md、MIGRATION.md、VALIDATION.md、DEPLOY.md。先核对 git status、版本、当前运行状态和验证记录，恢复锁定的开发环境并执行必要测试。迁移、UI、服务器部署和正式 TEST 已有实现与历史记录，不要从骨架重做或假定需要重新部署。默认启动仍为 TEST + PAUSED；除非我另行明确要求，不启用 LIVE、不读取真实钱包、不真实下单或进行链上写入。维护 HANDOFF.md，区分当前事实、历史记录和未验收部分。
-
-当前状态的权威入口是 HANDOFF.md；历史 `.reference/` 日志不随克隆恢复，已验证结论与复验方法在 VALIDATION.md。可选的本地辅助模板或技能不是应用依赖，缺失时不能阻塞源码恢复。
-
-## 5. 恢复后的工作方式
-
-本地环境通过测试后即可按正常 Git 工作流继续开发。不要把新电脑的 `runtime/local` 当作服务器账本，也不要因为本地环境恢复而自动修改、重启或重新部署服务器；涉及服务器时先读取 HANDOFF.md 的实际目标、版本和运行状态，再按 DEPLOY.md 备份、升级和验收。
-
-真实 LIVE 钱包、授权、资金与链上验收仍是独立阶段。除非用户明确提供对应信息并授权启用，不要将可控测试或正式 TEST 结果解释为实盘已可直接运行。
+</details>

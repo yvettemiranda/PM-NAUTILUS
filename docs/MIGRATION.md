@@ -1,50 +1,16 @@
 # PM-SMALL → NautilusTrader 迁移设计与当前架构
 
-## 2026-10-21 执行与查询恢复优化（已发布部署验收）
+当前版本统一从 [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) 获取。十账户改造前的固定基准为 [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027)，提交 `4de107a4dc1a4abaaf08b330eb00803391268e2a`，仅供回看和对照，不是默认安装版本。旧开发分支不再作为入口；完整提交历史仍保留。
 
-本轮执行与恢复优化没有 schema／Token codec 迁移，不压缩或重建账本。仍保留同一代次、参数、自有意图、原生事件、权益与钱包；升级前完整备份，恢复运行后不得回退旧快照丢失新交易。详见 [执行与恢复优化](EXECUTION_RESILIENCE.md)。
+已验收应用为 `2f6d6f6c860d87bd289300af9ce532f0f2045c74`，后续纯文档提交可使 `main` 比应用 SHA 更新；须核对差异只涉及文档。当前验证与服务器采样见 [HANDOFF](../HANDOFF.md) 和 [VALIDATION](VALIDATION.md)。
 
-固定应用 `257b1fbe205cea083d6a9a80ac739fcfea2c17b4` 已部署，2026-10-21 17:40:41 CST 最终验收 PASS；TEST/RUNNING、LIVE=false、钱包 LOCKED，原参数和两库账本保留。实际证据、备份及源码／应用版本区分见 [HANDOFF 最新记录](../HANDOFF.md)；后续纯文档同步不重启应用。
+当前实现支持十个独立 TEST 账户与一个 LIVE 账本，TEST／LIVE 后台互斥；策略、风控、目标价、退出及赎回业务共用原逻辑。共享公开行情、TEST 请求去重和不可变元数据不会共享账户资金或模拟盘口消耗。数据与模式协调详见 [TEST 多账户](TEST_ACCOUNTS.md)及[通用优化](TEST_OPTIMIZATION_20261029.md)。
 
-## 2026-10-20 缺报价仓位按成本暂计（已发布部署验收）
+文末折叠保留旧部署记录，不把历史测试数字或单账户结构当作当前状态。
 
-本轮按用户确认口径调整展示：正常持仓继续显示报价、市值、剩余成本与浮盈亏；`UNAVAILABLE`／`NOT_READY` 仓位稳定排到列表底部，并保留数量、成本、均价、目标和原因。先对全部持仓排序，再截取前 20 笔或展开全部，纯摘要与各页的全仓汇总一致。
-
-资产估算为账面现金（含已冻结现金）＋可估值持仓市值＋缺报价持仓剩余成本＋原有已证明待赎回应收；失败赎回权利仅在未计入现金时以原剩余成本暂计，诊断回款金额不作为现金或应收。盈亏估算保留原已实现盈亏、可估值持仓浮盈亏和原已知待赎回盈亏；缺报价持仓及失败赎回权利的当前浮盈亏暂按 0 计入，并注明数量、成本暂计金额及“浮盈亏暂记 0，恢复报价后重算”。成本暂计不代表可兑现市值，暂记 0 不是已确认零收益，也不抹掉原已实现盈亏。
-
-这些值只用于只读展示，交易报价、原严格完整估值字段、账本、权益、参数和收益历史不改写。新的 `estimatedTotalFunds`／`estimatedPositionValue`、`knownUnrealizedPnl`／`knownTotalPnl` 和逐仓 `estimatedUnrealizedPnl` 明确区分展示估算与真实报价；锁定或未核对的 LIVE 账户继续隐藏账户资料。存储维护保留，LIVE 不启用。
-
-本地最终 886 项 Python（25.30 秒）、41 项页面测试、Ruff 检查／格式（106 文件）通过；14 项部署门禁专项测试通过，代码已做独立复核。[PR #17](https://github.com/yvettemiranda/PM-NAUTILUS/pull/17) 已合并，固定应用为 `2095d1427b6aaf3eae886f1172b2b1c10c8981d0`；代码 push、PR 和 [main CI 39444708014](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39444708014) 的 x86_64／ARM64 回归及 Docker verify 全部通过。2026-10-20 23:19:15 CST（15:19:15 UTC）服务器最终验收 PASS：容器 healthy、restarts=0、OOM=false，原 TEST/RUNNING 已恢复，LIVE=false、钱包 LOCKED，后台错误为空。完整在线 TEST validation PASS（62.018 秒）、真实 TEST 账本隔离副本 Runtime 验证及 TEST/LIVE 两库全部停机逻辑数据保留通过；原参数、代次、native／equity 历史、钱包、schema／codec v2、依赖／配置／安全设置与自动存储维护保留。 本次现场 94 笔持仓中 93 笔正常估值，1 笔归档持仓稳定排在第 94 笔；其他未就绪持仓为 0，剩余 702/702 盘口、4/4 连接组 READY。资产估算包含该笔精确剩余成本，行内浮盈亏显示 `0.00U（暂计）`，既有已实现盈亏保留；完整、摘要、前 20 笔的全仓聚合一致，正常仓排序保留。真实 Chrome 生产页已确认资产和盈亏均显示数字、94 笔可展开及异常项末位成本／零浮盈亏；行情变动会更新估算数字。本轮未启用 LIVE 或操作真实资金，短时验收不等于实盘闭环或长期稳定性证明。 源码／文档 SHA 以本次纯 Markdown 提交及私有 `docs-sync.json` 记录为准；镜像、env 和 runtime 保持固定应用代码，纯文档同步无需重启。下方保留前轮历史证据。
-
-## 2026-10-20 市场可用性增量（历史部署验收）
-
-[PR #16](https://github.com/yvettemiranda/PM-NAUTILUS/pull/16) 已合并，固定应用代码 `ebbe888a56213f3c976fdb5291b045354cb821e9`；代码 push、PR 和 [main CI 39397396195](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39397396195) 的 x86_64／ARM64 回归及 Docker verify 全部通过。本地 880 项 Python、37 项页面、Ruff（105 文件）及 JS/shell 语法通过。源码／文档 SHA 以本次纯 Markdown 提交及私有 `docs-sync.json` 记录为准；纯文档同步仅推进源码，应用镜像、env、runtime 保持上述固定代码，无需重启。
-
-新增进程内 `market_availability` 观察和盘口恢复门槛，严格核对官方市场身份、停单标志与明确不存在的订单簿；确认后隔离同 Market／Condition 的结果订阅及订单入口，保留其他市场、TEST 深度、订单所有权和私有对账。恢复须重新核对身份与开放状态、丢弃旧盘口有效性并取得新的完整快照；预期的未 POST 延期与可能已 POST 的未知结果仍分别处理。这个增量不迁移数据库格式、不重写既有账本，不执行压缩或 VACUUM，原空间维护、FAK、预算、目标及止损条件保留。
-
-投影新增全仓已估值／未估值／停用持仓计数和 `knownPositionValue`，分页外持仓也计入。停用报价为 `UNAVAILABLE`，即使旧 book 标为就绪也不使用旧价；完整资产、持仓价值和未实现盈亏保持未知，可用现金、已实现盈亏及已知持仓小计独立展示。原持仓数量、成本、预算和待结算权利保留，不由归档推断零价值、退款或最终结算。公开健康只提供聚合 `marketData`，已确认停用为非致命 `attention`，与临时恢复 `recovering` 分开。
-
-2026-10-20 17:14:13 CST（09:14:13 UTC）服务器最终 proof 的 `acceptance=true`：容器 healthy、restarts=0、OOM=false，原 TEST/RUNNING 已恢复，LIVE=false、钱包 LOCKED，后台错误为空。在线完整 TEST validation PASS（38.999 秒），真实 TEST 账本隔离副本离线 Runtime 完整验证通过；停机 TEST/LIVE 两库全部逻辑值、schema 和 codec v2 原样保留。原参数、generation、native／equity 历史、加密钱包及绑定、依赖／配置／安全设置保留；既有主机存储工具、units、enabled／active timer 和 Docker 日志 10m×3 保持。本轮没有数据迁移、压缩或 VACUUM。
-
-本次现场为 92 笔持仓，1 笔因 `archived` 报价不可用，其他未就绪持仓为 0；剩余 4/4 连接组 READY、767/767 盘口完整。停用仓位的旧价格已屏蔽，已知持仓小计精确并与完整总额分开；完整资产和未实现盈亏仍为 `null`／未知，数量、成本与权利保留，处置安排待核查。归档不证明零价值、退款、结算或一定恢复。 全仓摘要／分页历史（790 条）、HTTPS／认证及 JS 身份通过，认证 dashboard 语义通过；未做本轮生产浏览器登录后的视觉验收。新扫描、短时复查、备份目录／密文哈希与未演练解密的边界见 [最新验证](VALIDATION.md)。真实资金闭环仍未验收。
-
-## 2026-10-20 自动空间维护增量
-
-Docker 日志 10 MiB×3、每 15 分钟受限主机清理、每 30 秒运行时磁盘/inode 检查；WARNING 时每个已运行模式每分钟最多检查 128 条且结束超过 90 天的无归属公共缓存。主机使用率达到 80% 或可用不超过 6 GiB 时按保留规则回收旧镜像；运行时严重不足、检测失败或采样过期会阻止 START/新增 BUY，并暂缓批量扫描落库。已有交易及卖出/赎回继续遵守原所有权和先落账后发送规则，未明提交不释放或重下。 新增 `intents_token` 索引，删除仅限有严格所有权保护的公共 Token 缓存；不清理财务数据或改变策略参数。正式部署及完整验证已通过，固定应用 `640d1b1dbc58f2e61ef9cf3e131cd37a1e163de9`，运行及容量边界见 [自动存储维护](STORAGE_MAINTENANCE.md) / [最新验证](VALIDATION.md)。
-
-## 2026-10-19 存储与调度增量
-
-保留 `tokens(token_id,payload)`、全部历史及策略规则，新增兼容旧平面 JSON 的 v1 压缩外壳、活跃部分索引与独立扫描任务。已有库转码仅通过显式离线工具执行，不在正常启动隐式重写。格式、冻结字典、旧包/旧镜像边界、双库备份/逻辑核对及合成基准见 [本轮记录](METADATA_OPTIMIZATION_2026-10-19.md)；正式升级、双库离线整理和原 TEST 状态恢复均已验收，应用 `6dac94bf6bc9cbc954a22e112a52dd49a798d2a6`；实际文件减少 31.95%，全部旧逻辑数据保留，详见 [最新验证](VALIDATION.md)。
-
-## 文档范围（2026-10-14）
+## 文档范围
 
 本页保留原迁移依据与规则对应表，并说明当前实现。版本、服务器采样、发布证据和待完成的实盘验收以 [HANDOFF.md](../HANDOFF.md) 和 [VALIDATION.md](VALIDATION.md) 最新章节为准；[原始迁移要求](../PM-SMALL_Nautilus_Codex_Instructions.md) 保留为历史需求来源。
-
-**2026-10-14 本轮精确持仓核对：**[修复 PR](https://github.com/yvettemiranda/PM-NAUTILUS/pull/12)，固定应用代码 `3e765ccb067c8012af5f4ea4f23c3bda91d7372f`；回归：705 项 Python / 33 项页面回归、Ruff/JS 与 PR/main 双架构 CI 通过，明细见 [最新验证](VALIDATION.md)；服务器验收：2026-10-14 19:03 CST 通过，TEST/RUNNING、LIVE 未启用、钱包 LOCKED；实际持仓与授权只读核对通过，资金/POL 与地区仍未满足条件。Data API 全分页仅发现 token，精确自有份额来自本次固定区块的 CTF 原子余额；严格零收益外部残仓的例外不改写归属或策略/资金账本。已有 Safe 正确重连，升级前交易所及两个赎回适配器权限只读核对通过，资金/POL 和地区仍须满足条件。最新证据见交接及验证文档。既有策略参数、筛选、FAK、预算、目标和止损条件保留；代码和受控响应测试不能替代真实买卖及正额赎回验收。
-
-2026-10-13 历史优化由 [PR #8](https://github.com/yvettemiranda/PM-NAUTILUS/pull/8) 发布部署，固定应用代码 `b805c4f11bffe09c0bc5dc610e106223a94025aa` 的双架构 CI 与服务器完整 TEST 验收通过；账本和规则保留。10-14 `512c8a2` 后续修复亦已部署验收。BUY 精度修复对齐锁定 SDK，纠正部分旧模拟数量；旧错误成交数不是必须保持的策略规则。
-
-10-14 [PR #10](https://github.com/yvettemiranda/PM-NAUTILUS/pull/10) 已发布部署代码 `fefcdb3963f57ceaea8f0eba93686c6024dc1f0f`，591 项 Python/33 项页面与 Ruff（85 文件）、PR/main 双架构 CI/Docker verify 和服务器完整验收通过。13:36 CST 状态 TEST/RUNNING、LIVE 未启用、钱包 LOCKED，原规则/账本保留；旧 `512c8a2` 证据留在有日期历史。新代码资金地址留空只读发现已有 canonical 单签 Safe，失败拒绝，不猜测 EOA。没有交易或在途时，用户密码确认清除规范未签名准备及旧绑定后重导，nonce 下限保留，不自动改已有 vault。完整路径仍只支持 EOA(0)/单签 Safe(2)，EOA 允许交易名单资格未验证，Deposit Wallet(3) 不支持。
 
 ## 原迁移版本与依据（2026-09-06）
 
@@ -58,18 +24,20 @@ Docker 日志 10 MiB×3、每 15 分钟受限主机清理、每 30 秒运行时�
 
 ## 应用结构与数据所有权
 
-一个 Python 服务，FastAPI 托管复用的静态 UI 与业务 API；Nautilus Strategy、DataEngine、RiskEngine、ExecutionEngine、Cache、Portfolio 处理行情事件、订单状态、成交、账户和持仓。TEST/LIVE 的配置、执行上下文、盘口消费、订单、账本及资金独立，共用 rules/strategy 和公开市场发现/行情连接；共享公开输入不会合并两套交易状态。默认只创建 TEST 执行上下文，PAUSED；LIVE 未启用时不建立私有交易连接，加密钱包须通过独立导入/解锁流程操作。
+一个 Python 服务，FastAPI 托管复用的静态 UI 与业务 API；Nautilus Strategy、DataEngine、RiskEngine、ExecutionEngine、Cache、Portfolio 处理行情事件、订单状态、成交、账户和持仓。TEST/LIVE 的配置、执行上下文、盘口消费、订单、账本及资金独立，共用 rules/strategy 和公开市场发现/行情连接；共享公开输入不会合并两套交易状态。新目录建立十个独立 TEST 执行上下文，均 PAUSED；LIVE 未启用时不建立私有交易连接。TEST／LIVE 后台互斥，LIVE 意图跨重启保留；加密钱包仍须独立导入／解锁、核对并明确启用。
 
 - `config.py`：所有现有字段的唯一合法范围、固定默认值和 API 转换。
 - `rules.py`：整数微单位、资格、FAK、费用、目标批次和仲裁纯函数。
 - `books.py`：完整性、独立 Bid/Ask 版本及 TEST 按价位消费投影；行情只按 token→event 索引调度。
-- `store.py`：一个模式一套 SQLite 文件。原生 Nautilus 序列化事件是唯一成交事实来源；v2 `business_parts` 按周期/目标/赎回记录分行保存业务投影，按 Event 增量更新，同一 PM-NAUTILUS 账本的旧存储格式可自动迁移。订单归属、提交意图、配置和重放游标仍由应用持有。事件持久化先于业务投影，事务失败或 SQLite 自动回滚均清除未提交的比较缓存；重放可恢复崩溃窗口，不另建独立 fills/positions 财务主账本。
+- `store.py`：每个账户一套 SQLite 文件：TEST 1 使用 `TEST/state.sqlite`，2—10 使用 `TEST/accounts/<编号>/state.sqlite`，LIVE 使用 `LIVE/state.sqlite`，共 11 份。原生 Nautilus 序列化事件是唯一成交事实来源；v2 `business_parts` 按周期/目标/赎回记录分行保存业务投影，按 Event 增量更新，同一 PM-NAUTILUS 账本的旧存储格式可自动迁移。订单归属、提交意图、配置和重放游标仍由应用持有。事件持久化先于业务投影，事务失败或 SQLite 自动回滚均清除未提交的比较缓存；重放可恢复崩溃窗口，不另建独立 fills/positions 财务主账本。
 - `strategy.py`：Nautilus Strategy 编排同一套规则；正式周期从实际非零 Fill 推进；异步买单提交先占用现金、暂锁 Event，确认终态或 Fill 才能释放/转换。未变 Event 不重复预演；已确认零成交终态会安排下一轮约 5 秒定时控制重新评估，覆盖 BUY、目标卖出和止损退出，未知订单仍保持锁。Condition 元数据索引随映射变更维护，历史执行身份用 SQL 读取；网页 START 异步完成完整 SQLite 校验，再在所属事件循环核对当前状态，不重复执行同步扫描。
 - `order_terms.py`、`execution.py`：TEST/LIVE 共用整数出站条款。BUY 的现金金额保留 SDK 整分精度，份额按 tick 对应 amount 精度 canonical 向下量化；Decimal 修复浮点少取一分，TEST 同步去掉旧 0.01 份粗取整。SELL 按 SDK 可签名的 0.01 份向下量化、最低价按 tick 向上量化，并保留最小订单约束；尾仓继续作为自有权利跟踪。TEST 从逐价位可用深度生成原生执行事件，BUY/SELL 使用 CLOB V2 的 pUSD 现金手续费模型，实收份额按成交份额入账。默认 Sandbox 的手续费/深度刷新不能直接作为规则一致性证据。
 - `live.py`：继承所选官方适配器；仅本程序订单；使用官方签名、账户、订单查询和框架核对。SELL 向锁定 SDK 传递精确 Decimal 份额，避免 5.02 被浮点截为 5.01，并核对签名份额及价格；BUY 只窄适配金额算术，官方签名、手续费及余额保护保留。只接受 canonical 精度下限导致的签名比值差异，下一合法档及真实 Fill 的原始限价继续检查。BUY 签名准备与只读钱包检查可并行，实际 POST 前仍核对全部安全条件，每笔新买使用新账户结果。启动原生报告按 token 汇总正数量未结算自有权利，用链上精确余额确认覆盖；等待后重新读取最新权利，新增未读取 token 或不足份额拒绝启动。每 token 只报告本程序总权利，不导入手动资产；订单恢复完成后在 ready 前最终新查份额。旧 10-13 的 12 仓整钱包 API 13→2 次是历史对照，当前使用有界链上余额批次。等待官方 CONFIRMED 回报再形成可支配 Fill，未知/未确认资金及互斥继续占用，不能把取消请求当结果。FAILED 等回报在修改预约前也检查 Condition/token/方向/精确正份额；单笔 FAILED、累计确认加失败数量及 REST matched 不得超出持久化原生上限，异常保留占用。更优价格 BUY 可超过签名最低接收量，该值不被误当原生上限；已提交确认不回退。写盘失败清临时去重，已写盘但未送达的原事件恢复分发，重复确认不重复写入。REST 释放占用前必须确认订单/Token 身份、完整非负成交数量和已最终处理的相关交易；包括市场结算取消在内的终态遵守同一条件。迟到确认通过原生事件去重接入。
 - `live_readiness.py`、`position_custody.py`：就绪检查完整分页发现 token，固定本次新取 Polygon 区块，以 CTF 六位原子余额精确核对自有份额；保留已知零数量 token 的身份，正数量权利在 API 缺行时也查链上。仅未知外部、官方 pUSD/USDC.e、空父集合的标准二元 CTF token 可证明零收益例外；Condition/index/两个 token 的派生身份、已结算 payout 分子之和及所持结果严格零分子、另一结果零余额均须通过。API 数量/价格/价值/`redeemable` 不作证明；正收益、Neg-Risk、未结算、身份不明或 RPC 失败继续阻止或 UNKNOWN。不烧毁、赎回、接管或写入这些外部残仓。
-- `market.py`：公开全分页 Event 发现/栏目同步、元数据标准化、正式 Condition 结果由 `PublicMarketHub` 共享，WS 按两种模式所需 token 的并集订阅，范围大幅缩小时合并稀疏组并释放多余连接。迁移 token 在等待旧 socket 关闭前失去 READY；TEST 缩范围或重置不移动仍由 LIVE 使用的订阅。各模式分别应用行情、消费深度和策略规则。原生 OrderBookDeltas 保留完整性检查并增量更新。故障按受影响订阅与模式隔离，恢复后用户 START 的确认不会被旧 Hub 错误覆盖；TEST 无私有连接。
+- `market.py`：公开全分页 Event 发现/栏目同步、元数据标准化、正式 Condition 结果由 `PublicMarketHub` 共享，TEST 模式的 WS 按十个账户所需 token 的并集订阅，范围大幅缩小时合并稀疏组并释放多余连接。迁移 token 在等待旧 socket 关闭前失去 READY；TEST 缩范围或重置不移动仍由其他 TEST 使用的订阅。LIVE 启用前先退出 TEST 后台；受控混合消费者测试仍覆盖底层共享边界。每个账户分别应用行情、消费深度和策略规则。原生 OrderBookDeltas 保留完整性检查并增量更新。故障按受影响订阅与模式隔离，恢复后用户 START 的确认不会被旧 Hub 错误覆盖；TEST 无私有连接。
 - `redemption.py`：正式结算识别与实际回款分离；公开结果 GET 用有界并行任务，独立于控制检查，状态变更留在所属事件循环。钱包 token 余额每批固定本次新取区块、最多四个并行请求，校验规范 uint256 身份/响应，空集合不访问 RPC，不缓存跨笔结果。仅跟踪本程序已确认取得的权利。按所配置钱包/当前 collateral/standard 或 neg-risk 路径生成并提交官方合约交易；授权与赎回共享账户级待确认占用，提交前持久化原 raw/hash/nonce，未知结果跨重启只能恢复原交易。消费 nonce 下限与确认同事务保存，保存失败不广播；取消线程工作仍等待完成和持久化后释放所有权。收到成功收据并核对实际可用余额后才确认回款。TEST 使用同一状态机和模拟响应。
+- `test_accounts.py`、`test_runtime.py`、`test_market.py`：十账户注册与独立生命周期，复用原策略／行情业务；账户局部故障只隔离其消费者。`test_metadata.py`、`test_quotes.py`、`test_public_queries.py` 仅复用不可变公开观察，不共享交易状态，缓存或状态不确定时使用完整原路径。
+- `execution_mode.py`：原子保存 `execution-mode.json` 中的 TEST／LIVE 意图，不存钱包秘密；LIVE 私有激活前停止全部 TEST 后台并持久化意图，失败保持确认过的停止状态。
 - `app.py`、`views.py`、`performance.py`：API、控制来源与身份校验、全仓摘要和有界历史/权益采样。所有摘要仍按全部仓位、完整 Bid 深度和全部权利计算，明细只按当前面板/数量构建；采样复用资金计算，不生成列表。记录以首次 Fill 序号分页，保留总数量及增量游标，迟到 Fill 更新原订单，不受一万条前缀上限阻断。用户导入的助记词/私钥由自有 HTTPS 网页传给后端加密保存，API 不把已保存的明文密钥或 API 凭据返回前端；解锁后签名密钥会留在服务器内存。部分 LIVE 启用也归应用生命周期管理，请求取消时完成资源关闭；备份/恢复/授权请求取消时保持钱包锁直到实际工作线程结束。应用关闭保留进程锁到清理结束，启动后安全清理专用遗留临时目录。前端按模式丢弃旧缓存及过期控制响应，缓存格式器和未变化分类节点，仅轮询可见浏览器页；隐藏页恢复后立即重查。
 
 ## 规则对应表
@@ -136,7 +104,7 @@ Docker 日志 10 MiB×3、每 15 分钟受限主机清理、每 30 秒运行时�
 
 开发先接通全路径，再集中完整回归；针对性用例验证高风险规则。发布验收包括真实公开行情+无资金模拟、可控订单/账户/赎回响应、重复/迟到/重启、资金数量关系、UI交互、Linux依赖。真实钱包/链上写不运行，另行真实验收清楚标记。
 
-本地合理分段提交并通过普通 Git 工作流同步现有公开仓库；服务器操作只依据 HANDOFF 中当前有效的地址、用户、目录和授权。应用首次启动或重启默认 TEST + PAUSED；维护升级可在完整核对后恢复此前已授权的 TEST RUNNING。LIVE 解锁、启用及 START 是独立控制动作，不由部署或切换页面触发。
+本地合理分段提交并通过普通 Git 工作流同步现有公开仓库；服务器操作只依据 HANDOFF 中当前有效的地址、用户、目录和授权。应用首次使用新目录时十个 TEST 均 PAUSED；重启不恢复 RUNNING，已保存的 LIVE 意图使 TEST 后台继续停止，LIVE 仍须解锁、核对并明确启用。明确恢复 TEST 后台仍保持全部 PAUSED。维护升级可在全部 11 份账本完整核对后，仅显式恢复此前已授权运行的 TEST 账户。LIVE 解锁、启用及 START 是独立控制动作，不由部署或切换页面触发。
 
 ## 主要官方依据
 
@@ -146,3 +114,52 @@ Docker 日志 10 MiB×3、每 15 分钟受限主机清理、每 30 秒运行时�
 - [Polymarket 当前合约](https://docs.polymarket.com/resources/contracts)。
 
 赎回现金与 CONFIRMED 权利的 cash_included 标记随实际余额快照原子持久化；到账后不再把该金额叠加为未收应收，但权利持续跟踪直到原生 SETTLEMENT Fill 归账。本地结算意图没有远端订单副作用，重启后清理未执行意图并继续本地结算；已持久化 Fill 幂等重放。
+
+<details>
+<summary>十账户改造前的历史发布与验收记录</summary>
+
+以下内容按原日期保留，旧应用 SHA、测试数量、两库结构及当时服务器状态仅用于追溯，不是当前部署指令或最新验收结论。当前入口为 `main`，现行状态见 [HANDOFF](../HANDOFF.md) 和 [VALIDATION](VALIDATION.md)。
+
+## 2026-10-21 执行与查询恢复优化（已发布部署验收）
+
+本轮执行与恢复优化没有 schema／Token codec 迁移，不压缩或重建账本。仍保留同一代次、参数、自有意图、原生事件、权益与钱包；升级前完整备份，恢复运行后不得回退旧快照丢失新交易。详见 [执行与恢复优化](EXECUTION_RESILIENCE.md)。
+
+固定应用 `257b1fbe205cea083d6a9a80ac739fcfea2c17b4` 已部署，2026-10-21 17:40:41 CST 最终验收 PASS；TEST/RUNNING、LIVE=false、钱包 LOCKED，原参数和两库账本保留。实际证据、备份及源码／应用版本区分见 [HANDOFF 最新记录](../HANDOFF.md)；后续纯文档同步不重启应用。
+
+## 2026-10-20 缺报价仓位按成本暂计（已发布部署验收）
+
+本轮按用户确认口径调整展示：正常持仓继续显示报价、市值、剩余成本与浮盈亏；`UNAVAILABLE`／`NOT_READY` 仓位稳定排到列表底部，并保留数量、成本、均价、目标和原因。先对全部持仓排序，再截取前 20 笔或展开全部，纯摘要与各页的全仓汇总一致。
+
+资产估算为账面现金（含已冻结现金）＋可估值持仓市值＋缺报价持仓剩余成本＋原有已证明待赎回应收；失败赎回权利仅在未计入现金时以原剩余成本暂计，诊断回款金额不作为现金或应收。盈亏估算保留原已实现盈亏、可估值持仓浮盈亏和原已知待赎回盈亏；缺报价持仓及失败赎回权利的当前浮盈亏暂按 0 计入，并注明数量、成本暂计金额及“浮盈亏暂记 0，恢复报价后重算”。成本暂计不代表可兑现市值，暂记 0 不是已确认零收益，也不抹掉原已实现盈亏。
+
+这些值只用于只读展示，交易报价、原严格完整估值字段、账本、权益、参数和收益历史不改写。新的 `estimatedTotalFunds`／`estimatedPositionValue`、`knownUnrealizedPnl`／`knownTotalPnl` 和逐仓 `estimatedUnrealizedPnl` 明确区分展示估算与真实报价；锁定或未核对的 LIVE 账户继续隐藏账户资料。存储维护保留，LIVE 不启用。
+
+本地最终 886 项 Python（25.30 秒）、41 项页面测试、Ruff 检查／格式（106 文件）通过；14 项部署门禁专项测试通过，代码已做独立复核。[PR #17](https://github.com/yvettemiranda/PM-NAUTILUS/pull/17) 已合并，固定应用为 `2095d1427b6aaf3eae886f1172b2b1c10c8981d0`；代码 push、PR 和 [main CI 39444708014](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39444708014) 的 x86_64／ARM64 回归及 Docker verify 全部通过。2026-10-20 23:19:15 CST（15:19:15 UTC）服务器最终验收 PASS：容器 healthy、restarts=0、OOM=false，原 TEST/RUNNING 已恢复，LIVE=false、钱包 LOCKED，后台错误为空。完整在线 TEST validation PASS（62.018 秒）、真实 TEST 账本隔离副本 Runtime 验证及 TEST/LIVE 两库全部停机逻辑数据保留通过；原参数、代次、native／equity 历史、钱包、schema／codec v2、依赖／配置／安全设置与自动存储维护保留。 本次现场 94 笔持仓中 93 笔正常估值，1 笔归档持仓稳定排在第 94 笔；其他未就绪持仓为 0，剩余 702/702 盘口、4/4 连接组 READY。资产估算包含该笔精确剩余成本，行内浮盈亏显示 `0.00U（暂计）`，既有已实现盈亏保留；完整、摘要、前 20 笔的全仓聚合一致，正常仓排序保留。真实 Chrome 生产页已确认资产和盈亏均显示数字、94 笔可展开及异常项末位成本／零浮盈亏；行情变动会更新估算数字。本轮未启用 LIVE 或操作真实资金，短时验收不等于实盘闭环或长期稳定性证明。 源码／文档 SHA 以本次纯 Markdown 提交及私有 `docs-sync.json` 记录为准；镜像、env 和 runtime 保持固定应用代码，纯文档同步无需重启。下方保留前轮历史证据。
+
+## 2026-10-20 市场可用性增量（历史部署验收）
+
+[PR #16](https://github.com/yvettemiranda/PM-NAUTILUS/pull/16) 已合并，固定应用代码 `ebbe888a56213f3c976fdb5291b045354cb821e9`；代码 push、PR 和 [main CI 39397396195](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39397396195) 的 x86_64／ARM64 回归及 Docker verify 全部通过。本地 880 项 Python、37 项页面、Ruff（105 文件）及 JS/shell 语法通过。源码／文档 SHA 以本次纯 Markdown 提交及私有 `docs-sync.json` 记录为准；纯文档同步仅推进源码，应用镜像、env、runtime 保持上述固定代码，无需重启。
+
+新增进程内 `market_availability` 观察和盘口恢复门槛，严格核对官方市场身份、停单标志与明确不存在的订单簿；确认后隔离同 Market／Condition 的结果订阅及订单入口，保留其他市场、TEST 深度、订单所有权和私有对账。恢复须重新核对身份与开放状态、丢弃旧盘口有效性并取得新的完整快照；预期的未 POST 延期与可能已 POST 的未知结果仍分别处理。这个增量不迁移数据库格式、不重写既有账本，不执行压缩或 VACUUM，原空间维护、FAK、预算、目标及止损条件保留。
+
+投影新增全仓已估值／未估值／停用持仓计数和 `knownPositionValue`，分页外持仓也计入。停用报价为 `UNAVAILABLE`，即使旧 book 标为就绪也不使用旧价；完整资产、持仓价值和未实现盈亏保持未知，可用现金、已实现盈亏及已知持仓小计独立展示。原持仓数量、成本、预算和待结算权利保留，不由归档推断零价值、退款或最终结算。公开健康只提供聚合 `marketData`，已确认停用为非致命 `attention`，与临时恢复 `recovering` 分开。
+
+2026-10-20 17:14:13 CST（09:14:13 UTC）服务器最终 proof 的 `acceptance=true`：容器 healthy、restarts=0、OOM=false，原 TEST/RUNNING 已恢复，LIVE=false、钱包 LOCKED，后台错误为空。在线完整 TEST validation PASS（38.999 秒），真实 TEST 账本隔离副本离线 Runtime 完整验证通过；停机 TEST/LIVE 两库全部逻辑值、schema 和 codec v2 原样保留。原参数、generation、native／equity 历史、加密钱包及绑定、依赖／配置／安全设置保留；既有主机存储工具、units、enabled／active timer 和 Docker 日志 10m×3 保持。本轮没有数据迁移、压缩或 VACUUM。
+
+本次现场为 92 笔持仓，1 笔因 `archived` 报价不可用，其他未就绪持仓为 0；剩余 4/4 连接组 READY、767/767 盘口完整。停用仓位的旧价格已屏蔽，已知持仓小计精确并与完整总额分开；完整资产和未实现盈亏仍为 `null`／未知，数量、成本与权利保留，处置安排待核查。归档不证明零价值、退款、结算或一定恢复。 全仓摘要／分页历史（790 条）、HTTPS／认证及 JS 身份通过，认证 dashboard 语义通过；未做本轮生产浏览器登录后的视觉验收。新扫描、短时复查、备份目录／密文哈希与未演练解密的边界见 [最新验证](VALIDATION.md)。真实资金闭环仍未验收。
+
+## 2026-10-20 自动空间维护增量
+
+Docker 日志 10 MiB×3、每 15 分钟受限主机清理、每 30 秒运行时磁盘/inode 检查；WARNING 时每个已运行模式每分钟最多检查 128 条且结束超过 90 天的无归属公共缓存。主机使用率达到 80% 或可用不超过 6 GiB 时按保留规则回收旧镜像；运行时严重不足、检测失败或采样过期会阻止 START/新增 BUY，并暂缓批量扫描落库。已有交易及卖出/赎回继续遵守原所有权和先落账后发送规则，未明提交不释放或重下。 新增 `intents_token` 索引，删除仅限有严格所有权保护的公共 Token 缓存；不清理财务数据或改变策略参数。正式部署及完整验证已通过，固定应用 `640d1b1dbc58f2e61ef9cf3e131cd37a1e163de9`，运行及容量边界见 [自动存储维护](STORAGE_MAINTENANCE.md) / [最新验证](VALIDATION.md)。
+
+## 2026-10-19 存储与调度增量
+
+保留 `tokens(token_id,payload)`、全部历史及策略规则，新增兼容旧平面 JSON 的 v1 压缩外壳、活跃部分索引与独立扫描任务。已有库转码仅通过显式离线工具执行，不在正常启动隐式重写。格式、冻结字典、旧包/旧镜像边界、双库备份/逻辑核对及合成基准见 [本轮记录](METADATA_OPTIMIZATION_2026-10-19.md)；正式升级、双库离线整理和原 TEST 状态恢复均已验收，应用 `6dac94bf6bc9cbc954a22e112a52dd49a798d2a6`；实际文件减少 31.95%，全部旧逻辑数据保留，详见 [最新验证](VALIDATION.md)。
+
+
+**2026-10-14 本轮精确持仓核对：**[修复 PR](https://github.com/yvettemiranda/PM-NAUTILUS/pull/12)，固定应用代码 `3e765ccb067c8012af5f4ea4f23c3bda91d7372f`；回归：705 项 Python / 33 项页面回归、Ruff/JS 与 PR/main 双架构 CI 通过，明细见 [最新验证](VALIDATION.md)；服务器验收：2026-10-14 19:03 CST 通过，TEST/RUNNING、LIVE 未启用、钱包 LOCKED；实际持仓与授权只读核对通过，资金/POL 与地区仍未满足条件。Data API 全分页仅发现 token，精确自有份额来自本次固定区块的 CTF 原子余额；严格零收益外部残仓的例外不改写归属或策略/资金账本。已有 Safe 正确重连，升级前交易所及两个赎回适配器权限只读核对通过，资金/POL 和地区仍须满足条件。最新证据见交接及验证文档。既有策略参数、筛选、FAK、预算、目标和止损条件保留；代码和受控响应测试不能替代真实买卖及正额赎回验收。
+
+2026-10-13 历史优化由 [PR #8](https://github.com/yvettemiranda/PM-NAUTILUS/pull/8) 发布部署，固定应用代码 `b805c4f11bffe09c0bc5dc610e106223a94025aa` 的双架构 CI 与服务器完整 TEST 验收通过；账本和规则保留。10-14 `512c8a2` 后续修复亦已部署验收。BUY 精度修复对齐锁定 SDK，纠正部分旧模拟数量；旧错误成交数不是必须保持的策略规则。
+
+10-14 [PR #10](https://github.com/yvettemiranda/PM-NAUTILUS/pull/10) 已发布部署代码 `fefcdb3963f57ceaea8f0eba93686c6024dc1f0f`，591 项 Python/33 项页面与 Ruff（85 文件）、PR/main 双架构 CI/Docker verify 和服务器完整验收通过。13:36 CST 状态 TEST/RUNNING、LIVE 未启用、钱包 LOCKED，原规则/账本保留；旧 `512c8a2` 证据留在有日期历史。新代码资金地址留空只读发现已有 canonical 单签 Safe，失败拒绝，不猜测 EOA。没有交易或在途时，用户密码确认清除规范未签名准备及旧绑定后重导，nonce 下限保留，不自动改已有 vault。完整路径仍只支持 EOA(0)/单签 Safe(2)，EOA 允许交易名单资格未验证，Deposit Wallet(3) 不支持。
+</details>

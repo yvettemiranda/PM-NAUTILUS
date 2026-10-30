@@ -9,9 +9,9 @@
 | 当前最新版 | [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) | 十个独立 TEST 账户、通用性能优化、账户故障隔离及 TEST/LIVE 后台互斥；后续开发从这里继续。 |
 | 十账户改造前基准 | [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027) | 固定源码 `4de107a4dc1a4abaaf08b330eb00803391268e2a`，仅供比较和追溯，保持原样。 |
 
-已验收应用代码为 [`2f6d6f6`](https://github.com/yvettemiranda/PM-NAUTILUS/commit/2f6d6f6c860d87bd289300af9ce532f0f2045c74)。本次仓库整理只更新 Markdown 和版本入口，`main` 的程序、依赖、策略配置及测试文件与该应用相同。服务器应用未因文档整理重启。旧工作分支、重复标签及已被取代的 PR 不再作为版本入口；Git 提交历史仍可追溯。
+已验收、已部署应用代码为 [`2e56942`](https://github.com/yvettemiranda/PM-NAUTILUS/commit/2e569428f4d3e853c53ae2dd8d1147357589ce76)，包含本轮启停、关闭、钱包取消及历史分批保护。其后的验收文档提交仅改 Markdown，运行镜像固定该应用 SHA，同步文档不再次重启。旧工作分支、重复标签及已被取代的 PR 不再作为版本入口；Git 提交历史仍可追溯。
 
-2026-10-29 应用验收：**1,221 项 Python、114 项页面回归、AMD64/ARM64 CI 与 Docker 验证全部通过**，服务器十个 TEST 和一个 LIVE 账本保全核对通过。[验证结果](docs/VALIDATION.md)与[当前交接](HANDOFF.md)分别记录证据和运行边界。
+2026-10-30 应用验收：**1,256 项 Python、122 项页面回归、AMD64/ARM64 CI 与 Docker 验证全部通过**，服务器十个 TEST 和一个 LIVE 账本保全核对通过。[验证结果](docs/VALIDATION.md)与[当前交接](HANDOFF.md)分别记录证据和运行边界。
 
 ## TEST 十账户
 

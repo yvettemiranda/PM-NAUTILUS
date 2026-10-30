@@ -2,7 +2,7 @@
 
 当前版本统一从 [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) 获取。十账户改造前的固定基准为 [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027)，提交 `4de107a4dc1a4abaaf08b330eb00803391268e2a`，仅供回看和对照，不是默认安装版本。旧开发分支不再作为入口；完整提交历史仍保留。
 
-已验收应用为 `2f6d6f6c860d87bd289300af9ce532f0f2045c74`，后续纯文档提交可使 `main` 比应用 SHA 更新；须核对差异只涉及文档。当前验证与服务器采样见 [HANDOFF](../HANDOFF.md) 和 [VALIDATION](VALIDATION.md)。
+已验收、已部署应用为 `2e569428f4d3e853c53ae2dd8d1147357589ce76`，后续纯文档提交可使 `main` 比应用 SHA 更新；须核对差异只涉及文档，不因此重启镜像。当前验证与服务器采样见 [HANDOFF](../HANDOFF.md) 和 [VALIDATION](VALIDATION.md)。
 
 ## 当前运行与数据范围
 

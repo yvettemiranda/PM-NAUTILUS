@@ -361,12 +361,14 @@ def test_enable_attaches_paused_and_requires_separate_start(tmp_path, monkeypatc
                 self.mode = mode
                 self.client = FakeClient()
                 self.faulted = None
+                self._start_epoch = 0
 
             @property
             def status(self):
                 return self.store.get("status")
 
             def pause(self):
+                self._start_epoch += 1
                 self.store.put("status", "PAUSED")
 
         class FakeService:

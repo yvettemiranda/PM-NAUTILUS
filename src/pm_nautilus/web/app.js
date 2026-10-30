@@ -19,6 +19,8 @@ const ui = {
   recordLimit: 20,
   recordCursor: null,
   recordHead: null,
+  recordChangesCursor: null,
+  recordChangesFirstSeq: null,
   recordGeneration: null,
   recordRequest: 0,
   recordView: null,
@@ -934,7 +936,7 @@ function renderTradeRecords() {
     : ui.tradeRecordsLoading && !ui.tradeRecordsLoaded
     ? "读取中"
     : ui.tradeRecordsLoaded
-      ? `${formatCount(ui.tradeRecordTotalCount)} 条`
+      ? `${formatCount(ui.tradeRecordTotalCount)} 条${ui.recordChangesCursor ? " · 同步中" : ""}`
       : ui.tradeRecordsError ? "更新失败" : "读取中";
   if (!ui.tradeRecordsExpanded || !panelVisible(ui.activeTab, "records")) return;
 
@@ -1024,16 +1026,20 @@ async function loadTradeRecords({ silent = false, more = false } = {}) {
   try {
     const cursor = more ? ui.recordCursor : null;
     const since = !more ? ui.recordHead : null;
-    const query = `limit=20&paged=true${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${since ? `&since=${encodeURIComponent(since)}` : ""}`;
+    const changesCursor = !more ? ui.recordChangesCursor : null;
+    const query = `limit=20&paged=true&changes_paged=true${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${since ? `&since=${encodeURIComponent(since)}` : ""}${changesCursor ? `&changes_cursor=${encodeURIComponent(changesCursor)}` : ""}`;
     const response = await api(`/api/test/trade-records?${query}`, {}, target);
     if (!sameView(target) || request !== ui.recordRequest || !acceptViewResponse(response, target)) return;
     if (response.generation && ui.dashboard?.generation && response.generation !== ui.dashboard.generation) return;
     const rows = Array.isArray(response.records) ? response.records : [];
     if (ui.recordGeneration !== response.generation) {
       ui.tradeRecords = []; ui.recordCursor = null; ui.recordHead = null;
+      ui.recordChangesCursor = null; ui.recordChangesFirstSeq = null;
     }
     const existing = new Map(ui.tradeRecords.map(row => [row.id, row]));
-    const firstSeq = ui.tradeRecords[0]?.firstSeq ?? Number.POSITIVE_INFINITY;
+    // Keep the original insertion boundary for the entire catch-up round. The
+    // latest normal page must not hide intermediate new orders in later batches.
+    const firstSeq = ui.recordChangesFirstSeq ?? ui.tradeRecords[0]?.firstSeq ?? Number.POSITIVE_INFINITY;
     for (const row of response.changes ?? []) {
       if (existing.has(row.id) || row.firstSeq > firstSeq) existing.set(row.id, row);
     }
@@ -1042,7 +1048,11 @@ async function loadTradeRecords({ silent = false, more = false } = {}) {
     ui.recordGeneration = response.generation;
     ui.recordView = target;
     if (more || !ui.recordCursor) ui.recordCursor = response.nextCursor ?? null;
-    if (!more) ui.recordHead = response.head ?? null;
+    if (!more) {
+      ui.recordChangesCursor = response.nextChangesCursor ?? null;
+      ui.recordChangesFirstSeq = ui.recordChangesCursor ? firstSeq : null;
+      if (!ui.recordChangesCursor) ui.recordHead = response.changesHead ?? response.head ?? null;
+    }
     ui.tradeRecordTotalCount = Number(response.totalCount) || 0;
     ui.tradeRecordsLocked = response.locked === true;
     ui.tradeRecordsLoaded = true;
@@ -1297,6 +1307,7 @@ function clearTradeRecordView() {
   ui.recordRequest += 1;
   ui.recordView = null;
   ui.recordHead = null; ui.recordCursor = null; ui.recordGeneration = null;
+  ui.recordChangesCursor = null; ui.recordChangesFirstSeq = null;
   ui.tradeRecords = []; ui.tradeRecordTotalCount = 0; ui.tradeRecordsRendered = null;
   ui.tradeRecordsLoaded = false; ui.tradeRecordsLoading = false; ui.tradeRecordsLoadedAt = 0;
 }

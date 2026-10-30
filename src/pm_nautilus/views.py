@@ -12,6 +12,7 @@ from .rules import StopLoss, cost
 
 RECORD_CACHE_ORDERS = 10_000  # The API's largest history page.
 PROJECTION_BATCH_ROWS = 128
+RECORD_CHANGE_BATCH_ROWS = 100
 
 
 def iso(ns):
@@ -575,34 +576,51 @@ class _SelectedRecords(_RecordProjection):
             self.apply(event, intent, str(event.client_order_id) not in self.selected, seq)
 
 
-def _history_ids(path, head, before, limit, since):
+def _history_ids(path, head, before, limit, since, changes_head, after, changes_paged):
     # This connection is independent of the writable runtime connection and
     # always closed, including cancellation of the awaiting HTTP request.
     with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+        # Bound work materialized in Python by fill events, not by a distinct
+        # order query followed by an in-memory slice of the entire delta.
+        fills = (
+            db.execute(
+                "SELECT e.seq,i.order_id FROM native_events e NOT INDEXED JOIN intents i "
+                "ON i.order_id=json_extract(CAST(e.payload AS TEXT),'$.client_order_id') "
+                "WHERE e.kind='OrderFilled' AND e.seq>? AND e.seq<=? "
+                "ORDER BY e.seq LIMIT ?",
+                (after, changes_head, RECORD_CHANGE_BATCH_ROWS + 1),
+            ).fetchall()
+            if since is not None and after < changes_head
+            else []
+        )
+        more_changes = len(fills) > RECORD_CHANGE_BATCH_ROWS
+        fills = fills[:RECORD_CHANGE_BATCH_ROWS]
+        covered = fills[-1][0] if more_changes else changes_head
+        # Old clients acknowledge `head` after every response and only insert
+        # changes newer than their current newest row. While catching up, their
+        # normal page must therefore stay within the acknowledged prefix too.
+        page_head = changes_head if changes_paged else head if before is not None else covered
         groups = (
             "SELECT i.order_id,min(e.seq) AS first_seq FROM native_events e "
             "JOIN intents i ON i.order_id=json_extract(CAST(e.payload AS TEXT),'$.client_order_id') "
             "WHERE e.kind='OrderFilled' AND e.seq<=? GROUP BY i.order_id "
         )
+        page_before = before if before is not None else page_head + 1
         page = (
             db.execute(
                 groups + "HAVING min(e.seq)<? ORDER BY first_seq DESC LIMIT ?",
-                (head, before, limit),
+                (page_head, page_before, limit),
             ).fetchall()
-            if before
+            if before is not None or page_head < head
             else []
         )
-        changed = (
-            db.execute(
-                "SELECT i.order_id FROM native_events e NOT INDEXED JOIN intents i "
-                "ON i.order_id=json_extract(CAST(e.payload AS TEXT),'$.client_order_id') "
-                "WHERE e.kind='OrderFilled' AND e.seq>? AND e.seq<=? GROUP BY i.order_id",
-                (since, head),
-            ).fetchall()
-            if since is not None and since < head
-            else []
+        return (
+            [row[0] for row in page],
+            list(dict.fromkeys(row[1] for row in fills)),
+            covered,
+            more_changes,
+            page_head,
         )
-        return [row[0] for row in page], [row[0] for row in changed]
 
 
 def _history_cursor(value, generation):
@@ -618,7 +636,27 @@ def _history_cursor(value, generation):
         raise ValueError("交易历史游标已失效，请重新读取") from None
 
 
-async def records_page_async(r, limit=20, cursor=None, since=None):
+def _history_changes_cursor(value, generation, since, head):
+    if value is None:
+        return head, since
+    try:
+        owner, original, target, after = value.rsplit(":", 3)
+        original, target, after = int(original), int(target), int(after)
+        if (
+            owner != generation
+            or since is None
+            or original != since
+            or not 0 <= since <= after <= target <= head
+        ):
+            raise ValueError
+        return target, after
+    except (AttributeError, ValueError):
+        raise ValueError("交易历史增量游标已失效，请重新读取") from None
+
+
+async def records_page_async(
+    r, limit=20, cursor=None, since=None, changes_cursor=None, changes_paged=False
+):
     """Stable first-fill keyset pages and incremental updates, without a 10k cap."""
     await records_async(r, min(limit, RECORD_CACHE_ORDERS))
     async with r._record_projection_lock:
@@ -631,13 +669,28 @@ async def records_page_async(r, limit=20, cursor=None, since=None):
         head = projection.cursor
         if since_seq is not None and since_seq > head:
             raise ValueError("交易历史游标已失效，请重新读取")
-        page_ids, changed_ids = await asyncio.to_thread(
-            _history_ids, r.store.path, head, before, limit, since_seq
+        changes_head, after = _history_changes_cursor(changes_cursor, generation, since_seq, head)
+        page_ids, changed_ids, covered, more_changes, page_head = await asyncio.to_thread(
+            _history_ids,
+            r.store.path,
+            head,
+            before,
+            limit,
+            since_seq,
+            changes_head,
+            after,
+            changes_paged,
         )
-        if before is None:
+        if before is None and page_head == head:
             page_ids = list(islice(reversed(projection.order_ids), limit))
         selected = tuple(dict.fromkeys([*page_ids, *changed_ids]))
         missing = tuple(oid for oid in selected if oid not in projection.groups)
+        if since_seq is not None and more_changes and missing:
+            # A long-disconnected view can otherwise replay the whole journal
+            # for every cold delta batch. Expire only this derived view cursor:
+            # clients reload the latest page and can page through all history.
+            # Small late fills of old orders still take the exact ordinary path.
+            raise ValueError("交易历史增量游标已失效，请重新读取最新记录")
         extra = None
         try:
             if missing:
@@ -682,7 +735,13 @@ async def records_page_async(r, limit=20, cursor=None, since=None):
                 "changes": [row(oid) for oid in changed_ids],
                 "totalCount": projection.total_count,
                 "generation": generation,
-                "head": f"{generation}:{head}",
+                # `head` is the completely covered delta prefix for legacy
+                # clients. Rows themselves remain the current full projection.
+                "head": f"{generation}:{covered}",
+                "changesHead": f"{generation}:{changes_head}",
+                "nextChangesCursor": (
+                    f"{generation}:{since_seq}:{changes_head}:{covered}" if more_changes else None
+                ),
                 "nextCursor": f"{generation}:{page[-1]['firstSeq']}" if page else None,
             }
         except BaseException:

@@ -1595,35 +1595,80 @@ class LiveExecution(PolymarketExecutionClient):
 
     async def shutdown(self):
         self.ready = False
-        refresh_tasks = list(self._stale_buy_refresh_tasks.values())
-        for task in refresh_tasks:
+        auxiliary = set(self._stale_buy_refresh_tasks.values())
+        if self.reconciliation_task is not None:
+            auxiliary.add(self.reconciliation_task)
+        for task in auxiliary:
             task.cancel()
-        if refresh_tasks:
-            await asyncio.gather(*refresh_tasks, return_exceptions=True)
-        if self.reconciliation_task:
-            self.reconciliation_task.cancel()
-            await asyncio.gather(self.reconciliation_task, return_exceptions=True)
+
+        async def cleanup():
+            errors = []
+
+            async def attempt(operation):
+                try:
+                    await operation
+                except BaseException as exc:
+                    errors.append(exc)
+
+            if auxiliary:
+                await asyncio.gather(*auxiliary, return_exceptions=True)
             self.reconciliation_task = None
-        self.owner.pause()
-        engine = self.owner.native.execution
-        # The pinned engine enqueues commands with call_soon_threadsafe. Let those
-        # callbacks run, then dispatch all already accepted commands before waiting
-        # for the adapter's network tasks. The journal retains unknown remote results.
-        await asyncio.sleep(0)
-        while engine.cmd_qsize():
-            await asyncio.sleep(0)
-        pending = [task for task in self._tasks if not task.done()]
-        if pending:
-            await asyncio.wait(pending, timeout=5)
-        try:
-            await self._disconnect()
-        finally:
             try:
-                await self.cancel_pending_tasks()
-            finally:
-                # Stopping the engine only queues sentinels. SQLite must remain open
-                # until native events ahead of those sentinels have been applied.
+                self.owner.pause()
+            except BaseException as exc:
+                errors.append(exc)
+            engine = self.owner.native.execution
+
+            async def drain_commands():
+                # Commands accepted before PAUSE still belong to this owner.
+                # Pause persistence failure must not skip their dispatch either.
+                await asyncio.sleep(0)
+                while engine.cmd_qsize():
+                    await asyncio.sleep(0)
+                pending = [task for task in self._tasks if not task.done()]
+                if pending:
+                    await asyncio.wait(pending, timeout=5)
+
+            await attempt(drain_commands())
+            await attempt(self._disconnect())
+            await attempt(self.cancel_pending_tasks())
+            # The SDK's cancellation helper has a grace timeout. Its surviving
+            # finalizers must still finish while this owner's SQLite is open.
+            pending = [task for task in self._tasks if not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            try:
                 self.owner.native.stop()
-                queues = [engine.get_cmd_queue_task(), engine.get_evt_queue_task()]
-                await asyncio.gather(*(task for task in queues if task), return_exceptions=True)
+            except BaseException as exc:
+                errors.append(exc)
+            # Native stop queues sentinels; callbacks ahead of them still write
+            # the journal. Never report completion before those queues exit.
+            queues = [engine.get_cmd_queue_task(), engine.get_evt_queue_task()]
+            await asyncio.gather(*(task for task in queues if task), return_exceptions=True)
+            try:
                 self._set_connected(False)
+            except BaseException as exc:
+                errors.append(exc)
+            if errors:
+                for other in errors[1:]:
+                    errors[0].add_note(f"Additional LIVE shutdown failure: {type(other).__name__}")
+                raise errors[0]
+
+        # Canceling a waiter cannot transfer ownership of still-running private
+        # tasks or native callbacks to a caller that may now close the ledger.
+        task = asyncio.create_task(cleanup())
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as cancelled:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except BaseException:
+                    break
+            if not task.cancelled() and (error := task.exception()) is not None:
+                raise cancelled from error
+            raise

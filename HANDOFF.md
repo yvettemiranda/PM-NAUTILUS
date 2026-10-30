@@ -9,7 +9,7 @@
 | [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) | 当前十账户最新版及现行文档，默认开发和下载入口。 |
 | [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027) | 十账户改造前的固定源码 `4de107a4dc1a4abaaf08b330eb00803391268e2a`，不继续修改。 |
 
-已验收、已部署应用为 `2f6d6f6c860d87bd289300af9ce532f0f2045c74`。此次 GitHub 整理只修改 Markdown，`main` 的程序、依赖、配置和测试与该 SHA 完全相同；仓库文档 HEAD 可前进，不能据此误报服务器运行了新镜像。此轮未修改服务器、启停账户、调整参数、解锁钱包或操作资金。
+上次已验收、已部署应用为 `2f6d6f6c860d87bd289300af9ce532f0f2045c74`。2026-10-30 的启停、异常关闭、钱包取消和历史分批修复见 [修复说明](docs/EGM_FIXES_20261030.md)；源码发布或文档 HEAD 前进不能据此误报服务器已经运行新镜像，实际部署结果另行记录。
 
 旧工作分支和重复基准标签已从 GitHub 入口移除，旧 PR #18 已关闭，未将它的原地重签方案合入当前交易逻辑；相关问题已经由后续 PR #19 的终结未提交意图及重新评估机制覆盖。提交历史继续保留。后续操作以 `main` 和完整应用 SHA 为准，旧部署脚本中的历史分支名不再作为拉取入口。规则见 [版本维护](docs/VERSIONS.md)。
 

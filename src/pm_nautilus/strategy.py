@@ -908,10 +908,12 @@ class Runtime:
         self._finish_start(self.validate())
 
     async def start_async(self):
+        epoch = self._start_epoch
         if self.storage_guard is not None:
             await self.storage_guard.refresh()
+        if epoch != self._start_epoch:
+            raise ValueError("启动核对期间状态已更改，请重新点击 START")
         self._check_start_readiness()
-        epoch = self._start_epoch
         result = await self.validate_async()
         if epoch != self._start_epoch:
             raise ValueError("启动核对期间状态已更改，请重新点击 START")

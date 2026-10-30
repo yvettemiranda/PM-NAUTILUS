@@ -145,7 +145,7 @@ cd /opt/pm-nautilus
 
 备份会让 age 再次询问口令，以解密到管道并用 `tar -t` 验证压缩包；全部成功才将临时密文原子链接到最终文件并重启。若任一步失败，命令立即中止，不能继续升级或恢复旧快照；原服务保持停止，排查后用维护前相同的 Compose 文件组合显式恢复。网页钱包版本的加密文件位于 `runtime/server/wallet/live.vault`，已随 `runtime/server` 一起备份；恢复后仍须在网页解锁并核对。只有旧式 LIVE 覆盖部署才需检查 `/run/pm-nautilus/live.json` 并继续使用第三份 Compose 文件。
 
-也可用 `age -r <接收公钥>` 加密备份，并把对应的 age identity 私钥单独保存在可信电脑上；服务器只需要公钥。先在持有 identity 的可信终端用 `age -d -i <identity路径> -o - <快照> | tar -tzf -` 验证密文与归档，再把解密后的内容通过受认证的传输方式恢复到已停止的目标服务器。identity、密文和服务器不能只保留在同一处；换电脑前须安全转存 identity。2026-09-23 的停机快照采用此方式，具体路径与状态记在根目录 `HANDOFF.md`，不上传 GitHub。
+也可用 `age -r <接收公钥>` 加密备份，并把对应的 age identity 私钥单独保存在可信电脑上；服务器只需要公钥。先在持有 identity 的可信终端用 `age -d -i <identity路径> -o - <快照> | tar -tzf -` 验证密文与归档，再把解密后的内容通过受认证的传输方式恢复到已停止的目标服务器。identity、密文和服务器不能只保留在同一处；换电脑前须安全转存 identity。旧 recipient 快照的具体位置及对应 identity 应由持有人在私有运维记录中确认；本仓库不能恢复该私钥，也不保证当前 HANDOFF 仍记录旧快照位置。
 
 网页钱包版本的 `runtime/server/wallet/live.vault` 应与 LIVE 账本保持同一份备份；若是旧式手工加密凭据部署，另须备份 `/etc/pm-nautilus/live.json.age`，且不得复制 `/run/pm-nautilus/live.json` 明文。账本快照若用 age 口令模式，须保存对应口令；若用 recipient 公钥模式，须保存对应 identity 私钥。备份及解锁文件不能上传 Git。备份时不要把运行中的单个 `.sqlite` 拷贝而遗漏 WAL。LIVE 账本可能含待广播的已签名交易原文，仍按敏感数据处理。
 

@@ -72,6 +72,7 @@ Node 24.20.0 用于页面验证，程序运行不需要 Node。部署固定已�
 - [两个版本的维护规则](docs/VERSIONS.md)
 - [TEST 多账户](docs/TEST_ACCOUNTS.md)
 - [通用优化与模式互斥](docs/TEST_OPTIMIZATION_20261029.md)
+- [启停、关闭、钱包取消与历史分批修复](docs/EGM_FIXES_20261030.md)
 - [验证结果与未验收范围](docs/VALIDATION.md)
 - [部署、备份、升级与回滚](docs/DEPLOY.md)
 - [新开发环境](docs/REINSTALL.md)、[首次 LIVE](docs/START_FRESH_LIVE.md)

@@ -1344,8 +1344,8 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             rpc_url = os.getenv("PM_POLYGON_RPC_URL", "https://polygon-bor-rpc.publicnode.com")
             if public_address is None or not public_address.strip():
                 try:
-                    public_address = await asyncio.to_thread(
-                        discover_funder, material.address, rpc_url=rpc_url
+                    public_address = await _finish_before_cancel(
+                        asyncio.to_thread(discover_funder, material.address, rpc_url=rpc_url)
                     )
                 except LiveSetupError:
                     raise ValueError(
@@ -1359,24 +1359,34 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             }
             ensure_wallet_identity(proposed)
             try:
-                settings = await asyncio.to_thread(
-                    build_live_settings, material, public_address, rpc_url=rpc_url
+                settings = await _finish_before_cancel(
+                    asyncio.to_thread(
+                        build_live_settings, material, public_address, rpc_url=rpc_url
+                    )
                 )
             except LiveSetupError as exc:
                 stage = exc.as_public()["stage"]
                 raise ValueError(f"钱包连接失败（{stage}），请核对地址、网络和钱包类型") from None
             validate_settings(settings)
-            metadata = await asyncio.to_thread(write_vault, vault_path, settings, password_input)
-            try:
-                cold["LIVE"].put("live_wallet_identity", metadata)
-            except Exception:
-                # The vault was durably created; unlock can safely finish the
-                # binding only while the ledger has no trading activity.
-                wallet_state["error"] = "钱包已加密保存；账本绑定未完成，请重新解锁核对。"
-                raise ValueError(wallet_state["error"]) from None
-            wallet_state.update(settings=settings, metadata=metadata, approval=None, error=None)
-            await refresh_readiness()
-            return wallet_public()
+
+            async def finish_import():
+                metadata = await asyncio.to_thread(
+                    write_vault, vault_path, settings, password_input
+                )
+                try:
+                    cold["LIVE"].put("live_wallet_identity", metadata)
+                except Exception:
+                    # The vault was durably created; unlock can safely finish the
+                    # binding only while the ledger has no trading activity.
+                    wallet_state["error"] = "钱包已加密保存；账本绑定未完成，请重新解锁核对。"
+                    raise ValueError(wallet_state["error"]) from None
+                wallet_state.update(settings=settings, metadata=metadata, approval=None, error=None)
+                await refresh_readiness()
+                return wallet_public()
+
+            # Once publication starts, keep wallet/process ownership through the
+            # identity binding and state update, even after repeated cancellation.
+            return await _finish_before_cancel(finish_import())
 
     @app.post("/api/live/wallet/unlock")
     async def unlock_live_wallet(request: Request):
@@ -1821,9 +1831,28 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             return await test_operation(number, start_test)
         if mode not in runtimes:
             raise ValueError("LIVE 钱包尚未启用；请先完成网页钱包检查")
+        requested = runtimes[mode]
+        requested_generation = requested.store.generation
+        requested_epoch = requested._start_epoch
+
+        def check_live_start():
+            if shutting_down:
+                raise HTTPException(503, "服务正在关闭")
+            if (
+                runtimes.get(mode) is not requested
+                or requested.store._closed
+                or requested.store.generation != requested_generation
+                or requested._start_epoch != requested_epoch
+            ):
+                raise ValueError("启动排队期间状态已更改，请重新点击 START")
+
+        check_live_start()
         if mode == "LIVE" and vault_path.is_file():
             async with wallet_lock:
-                if not (await refresh_readiness())["ready"]:
+                check_live_start()
+                readiness = await refresh_readiness()
+                check_live_start()
+                if not readiness["ready"]:
                     raise ValueError("实盘账户检查未通过，不能开始交易")
                 await services[mode].start_async()
         else:
@@ -1889,6 +1918,8 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         cursor: str | None = None,
         since: str | None = None,
         account_id: str | None = None,
+        changes_cursor: str | None = None,
+        changes_paged: bool = False,
     ):
         mode = mode_name(mode)
         number = account_number(mode, account_id)
@@ -1898,7 +1929,9 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
 
             async def read_test(context):
                 data = (
-                    await records_page_async(context.runtime, limit, cursor, since)
+                    await records_page_async(
+                        context.runtime, limit, cursor, since, changes_cursor, changes_paged
+                    )
                     if paged
                     else await records_async(context.runtime, limit)
                 )
@@ -1907,7 +1940,9 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             return await test_operation(number, read_test)
         return (
             (
-                await records_page_async(runtimes[mode], limit, cursor, since)
+                await records_page_async(
+                    runtimes[mode], limit, cursor, since, changes_cursor, changes_paged
+                )
                 if paged
                 else await records_async(runtimes[mode], limit)
             )

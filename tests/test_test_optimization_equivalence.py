@@ -134,7 +134,10 @@ async def paired_runtimes(tmp_path, *, fees=False):
             clock.set_time(DAY)
             path = tmp_path / label / "state.sqlite"
             runtime = runtime_type(path, clock=clock)
-            runtime.update_preferences({}, capital="2")
+            # Fee markets need 2U so the signed BUY clears the CLOB $1 floor.
+            runtime.update_preferences(
+                {"orderAmount": "2"} if fees else {}, capital="4" if fees else "2"
+            )
             runtime.add_tokens(tokens)
             pair.append(
                 SimpleNamespace(

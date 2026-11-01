@@ -307,15 +307,17 @@ def test_multilevel_fak_records_group_native_fills(tmp_path):
 
 def test_existing_cycle_freeze_and_new_fill_target_use_current_settings(tmp_path):
     r, clock, t = setup(tmp_path)
+    # The add-on must itself reach the CLOB $1 BUY floor: 1.5U budget, 0.5U first.
+    r.update_preferences({"orderAmount": "1.5"})
     r.book("1", [(90000, 100_000_000)], [(100000, 5_000_000)])
     r.start()
     assert r.business["cycles"]["event"]["spent"] == 500000
     r.update_preferences(
         {"orderAmount": "2", "targetSellPriceMultiplier": "3", "stopLossEnabled": False}
     )
-    r.book("1", [(90000, 100_000_000)], [(100000, 10_000_000)])
+    r.book("1", [(90000, 100_000_000)], [(100000, 15_000_000)])
     cycle = r.business["cycles"]["event"]
-    assert cycle["spent"] == cycle["budget"] == 1_000_000
+    assert cycle["spent"] == cycle["budget"] == 1_500_000
     assert cycle["stop"]["enabled"] is True
     assert sorted(x["price"] for x in r.business["targets"].values()) == [150000, 300000]
     assert r.validate()["ok"]

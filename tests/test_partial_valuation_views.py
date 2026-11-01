@@ -92,14 +92,15 @@ def test_stable_full_partition_precedes_twenty_position_preview_and_all_totals(
 def test_partial_sale_keeps_exact_remaining_cost_and_already_realized_profit(tmp_path):
     r, _, token = setup(tmp_path, fees=True)
     r.update_preferences({"orderAmount": "2"})  # Clear the CLOB $1 BUY floor after fees.
-    r.book("1", [(15_000, 100_000_000)], [(20_000, 50_000_000)])
+    # 47M shares make the truncated fee leave a non-terminating average price.
+    r.book("1", [(15_000, 100_000_000)], [(20_000, 47_000_000)])
     r.start()
     r.pause()
     # Real native TEST fills allocate the historical fee-inclusive basis using
     # integer arithmetic. Remaining cost cannot be reconstructed from rounded avg.
-    r.book("1", [(35_000, 7_000_000)], [(20_000, 50_000_000)])
+    r.book("1", [(35_000, 7_000_000)], [(20_000, 47_000_000)])
     cycle = r.business["cycles"][token.event_id]
-    assert cycle["quantity"] == 43_000_000 and cycle["cost"] == 893_712
+    assert cycle["quantity"] == 40_000_000 and cycle["cost"] == 831_354
     realized = r.business["realized"]
     assert realized > 0
     expected_history = records(r, 20)
@@ -109,11 +110,11 @@ def test_partial_sale_keeps_exact_remaining_cost_and_already_realized_profit(tmp
     try:
         positions, total = portfolio_view(r)
         row = positions[0]
-        assert row["remainingCost"] == "0.893712"
-        assert micros(row["averageBuyPrice"]) * 43 != cycle["cost"]
+        assert row["remainingCost"] == "0.831354"
+        assert micros(row["averageBuyPrice"]) * 40 != cycle["cost"]
         assert row["unrealizedPnl"] is None and row["executableSellValue"] is None
         assert row["estimatedUnrealizedPnl"] == "0"
-        assert total["unpricedPositionCost"] == total["estimatedPositionValue"] == "0.893712"
+        assert total["unpricedPositionCost"] == total["estimatedPositionValue"] == "0.831354"
         assert total["knownPositionValue"] == total["knownUnrealizedPnl"] == "0"
         assert total["knownTotalPnl"] == total["realizedPnl"] == units(realized)
         assert total["estimatedTotalFunds"] == units(r.cash() + cycle["cost"])

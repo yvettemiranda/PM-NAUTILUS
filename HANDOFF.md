@@ -9,11 +9,19 @@
 | [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) | 当前十账户最新版及现行文档，默认开发和下载入口。 |
 | [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027) | 十账户改造前的固定源码 `4de107a4dc1a4abaaf08b330eb00803391268e2a`，不继续修改。 |
 
-当前已部署应用为 `6ae9fcaadff86db9405d22adf95b5e7677d01cce`（2026-11-01，见下节）；其前一版为 `8ab1937e84b1f63db3db46a07eca8a4d17876a58`。在此前启停、异常关闭、钱包取消和历史分批修复之上，本轮仅更新 HTML／CSS 界面，见 [Hallmark 界面说明](docs/archive/UI_HALLMARK_20261030.md)。此前业务保护保留，见 [修复说明](docs/archive/EGM_FIXES_20261030.md)。后续验收文档提交仅改 Markdown，服务器源码可同步到该文档提交；运行镜像及环境版本仍固定为上述应用 SHA，不为同步文档再次重启。
+当前已部署应用为 `99eada51405358ec82b7b5bc6329c3141c1a8d04`（2026-11-01 第二次部署，见下节）；同日上一版为 `6ae9fcaadff86db9405d22adf95b5e7677d01cce`，再前为 `8ab1937e84b1f63db3db46a07eca8a4d17876a58`。在此前启停、异常关闭、钱包取消和历史分批修复之上，本轮仅更新 HTML／CSS 界面，见 [Hallmark 界面说明](docs/archive/UI_HALLMARK_20261030.md)。此前业务保护保留，见 [修复说明](docs/archive/EGM_FIXES_20261030.md)。后续验收文档提交仅改 Markdown，服务器源码可同步到该文档提交；运行镜像及环境版本仍固定为上述应用 SHA，不为同步文档再次重启。
 
 旧工作分支和重复基准标签已从 GitHub 入口移除，旧 PR #18 已关闭，未将它的原地重签方案合入当前交易逻辑；相关问题已经由后续 PR #19 的终结未提交意图及重新评估机制覆盖。提交历史继续保留。后续操作以 `main` 和完整应用 SHA 为准，旧部署脚本中的历史分支名不再作为拉取入口。规则见 [版本维护](docs/VERSIONS.md)。
 
-## 最近一次部署：2026-11-01（6ae9fca）
+## 最近一次部署：2026-11-01（99eada5）
+
+- TEST/LIVE 一致性审查后修复：Polymarket 拒绝签名金额低于 1 美元的可成交 BUY，原策略会计划此类订单（例如收费市场 1U 预算只签 0.96U，或一轮剩余预算不足 1U 的补仓），TEST 会成交而 LIVE 必被拒。现在 `Runtime.evaluate`（两种模式共用的买入决策点）跳过此类机会，LIVE `buy_valid` 对竞争结果采用同一规则。配置页手续费说明改为“买入手续费以 pUSD 另付并计入预算”（依据官方 SDK）。另将带日期的审计文档移入 `docs/archive/`。
+- [GitHub CI 41310180368](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/41310180368)：AMD64、ARM64 及 Docker verify 通过，1,266 项 Python 测试通过。
+- 部署前只读核对：TEST 1、2、3 RUNNING（持仓 26/35/46），4—10 PAUSED、无持仓；各账户每事件预算 100U，新规则主要影响剩余不足 1U 的补仓。构建 `pm-nautilus:99eada5` 后正常 stop（27 秒），停机状态下完整复制 `runtime/server` 至 `/var/lib/pm-nautilus-review-20261101b/runtime-server`，保留原 `.env` 副本，再改 `PM_GIT_REVISION` 并 `up -d`。
+- 上线后：健康 ok、修订 99eada5、10 个账户可用、后台错误为空；明确 START 1、2、3，持仓数一致，4—10 保持 PAUSED；全部账户行情组 5/5、盘口全部 READY、无未就绪持仓，结算检查正常；页面已显示新手续费说明。
+- 外部规则核对与上线前清单见 [LIVE 准备检查](docs/LIVE_READINESS.md)。要点：当前硅谷服务器所在的美国为“仅可平仓”地区，程序的地区检查会阻止启用 LIVE，须换到允许地区的服务器。
+
+## 同日较早部署：2026-11-01（6ae9fca）
 
 - 代码审查后的小范围加固，仅改 `app.py`、`books.py` 并新增 `tests/test_review_hardening.py`：Basic 认证与 CSRF 头按 UTF-8 字节比较（原先非 ASCII 输入触发 500，非 ASCII 的 UI 密码无法登录）；配置请求体非 JSON 对象返回 400；`/api/dashboard` 的 limit 限 1–10000；盘口快照/增量先整批校验再写入，非法档位不再留下半更新盘口。未改策略、目标价、费用、模拟成交、资金、止损、赎回或数据库结构。
 - [GitHub CI 41301770739](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/41301770739)：AMD64、ARM64 宿主验证及 Docker verify 通过，1,263 项 Python 测试通过。

@@ -46,6 +46,20 @@ class _LiveBundleResponse(FileResponse):
             cleanup_live_bundle_file(self.path)
 
 
+def _secret_matches(given: str, expected: str) -> bool:
+    # secrets.compare_digest rejects non-ASCII str with TypeError. Basic-auth
+    # credentials and headers can contain any character (a Chinese password,
+    # or a malformed client header), so compare their UTF-8 bytes instead.
+    return secrets.compare_digest(given.encode("utf-8"), expected.encode("utf-8"))
+
+
+async def _json_object(request) -> dict:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise ValueError("请求内容须为JSON对象")
+    return payload
+
+
 async def _finish_before_cancel(operation, *, cleanup_cancelled_result=None):
     """Keep lifecycle ownership until work finishes, including repeated cancellation."""
     task = asyncio.create_task(operation)
@@ -680,8 +694,8 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 user, pw = base64.b64decode(encoded, validate=True).decode().split(":", 1)
                 ok = (
                     scheme.lower() == "basic"
-                    and secrets.compare_digest(user, "pm")
-                    and secrets.compare_digest(pw, password)
+                    and _secret_matches(user, "pm")
+                    and _secret_matches(pw, password)
                 )
             except (ValueError, UnicodeError):
                 ok = False
@@ -692,7 +706,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                     headers={"WWW-Authenticate": 'Basic realm="PM-NAUTILUS"'},
                 )
         if request.method not in {"GET", "HEAD"}:
-            if not secrets.compare_digest(request.headers.get("x-pm-csrf", ""), csrf):
+            if not _secret_matches(request.headers.get("x-pm-csrf", ""), csrf):
                 return JSONResponse({"error": "控制请求来源校验失败"}, 403)
             origin = request.headers.get("origin")
             expected_origin = str(request.base_url).rstrip("/")
@@ -1278,8 +1292,8 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         position_limit: int | None = None,
         account_id: str | None = None,
     ):
-        if limit < 1:
-            raise ValueError("limit须大于0")
+        if not 1 <= limit <= 10000:
+            raise ValueError("limit须为1–10000")
         if details not in {"all", "positions", "market", "summary"}:
             raise ValueError("无效明细类型")
         if position_limit is not None and not 0 <= position_limit <= 10000:
@@ -1773,7 +1787,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
     async def preferences(mode: str, request: Request, account_id: str | None = None):
         mode = mode_name(mode)
         number = account_number(mode, account_id)
-        payload = await request.json()
+        payload = await _json_object(request)
         capital = payload.pop("initialCapital", None)
         if "selectedCategories" in payload and "selectedCategoryIds" not in payload:
             payload["selectedCategoryIds"] = payload.pop("selectedCategories")

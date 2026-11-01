@@ -10,13 +10,21 @@ class Side:
     external: dict[int, int] = field(default_factory=dict)
     consumed: dict[int, int] = field(default_factory=dict)
 
-    def update(self, levels: list[Level], snapshot: bool = True):
+    @staticmethod
+    def validate(levels) -> dict[int, int]:
+        # Validate the whole update before mutating anything, so one bad level
+        # can never leave a half-applied side (or one side of a snapshot).
         incoming = dict(levels)
-        if snapshot:
-            incoming = {p: incoming.get(p, 0) for p in self.external.keys() | incoming.keys()}
         for p, qty in incoming.items():
             if not 0 < p < 1_000_000 or qty < 0:
                 raise ValueError("非法盘口数值")
+        return incoming
+
+    def update(self, levels: list[Level], snapshot: bool = True):
+        incoming = self.validate(levels)
+        if snapshot:
+            incoming = {p: incoming.get(p, 0) for p in self.external.keys() | incoming.keys()}
+        for p, qty in incoming.items():
             if self.external.get(p, 0) != qty:
                 # Private cache state is deliberately not a dataclass field:
                 # persisted books retain only external/consumed quantities.
@@ -68,6 +76,8 @@ class Book:
         # Preserve shadow consumption; reject regressions again once ready.
         if self.ready and timestamp < self.timestamp:
             return False
+        Side.validate(bids)
+        Side.validate(asks)
         self.bid.update(bids)
         self.ask.update(asks)
         self.timestamp, self.ready = timestamp, True

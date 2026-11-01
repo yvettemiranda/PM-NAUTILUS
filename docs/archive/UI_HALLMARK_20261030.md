@@ -1,6 +1,6 @@
 # Hallmark 界面更新
 
-本轮使用 Hallmark 2.0 的应用界面规范改进 PM-NAUTILUS 的视觉和排版。沿用现有浅色、青绿品牌色、原信息和操作入口，改动的程序文件仅为 `web/index.html` 与 `web/styles.css`。实际应用 SHA、CI 与服务器验收以 [HANDOFF](../HANDOFF.md)和 [VALIDATION](VALIDATION.md)为准；源码出现新样式不代表服务器已自动更新。
+本轮使用 Hallmark 2.0 的应用界面规范改进 PM-NAUTILUS 的视觉和排版。沿用现有浅色、青绿品牌色、原信息和操作入口，改动的程序文件仅为 `web/index.html` 与 `web/styles.css`。实际应用 SHA、CI 与服务器验收以 [HANDOFF](../../HANDOFF.md)和 [VALIDATION](../VALIDATION.md)为准；源码出现新样式不代表服务器已自动更新。
 
 ## 视觉变化
 

@@ -1,6 +1,6 @@
 # 元数据存储与扫描调度优化（2026-10-19）
 
-> **历史实现与验收资料**：下文固定 2026-10-19 的格式优化及当时部署，不是当前版本入口或当前服务器状态。现行 `main` 的应用和测试见 [HANDOFF](../HANDOFF.md)／[VALIDATION](VALIDATION.md)，后续 TEST 元数据共享见 [通用优化](TEST_OPTIMIZATION_20261029.md)。不要将这里的旧镜像直接套到新账本。
+> **历史实现与验收资料**：下文固定 2026-10-19 的格式优化及当时部署，不是当前版本入口或当前服务器状态。现行 `main` 的应用和测试见 [HANDOFF](../../HANDOFF.md)／[VALIDATION](../VALIDATION.md)，后续 TEST 元数据共享见 [通用优化](TEST_OPTIMIZATION_20261029.md)。不要将这里的旧镜像直接套到新账本。
 
 [PR #14](https://github.com/yvettemiranda/PM-NAUTILUS/pull/14) 已合并，正式应用固定为 `6dac94bf6bc9cbc954a22e112a52dd49a798d2a6`；[main CI 39224291130](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/39224291130) 的 x86_64/ARM64 回归与 Docker verify 全部通过。后续纯文档提交可更新服务器源码，镜像/env/runtime 继续固定该应用 SHA，无须为文档暂停或重启。正式整理与恢复验收结果见本页末节。
 

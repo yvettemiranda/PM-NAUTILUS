@@ -16,7 +16,7 @@
 
 正常新增 Token 已压缩保存。冷缓存删除产生的 SQLite 空页供后续写入复用，**不会立即缩小操作系统看到的库文件**。不在线执行全库 VACUUM，不自动停机或重启程序。SQLite 对删除与重建文件的语义见 [官方 VACUUM 文档](https://www.sqlite.org/lang_vacuum.html)；容器日志选项见 [Docker 官方说明](https://docs.docker.com/engine/logging/drivers/json-file/)。
 
-十个 TEST 的公共元数据清理逐账户进行；单账户清理异常记录为账户错误，其他账户仍继续维护和交易。LIVE 保持原错误传播路径；TEST 后台已停用时不为这些账户执行清理。当前版本入口与多账户边界见 [版本维护](VERSIONS.md)及 [通用优化](TEST_OPTIMIZATION_20261029.md)。
+十个 TEST 的公共元数据清理逐账户进行；单账户清理异常记录为账户错误，其他账户仍继续维护和交易。LIVE 保持原错误传播路径；TEST 后台已停用时不为这些账户执行清理。当前版本入口与多账户边界见 [版本维护](VERSIONS.md)及 [通用优化](archive/TEST_OPTIMIZATION_20261029.md)。
 
 ## 运行时保护边界
 

@@ -15,7 +15,7 @@
 
 ## TEST 十账户
 
-界面更新及验证边界见 [Hallmark 界面更新](docs/UI_HALLMARK_20261030.md)。
+界面更新及验证边界见 [Hallmark 界面更新](docs/archive/UI_HALLMARK_20261030.md)。
 
 - 页面选择 1—10 号，只切换查看和操作对象，不改变其他账户的运行状态。
 - 账户分别保存初始资金、参数、模拟盘口消耗、订单、持仓、交易记录、收益曲线和启停状态。
@@ -23,7 +23,7 @@
 - 公共市场发现和行情连接共享，各账户模拟成交独立。去重报价解码、正在进行的相同公开查询及不可变元数据，不共享资金或业务状态。
 - 正常启动后所有 TEST 均 PAUSED；需要逐账户明确 START。账户局部故障只影响该账户，整机、公共网络和共享磁盘故障仍可能影响多个账户。
 
-说明、API 和目标卖价步长例子见 [TEST 多账户](docs/TEST_ACCOUNTS.md)；优化与隔离边界见 [通用优化](docs/TEST_OPTIMIZATION_20261029.md)。优化不按服务器型号分支，不减少市场、历史、精度或原交易检查，换服务器可直接沿用。
+说明、API 和目标卖价步长例子见 [TEST 多账户](docs/TEST_ACCOUNTS.md)；优化与隔离边界见 [通用优化](docs/archive/TEST_OPTIMIZATION_20261029.md)。优化不按服务器型号分支，不减少市场、历史、精度或原交易检查，换服务器可直接沿用。
 
 ## TEST 与 LIVE 切换
 
@@ -73,13 +73,14 @@ Node 24.20.0 用于页面验证，程序运行不需要 Node。部署固定已�
 - [当前交接与最新部署验收](HANDOFF.md)
 - [两个版本的维护规则](docs/VERSIONS.md)
 - [TEST 多账户](docs/TEST_ACCOUNTS.md)
-- [通用优化与模式互斥](docs/TEST_OPTIMIZATION_20261029.md)
-- [启停、关闭、钱包取消与历史分批修复](docs/EGM_FIXES_20261030.md)
+- [通用优化与模式互斥](docs/archive/TEST_OPTIMIZATION_20261029.md)
+- [启停、关闭、钱包取消与历史分批修复](docs/archive/EGM_FIXES_20261030.md)
 - [验证结果与未验收范围](docs/VALIDATION.md)
 - [部署、备份、升级与回滚](docs/DEPLOY.md)
 - [新开发环境](docs/REINSTALL.md)、[首次 LIVE](docs/START_FRESH_LIVE.md)
 - [架构与规则对应](docs/MIGRATION.md)
 - [界面与收益曲线](docs/UI_REFRESH.md)、[磁盘保护](docs/STORAGE_MAINTENANCE.md)
 - [依赖与许可证](NOTICE.md)
+- [归档文档](docs/archive/README.md)（带日期的审计与原始需求）
 
-带日期的审计文档用于解释当时的修复和证据，不能覆盖当前交接状态。原始需求保存在 [迁移指令](PM-SMALL_Nautilus_Codex_Instructions.md)，用于追溯，不应重新执行其中的历史初始化任务。
+带日期的审计文档用于解释当时的修复和证据，不能覆盖当前交接状态。原始需求保存在 [迁移指令](docs/archive/PM-SMALL_Nautilus_Codex_Instructions.md)，用于追溯，不应重新执行其中的历史初始化任务。

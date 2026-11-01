@@ -17,6 +17,6 @@
 git clone --branch main https://github.com/yvettemiranda/PM-NAUTILUS.git
 ```
 
-`main` 的文档提交可以比已部署应用 SHA 更新。2026-10-29 整理仅改 Markdown；2026-10-30 的 [四项保护修复](EGM_FIXES_20261030.md)随后叠加 [Hallmark 界面更新](UI_HALLMARK_20261030.md)，上述固定 SHA 已完成双架构 CI 和服务器验收，后续只同步验收文档时不重启镜像。完整 SHA 和验收证据以 HANDOFF 为准，源码更新不表示镜像自动更新。GitHub 源码不是运行数据备份；换服和回滚按 [部署手册](DEPLOY.md)保全全部账本、模式意图、钱包及受保护配置。
+`main` 的文档提交可以比已部署应用 SHA 更新。2026-10-29 整理仅改 Markdown；2026-10-30 的 [四项保护修复](archive/EGM_FIXES_20261030.md)随后叠加 [Hallmark 界面更新](archive/UI_HALLMARK_20261030.md)，上述固定 SHA 已完成双架构 CI 和服务器验收，后续只同步验收文档时不重启镜像。完整 SHA 和验收证据以 HANDOFF 为准，源码更新不表示镜像自动更新。GitHub 源码不是运行数据备份；换服和回滚按 [部署手册](DEPLOY.md)保全全部账本、模式意图、钱包及受保护配置。
 
 根目录 [README](../README.md)、[HANDOFF](../HANDOFF.md) 和 [VALIDATION](VALIDATION.md)描述当前版本。带日期的审计与设计材料用于解释原始需求或当时的修复，其中的旧数字、旧版本、地区和钱包状态不能覆盖当前证据。

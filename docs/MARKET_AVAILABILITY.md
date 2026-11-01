@@ -1,6 +1,6 @@
 # 市场停用、盘口恢复与部分估值
 
-当前入口为 `main`，应用与验证见 [HANDOFF](../HANDOFF.md) 和 [VALIDATION](VALIDATION.md)。下文机制适用于当前正在执行的 TEST 账户或 LIVE；两种后台互斥。十账户错误隔离及模式停止状态见 [通用优化](TEST_OPTIMIZATION_20261029.md)。
+当前入口为 `main`，应用与验证见 [HANDOFF](../HANDOFF.md) 和 [VALIDATION](VALIDATION.md)。下文机制适用于当前正在执行的 TEST 账户或 LIVE；两种后台互斥。十账户错误隔离及模式停止状态见 [通用优化](archive/TEST_OPTIMIZATION_20261029.md)。
 
 ## 页面如何解释这类持仓
 

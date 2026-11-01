@@ -4,13 +4,13 @@
 
 已验收、已部署应用为 `8ab1937e84b1f63db3db46a07eca8a4d17876a58`，后续纯文档提交可使 `main` 比应用 SHA 更新；须核对差异只涉及文档，不因此重启镜像。当前验证与服务器采样见 [HANDOFF](../HANDOFF.md) 和 [VALIDATION](VALIDATION.md)。
 
-当前实现支持十个独立 TEST 账户与一个 LIVE 账本，TEST／LIVE 后台互斥；策略、风控、目标价、退出及赎回业务共用原逻辑。共享公开行情、TEST 请求去重和不可变元数据不会共享账户资金或模拟盘口消耗。数据与模式协调详见 [TEST 多账户](TEST_ACCOUNTS.md)及[通用优化](TEST_OPTIMIZATION_20261029.md)。
+当前实现支持十个独立 TEST 账户与一个 LIVE 账本，TEST／LIVE 后台互斥；策略、风控、目标价、退出及赎回业务共用原逻辑。共享公开行情、TEST 请求去重和不可变元数据不会共享账户资金或模拟盘口消耗。数据与模式协调详见 [TEST 多账户](TEST_ACCOUNTS.md)及[通用优化](archive/TEST_OPTIMIZATION_20261029.md)。
 
 文末折叠保留旧部署记录，不把历史测试数字或单账户结构当作当前状态。
 
 ## 文档范围
 
-本页保留原迁移依据与规则对应表，并说明当前实现。版本、服务器采样、发布证据和待完成的实盘验收以 [HANDOFF.md](../HANDOFF.md) 和 [VALIDATION.md](VALIDATION.md) 最新章节为准；[原始迁移要求](../PM-SMALL_Nautilus_Codex_Instructions.md) 保留为历史需求来源。
+本页保留原迁移依据与规则对应表，并说明当前实现。版本、服务器采样、发布证据和待完成的实盘验收以 [HANDOFF.md](../HANDOFF.md) 和 [VALIDATION.md](VALIDATION.md) 最新章节为准；[原始迁移要求](archive/PM-SMALL_Nautilus_Codex_Instructions.md) 保留为历史需求来源。
 
 ## 原迁移版本与依据（2026-09-06）
 
@@ -154,7 +154,7 @@ Docker 日志 10 MiB×3、每 15 分钟受限主机清理、每 30 秒运行时�
 
 ## 2026-10-19 存储与调度增量
 
-保留 `tokens(token_id,payload)`、全部历史及策略规则，新增兼容旧平面 JSON 的 v1 压缩外壳、活跃部分索引与独立扫描任务。已有库转码仅通过显式离线工具执行，不在正常启动隐式重写。格式、冻结字典、旧包/旧镜像边界、双库备份/逻辑核对及合成基准见 [本轮记录](METADATA_OPTIMIZATION_2026-10-19.md)；正式升级、双库离线整理和原 TEST 状态恢复均已验收，应用 `6dac94bf6bc9cbc954a22e112a52dd49a798d2a6`；实际文件减少 31.95%，全部旧逻辑数据保留，详见 [最新验证](VALIDATION.md)。
+保留 `tokens(token_id,payload)`、全部历史及策略规则，新增兼容旧平面 JSON 的 v1 压缩外壳、活跃部分索引与独立扫描任务。已有库转码仅通过显式离线工具执行，不在正常启动隐式重写。格式、冻结字典、旧包/旧镜像边界、双库备份/逻辑核对及合成基准见 [本轮记录](archive/METADATA_OPTIMIZATION_2026-10-19.md)；正式升级、双库离线整理和原 TEST 状态恢复均已验收，应用 `6dac94bf6bc9cbc954a22e112a52dd49a798d2a6`；实际文件减少 31.95%，全部旧逻辑数据保留，详见 [最新验证](VALIDATION.md)。
 
 
 **2026-10-14 本轮精确持仓核对：**[修复 PR](https://github.com/yvettemiranda/PM-NAUTILUS/pull/12)，固定应用代码 `3e765ccb067c8012af5f4ea4f23c3bda91d7372f`；回归：705 项 Python / 33 项页面回归、Ruff/JS 与 PR/main 双架构 CI 通过，明细见 [最新验证](VALIDATION.md)；服务器验收：2026-10-14 19:03 CST 通过，TEST/RUNNING、LIVE 未启用、钱包 LOCKED；实际持仓与授权只读核对通过，资金/POL 与地区仍未满足条件。Data API 全分页仅发现 token，精确自有份额来自本次固定区块的 CTF 原子余额；严格零收益外部残仓的例外不改写归属或策略/资金账本。已有 Safe 正确重连，升级前交易所及两个赎回适配器权限只读核对通过，资金/POL 和地区仍须满足条件。最新证据见交接及验证文档。既有策略参数、筛选、FAK、预算、目标和止损条件保留；代码和受控响应测试不能替代真实买卖及正额赎回验收。

@@ -9,7 +9,7 @@
 | 当前最新版 | [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) | 十个独立 TEST 账户、通用性能优化、账户故障隔离及 TEST/LIVE 后台互斥；后续开发从这里继续。 |
 | 十账户改造前基准 | [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027) | 固定源码 `4de107a4dc1a4abaaf08b330eb00803391268e2a`，仅供比较和追溯，保持原样。 |
 
-已验收、已部署应用代码为 [`8ab1937`](https://github.com/yvettemiranda/PM-NAUTILUS/commit/8ab1937e84b1f63db3db46a07eca8a4d17876a58)，在已有启停、关闭、钱包取消及历史分批保护上完成 Hallmark 界面更新，交易逻辑不变。其后的验收文档提交仅改 Markdown，运行镜像固定该应用 SHA，同步文档不再次重启。旧工作分支、重复标签及已被取代的 PR 不再作为版本入口；Git 提交历史仍可追溯。
+已验收、已部署应用代码为 [`6ae9fca`](https://github.com/yvettemiranda/PM-NAUTILUS/commit/6ae9fcaadff86db9405d22adf95b5e7677d01cce)：在 `8ab1937` 之上修复非 ASCII 登录密码/CSRF 头导致的 500、配置请求体须为 JSON 对象、首页 limit 上限 10000、盘口更新整批校验后再写入；交易规则、成交、费用与账本结构不变。2026-11-01 的 CI 1,263 项通过，部署记录见 [HANDOFF](HANDOFF.md)。其后的纯文档提交不再次重启。
 
 2026-10-30 应用验收：**1,256 项 Python、122 项页面回归、AMD64/ARM64 CI 与 Docker 验证全部通过**，服务器十个 TEST 和一个 LIVE 账本保全核对通过。[验证结果](docs/VALIDATION.md)与[当前交接](HANDOFF.md)分别记录证据和运行边界。
 

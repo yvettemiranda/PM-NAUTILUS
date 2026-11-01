@@ -9,11 +9,19 @@
 | [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) | 当前十账户最新版及现行文档，默认开发和下载入口。 |
 | [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027) | 十账户改造前的固定源码 `4de107a4dc1a4abaaf08b330eb00803391268e2a`，不继续修改。 |
 
-当前已验收、已部署应用为 `8ab1937e84b1f63db3db46a07eca8a4d17876a58`。在此前启停、异常关闭、钱包取消和历史分批修复之上，本轮仅更新 HTML／CSS 界面，见 [Hallmark 界面说明](docs/UI_HALLMARK_20261030.md)。此前业务保护保留，见 [修复说明](docs/EGM_FIXES_20261030.md)。后续验收文档提交仅改 Markdown，服务器源码可同步到该文档提交；运行镜像及环境版本仍固定为上述应用 SHA，不为同步文档再次重启。
+当前已部署应用为 `6ae9fcaadff86db9405d22adf95b5e7677d01cce`（2026-11-01，见下节）；其前一版为 `8ab1937e84b1f63db3db46a07eca8a4d17876a58`。在此前启停、异常关闭、钱包取消和历史分批修复之上，本轮仅更新 HTML／CSS 界面，见 [Hallmark 界面说明](docs/UI_HALLMARK_20261030.md)。此前业务保护保留，见 [修复说明](docs/EGM_FIXES_20261030.md)。后续验收文档提交仅改 Markdown，服务器源码可同步到该文档提交；运行镜像及环境版本仍固定为上述应用 SHA，不为同步文档再次重启。
 
 旧工作分支和重复基准标签已从 GitHub 入口移除，旧 PR #18 已关闭，未将它的原地重签方案合入当前交易逻辑；相关问题已经由后续 PR #19 的终结未提交意图及重新评估机制覆盖。提交历史继续保留。后续操作以 `main` 和完整应用 SHA 为准，旧部署脚本中的历史分支名不再作为拉取入口。规则见 [版本维护](docs/VERSIONS.md)。
 
-## 最近一次应用验收：2026-10-30
+## 最近一次部署：2026-11-01（6ae9fca）
+
+- 代码审查后的小范围加固，仅改 `app.py`、`books.py` 并新增 `tests/test_review_hardening.py`：Basic 认证与 CSRF 头按 UTF-8 字节比较（原先非 ASCII 输入触发 500，非 ASCII 的 UI 密码无法登录）；配置请求体非 JSON 对象返回 400；`/api/dashboard` 的 limit 限 1–10000；盘口快照/增量先整批校验再写入，非法档位不再留下半更新盘口。未改策略、目标价、费用、模拟成交、资金、止损、赎回或数据库结构。
+- [GitHub CI 41301770739](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/41301770739)：AMD64、ARM64 宿主验证及 Docker verify 通过，1,263 项 Python 测试通过。
+- 服务器 `/opt/pm-nautilus` 仅使用基础 `compose.yaml`（目录中没有 `compose.override.yaml`）。部署前只读核对：TEST 1、2、3 为 RUNNING（持仓 26/35/45），4—10 PAUSED、无持仓，LIVE 未启用、钱包 UNCONFIGURED。
+- 构建 `pm-nautilus:6ae9fca` 后正常 stop（28 秒），停机状态下完整复制 `runtime/server` 至 `/var/lib/pm-nautilus-review-20261101/runtime-server`，并保留原 `.env` 副本；随后改 `PM_GIT_REVISION` 并 `up -d`。
+- 上线后：健康 ok、修订 6ae9fca、10 个账户可用、后台错误为空；按部署前状态明确 START 1、2、3，持仓数一致，4—10 保持 PAUSED。全部账户行情组 5/5、盘口全部 READY、无未就绪持仓；非 ASCII 错误登录返回 401；容器 healthy。
+
+## 上一次应用验收：2026-10-30
 
 - 本地 1,256 项 Python 回归、122 项页面回归全部通过，无失败、错误或跳过；Ruff 检查、145 文件格式检查及 JavaScript 语法检查通过。
 - [GitHub CI 41040472149](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/41040472149)：AMD64、ARM64 的宿主验证及 Docker verify 全部成功，绑定上述应用 SHA，包含完整程序、页面及静态检查。

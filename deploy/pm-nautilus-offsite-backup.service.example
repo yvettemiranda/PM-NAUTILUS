@@ -1,0 +1,19 @@
+# Install as /etc/systemd/system/pm-nautilus-offsite-backup.service
+# Runs as the application UID so the data directory never gains root-owned files.
+[Unit]
+Description=PM-NAUTILUS daily off-server backup to Tencent COS
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+User=10001
+Group=10001
+EnvironmentFile=/etc/pm-nautilus/offsite.env
+ExecStart=/usr/bin/python3 /opt/pm-nautilus/deploy/offsite-backup.py
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/pm-nautilus-offsite /opt/pm-nautilus/runtime/server

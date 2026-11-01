@@ -66,6 +66,8 @@ node --test tests/*.test.mjs
 
 Node 24.20.0 用于页面验证，程序运行不需要 Node。部署固定已经验证的完整 Git SHA，通过 Docker Compose 和自己的 HTTPS/认证入口提供服务。克隆、拉取源码或切换分支不会自动同步现有服务器。
 
+服务器更新使用一键部署脚本 `sudo deploy/deploy.sh <完整 SHA>`：自动备份、切换版本、核对健康，并只恢复更新前正在运行的 TEST 账户；每日服务器外备份由 `deploy/offsite-backup.py` 上传到腾讯云 COS。步骤见 [部署与运维手册](docs/DEPLOY.md)。
+
 钱包、`.env`、真实账本、WAL/SHM、服务器覆盖配置和备份不提交 GitHub。升级或换服务器时保全全部十个 TEST 账本、LIVE 账本、模式意图和钱包；停止旧写入后制作一致性备份，确保新旧服务器不同时管理真实账户。不要把基准镜像直接套到较新账本上。
 
 ## 文档入口

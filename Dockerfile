@@ -23,6 +23,8 @@ USER root
 COPY tests ./tests
 COPY scripts ./scripts
 COPY deploy/live-secrets.py ./deploy/live-secrets.py
+COPY deploy/deploy.sh ./deploy/deploy.sh
+COPY deploy/offsite-backup.py ./deploy/offsite-backup.py
 RUN uv sync --frozen --extra dev
 RUN .venv/bin/ruff check src tests scripts deploy/live-secrets.py && .venv/bin/ruff format --check src tests scripts deploy/live-secrets.py && .venv/bin/pytest -q
 USER pm

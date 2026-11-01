@@ -1,0 +1,13 @@
+# Install as /etc/systemd/system/pm-nautilus-offsite-backup.timer, then:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pm-nautilus-offsite-backup.timer
+[Unit]
+Description=Run the PM-NAUTILUS off-server backup daily
+
+[Timer]
+OnCalendar=*-*-* 04:17:00
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

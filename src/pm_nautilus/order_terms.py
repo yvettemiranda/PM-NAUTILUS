@@ -8,6 +8,10 @@ from .config import SCALE
 
 SHARE_STEP = 10_000  # The pinned CLOB SDK signs SELL sizes to two decimal places.
 SUPPORTED_CLOB_TICKS = frozenset({100_000, 10_000, 1_000, 100})
+# The CLOB rejects a marketable BUY whose signed USD amount (makerAmount) is
+# below $1 ("invalid amount for a marketable BUY order"), independently of each
+# market's minimum share count. Sells have no such USD floor.
+MIN_MARKETABLE_BUY_NOTIONAL = 1_000_000
 
 
 class OrderTermsError(ValueError):

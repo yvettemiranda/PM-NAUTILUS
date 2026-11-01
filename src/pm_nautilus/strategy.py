@@ -21,6 +21,7 @@ from .rules import (
     StopLoss,
     Target,
     arbitrate,
+    meets_marketable_buy_minimum,
     preview,
     static_reason,
     sell_batches,
@@ -742,7 +743,9 @@ class Runtime:
             else:
                 p = preview(t, self.preferences, bid, ask, min(cash, remaining), budget)
                 self._preview_cache[tid] = cache_key, p
-            if p:
+            # The single BUY decision point for TEST and LIVE: never plan an
+            # order the CLOB would reject for being under its $1 minimum.
+            if p and meets_marketable_buy_minimum(p, min(cash, remaining)):
                 opportunities.append(p)
         winner = arbitrate(opportunities, self.preferences, self.now)
         if winner:

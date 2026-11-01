@@ -7,6 +7,7 @@ from typing import Literal
 
 from .config import SCALE, Preferences
 from .order_terms import (
+    MIN_MARKETABLE_BUY_NOTIONAL,
     SUPPORTED_CLOB_TICKS,
     normalize_sell,
     OrderTermsError,
@@ -372,6 +373,18 @@ def preview(
         min(coverage, sum(f.net for f in fills)),
         proceeds,
     )
+
+
+def meets_marketable_buy_minimum(p: Preview, cash: int) -> bool:
+    """Whether the BUY this preview would submit clears the venue's USD floor.
+
+    TEST execution and the LIVE signer both size the order as the fee-safe
+    signed notional of ``cash`` at the preview's highest fill price. A smaller
+    amount is rejected by the CLOB, so neither mode may treat it as a trade.
+    """
+    limit = max(f.price for f in p.fills)
+    notional = signed_buy_notional(cash, p.token.fees, p.token.tick, limit)
+    return notional >= MIN_MARKETABLE_BUY_NOTIONAL
 
 
 def arbitrate(previews: list[Preview], c: Preferences, now: int) -> Preview | None:

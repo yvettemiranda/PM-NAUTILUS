@@ -67,6 +67,7 @@ from .rules import (
     Fees,
     preview,
     arbitrate,
+    meets_marketable_buy_minimum,
     signed_buy_notional,
 )
 
@@ -847,7 +848,9 @@ class LiveExecution(PolymarketExecutionClient):
                 i["cash"],
                 cycle["budget"] if cycle else r.preferences.budget,
             )
-            if p:
+            # Same rival set as Runtime.evaluate: an outcome the strategy could
+            # never buy (under the CLOB $1 BUY floor) cannot outrank this order.
+            if p and (tid == t.token_id or meets_marketable_buy_minimum(p, i["cash"])):
                 opportunities.append(p)
         winner = arbitrate(opportunities, r.preferences, r.now)
         return bool(winner and winner.token.token_id == t.token_id)

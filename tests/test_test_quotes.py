@@ -44,7 +44,7 @@ async def worlds(path, *, count=3, live=False):
                 clock = TestClock()
                 clock.set_time(DAY)
                 runtime = runtime_type(path / label / str(number) / "state.sqlite", clock=clock)
-                runtime.update_preferences({}, capital="3")
+                runtime.update_preferences({"orderAmount": "2"}, capital="7")
                 runtime.add_tokens(tokens)
                 runtimes.append(runtime)
                 clocks.append(clock)

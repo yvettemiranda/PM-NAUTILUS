@@ -22,7 +22,7 @@ def prepared_runtime(path, *, clock=None):
         clock = TestClock()
         clock.set_time(DAY)
     runtime = create_runtime(path, clock=clock)
-    runtime.update_preferences({}, capital="3")
+    runtime.update_preferences({"orderAmount": "2"}, capital="7")
     tokens = token_set(4, fees=True)
     runtime.add_tokens(tokens)
     for token in tokens:

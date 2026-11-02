@@ -144,3 +144,20 @@ def test_failed_uploads_still_keep_local_archives_bounded(app_dir, tmp_path, mon
         with pytest.raises(offsite.subprocess.CalledProcessError):
             offsite.main([])
     assert len(list((tmp_path / "staging").glob("pm-nautilus-*.tar.gz"))) == 1
+
+
+def test_failed_archive_leaves_no_partial_and_old_partials_are_removed(
+    app_dir, tmp_path, monkeypatch
+):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    stale = staging / ".pm-nautilus-host-20260101T000000Z.tar.gz.partial"
+    stale.write_bytes(b"interrupted")
+
+    def broken(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(offsite.tarfile.TarFile, "add", broken)
+    with pytest.raises(OSError, match="disk full"):
+        offsite.build_archive(app_dir, staging)
+    assert not list(staging.glob("*.partial")) and not list(staging.glob(".*.partial"))

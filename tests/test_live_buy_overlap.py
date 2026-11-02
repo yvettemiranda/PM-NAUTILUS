@@ -1,8 +1,9 @@
-"""LIVE buy preparation overlaps its independent checks, yet every gate still decides.
+"""LIVE buy preparation: wallet reads and signing overlap; the account check runs after.
 
-Wallet/approval reads, signing and the account check (open orders plus same-
-Condition balances) run concurrently with injected delays. None can POST; the
-order reaches the POST boundary only when all three pass and control is current.
+Injected delays show the wallet/approval check and signing run concurrently,
+while the full account check (open orders + same-Condition balances) starts
+only after both finished, so no part of it predates the signed order. Any
+failed check blocks the POST boundary. Nothing here contacts a network.
 """
 
 import asyncio
@@ -18,20 +19,19 @@ from test_live_recovery import controlled_runtime, flush
 from test_live_submit_cleanup import prepared_order
 
 DELAY = 0.3
-STAGES = ("wallet", "sign", "account")
 
 
-def overlapped(client, *, wallet=None, account=True):
-    """Each check blocks until all three have started, then sleeps DELAY."""
-    started = {stage: Event() for stage in STAGES}
-    calls = dict.fromkeys(STAGES, 0)
+def staged(client, *, wallet=None, account=True, maker=1_000_000):
+    """Wallet and sign block until both started; record when each stage ran."""
+    started = {"wallet": Event(), "sign": Event()}
+    events = []
 
     def enter(stage):
-        calls[stage] += 1
         started[stage].set()
-        for other in STAGES:
+        for other in started:
             assert started[other].wait(3), f"{stage} must overlap {other}"
         time.sleep(DELAY)
+        events.append((stage, "end", time.perf_counter()))
 
     def wallet_check():
         enter("wallet")
@@ -40,10 +40,10 @@ def overlapped(client, *, wallet=None, account=True):
 
     def sign(*_args, **_kwargs):
         enter("sign")
-        return SimpleNamespace(makerAmount=1_000_000, takerAmount=10_000_000)
+        return SimpleNamespace(makerAmount=maker, takerAmount=maker * 10)
 
     async def account_check(_token):
-        await asyncio.to_thread(enter, "account")
+        events.append(("account", "start", time.perf_counter()))
         if isinstance(account, BaseException):
             raise account
         return account
@@ -54,7 +54,7 @@ def overlapped(client, *, wallet=None, account=True):
     client._http_client.post_order = Mock()
     client._post_signed_order = AsyncMock()
     client._expected_venue_order_id = Mock(return_value=VenueOrderId("venue-overlap"))
-    return calls
+    return events
 
 
 async def submit(client, order):
@@ -64,27 +64,23 @@ async def submit(client, order):
     return time.perf_counter() - started
 
 
-def test_all_three_checks_overlap_and_all_must_run_before_post(tmp_path):
+def test_wallet_and_sign_overlap_and_account_check_starts_after_both(tmp_path):
     async def run():
         async with controlled_runtime(tmp_path / "overlap-pass.sqlite") as runtime:
             oid, order = await prepared_order(runtime)
             client = runtime.client
-            calls = overlapped(client)
-            stages = []
-            original = client._timed_preparation
-
-            async def timed(order, stage, operation):
-                stages.append(stage)
-                return await original(order, stage, operation)
-
-            client._timed_preparation = timed
+            events = staged(client)
             elapsed = await submit(client, order)
 
-            assert calls == dict.fromkeys(STAGES, 1)
+            client.wallet.buy_preflight.assert_called_once()
+            client._http_client.create_market_order.assert_called_once()
+            client._check_buy_account.assert_awaited_once()
             client._post_signed_order.assert_awaited_once()
-            # Serial checks would take 3 * DELAY; overlap keeps it near one.
-            assert elapsed < 2 * DELAY
-            assert stages == ["wallet_check_ms", "sign_ms", "account_check_ms"]
+            ends = [at for stage, kind, at in events if kind == "end"]
+            (account_start,) = [at for stage, kind, at in events if stage == "account"]
+            # The whole account check is newer than both the wallet check and the signature.
+            assert account_start >= max(ends)
+            assert elapsed < 2 * DELAY  # Wallet and sign overlapped (serial: 2 * DELAY).
             assert runtime.store.intent(oid)["outbound_terms"]["side"] == "BUY"
             assert not runtime._test_queue_errors
 
@@ -92,29 +88,30 @@ def test_all_three_checks_overlap_and_all_must_run_before_post(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "wallet,account,paused",
+    "wallet,account,paused,account_ran",
     [
-        (ValueError("approval missing"), True, True),
-        (None, False, False),
-        (None, ConnectionError("open orders unavailable"), True),
-        (ValueError("approval missing"), False, True),
+        (ValueError("approval missing"), True, True, False),
+        (None, False, False, True),
+        (None, ConnectionError("open orders unavailable"), True, True),
     ],
 )
-def test_any_failed_overlapped_check_blocks_post(tmp_path, wallet, account, paused):
+def test_any_failed_check_blocks_post(tmp_path, wallet, account, paused, account_ran):
     async def run():
         async with controlled_runtime(tmp_path / "overlap-fail.sqlite") as runtime:
             oid, order = await prepared_order(runtime)
             client = runtime.client
-            calls = overlapped(client, wallet=wallet, account=account)
+            staged(client, wallet=wallet, account=account)
             await submit(client, order)
 
-            assert calls == dict.fromkeys(STAGES, 1)
+            assert client._check_buy_account.await_count == (1 if account_ran else 0)
             client._post_signed_order.assert_not_awaited()
             client._http_client.post_order.assert_not_called()
             assert runtime.store.intent(oid)["terminal"] is True
             assert runtime.held_cash() == 0
             if paused:
                 assert runtime.status == "PAUSED"
+            if isinstance(account, BaseException):
+                assert client.ready is False and client.open_orders_clear is False
             kinds = [type(event).__name__ for _, event in runtime.store.events()]
             assert "OrderSubmitted" not in kinds
             assert not runtime._test_queue_errors
@@ -122,45 +119,25 @@ def test_any_failed_overlapped_check_blocks_post(tmp_path, wallet, account, paus
     asyncio.run(run())
 
 
-def test_control_change_during_overlap_is_seen_after_all_checks(tmp_path):
+def test_control_change_during_account_check_is_seen_before_post(tmp_path):
     async def run():
         async with controlled_runtime(tmp_path / "overlap-control.sqlite") as runtime:
             oid, order = await prepared_order(runtime)
             client = runtime.client
-            calls = overlapped(client)
+            staged(client)
             seen = []
 
             def valid(*_args):
                 seen.append(1)
-                return len(seen) == 1  # Valid at submit, invalid after preparation.
+                return len(seen) < 3  # Submit and post-sign valid; invalid after account check.
 
             client.buy_valid = Mock(side_effect=valid)
             await submit(client, order)
 
-            assert calls == dict.fromkeys(STAGES, 1)
+            client._check_buy_account.assert_awaited_once()
             client._post_signed_order.assert_not_awaited()
             assert runtime.store.intent(oid)["terminal"] is True
             assert not runtime._test_queue_errors
-
-    asyncio.run(run())
-
-
-def test_account_error_invalidates_gates_even_when_wallet_check_also_failed(tmp_path):
-    async def run():
-        async with controlled_runtime(tmp_path / "overlap-both.sqlite") as runtime:
-            oid, order = await prepared_order(runtime)
-            client = runtime.client
-            overlapped(
-                client,
-                wallet=ValueError("approval missing"),
-                account=ConnectionError("open orders unavailable"),
-            )
-            await submit(client, order)
-
-            client._post_signed_order.assert_not_awaited()
-            assert runtime.status == "PAUSED"
-            assert client.ready is False and client.open_orders_clear is False
-            assert runtime.store.intent(oid)["terminal"] is True
 
     asyncio.run(run())
 
@@ -170,75 +147,13 @@ def test_signed_amount_below_one_dollar_never_reaches_post(tmp_path):
         async with controlled_runtime(tmp_path / "overlap-floor.sqlite") as runtime:
             oid, order = await prepared_order(runtime)
             client = runtime.client
-            calls = overlapped(client)
-            sign = client._http_client.create_market_order.side_effect
-
-            def low_sign(*args, **kwargs):
-                sign(*args, **kwargs)  # Still overlaps the other checks.
-                # A signer that rounds below the venue's $1 marketable BUY floor.
-                return SimpleNamespace(makerAmount=990_000, takerAmount=9_900_000)
-
-            client._http_client.create_market_order.side_effect = low_sign
+            staged(client, maker=990_000)  # A signer that rounds below the $1 floor.
             await submit(client, order)
 
-            assert calls == dict.fromkeys(STAGES, 1)
             client._post_signed_order.assert_not_awaited()
-            kinds = [type(event).__name__ for _, event in runtime.store.events()]
-            assert "OrderSubmitted" not in kinds
             assert runtime.store.intent(oid)["terminal"] is True
             assert runtime.held_cash() == 0
-
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize("second", [True, False, ConnectionError("open orders unavailable")])
-def test_account_check_that_finished_early_is_repeated_before_post(tmp_path, second):
-    async def run():
-        async with controlled_runtime(tmp_path / "overlap-stale.sqlite") as runtime:
-            oid, order = await prepared_order(runtime)
-            client = runtime.client
-            overlapped(client)
-
-            def slow_sign(*_args, **_kwargs):
-                time.sleep(0.3)  # Signing outlasts the account check by far.
-                return SimpleNamespace(makerAmount=1_000_000, takerAmount=10_000_000)
-
-            client._http_client.create_market_order = Mock(side_effect=slow_sign)
-            client.wallet = SimpleNamespace(buy_preflight=Mock())
-            client._check_buy_account = AsyncMock(side_effect=[True, second])
-            await submit(client, order)
-
-            # The repeated check is the final account gate, after signing.
-            assert client._check_buy_account.await_count == 2
-            if second is True:
-                client._post_signed_order.assert_awaited_once()
-            else:
-                client._post_signed_order.assert_not_awaited()
-                assert runtime.store.intent(oid)["terminal"] is True
-            if isinstance(second, BaseException):
-                assert client.ready is False and runtime.status == "PAUSED"
-
-    asyncio.run(run())
-
-
-def test_account_check_finishing_with_the_others_is_not_repeated(tmp_path):
-    async def run():
-        async with controlled_runtime(tmp_path / "overlap-fresh.sqlite") as runtime:
-            _, order = await prepared_order(runtime)
-            client = runtime.client
-            client._post_signed_order = AsyncMock()
-            client._expected_venue_order_id = Mock(return_value=VenueOrderId("venue-fresh"))
-            client._http_client.create_market_order = Mock(
-                return_value=SimpleNamespace(makerAmount=1_000_000, takerAmount=10_000_000)
-            )
-
-            async def account(_token):
-                await asyncio.sleep(0.2)  # The slowest preparation, as in production.
-                return True
-
-            client._check_buy_account = AsyncMock(side_effect=account)
-            await submit(client, order)
-            assert client._check_buy_account.await_count == 1
-            client._post_signed_order.assert_awaited_once()
+            kinds = [type(event).__name__ for _, event in runtime.store.events()]
+            assert "OrderSubmitted" not in kinds
 
     asyncio.run(run())

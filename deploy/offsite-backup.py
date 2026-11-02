@@ -167,11 +167,17 @@ def build_archive(app_dir: Path, staging: Path) -> Path:
         }
         (work / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
         partial = staging / f".{name}.partial"
+        # Leftovers from an interrupted earlier run are never complete archives.
+        for stale in staging.glob(".pm-nautilus-*.partial"):
+            stale.unlink()
         old_umask = os.umask(0o077)
         try:
             with tarfile.open(partial, "w:gz") as archive:
                 archive.add(work / "manifest.json", arcname="manifest.json")
                 archive.add(work / "data", arcname="data")
+        except BaseException:
+            partial.unlink(missing_ok=True)
+            raise
         finally:
             os.umask(old_umask)
         final = staging / name

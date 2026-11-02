@@ -134,6 +134,7 @@ def server(tmp_path):
             "PM_BACKUP_ROOT": str(tmp_path / "backups"),
             "PM_HEALTH_TIMEOUT": "6",
             "PM_MARKET_TIMEOUT": "6",
+            "PM_DEPLOY_LOCK": str(tmp_path / "deploy.lock"),
         }
         result = subprocess.run(
             ["bash", str(SCRIPT), *args], env=environ, capture_output=True, text=True, timeout=60
@@ -270,3 +271,20 @@ def test_pruning_keeps_newest_complete_backups_and_never_counts_partial_ones(ser
     complete = [n for n in names if (backups / n / ".complete").exists()]
     assert len(complete) == 5 and "20260101T000000Z-old" not in names
     assert {"20260104T000000Z-partial", "20260105T000000Z-partial"} <= set(names)
+
+
+def test_a_second_concurrent_deploy_is_refused(server, tmp_path):
+    app, _, run = server
+    holder = subprocess.Popen(["flock", str(tmp_path / "deploy.lock"), "sleep", "30"])
+    try:
+        for _ in range(50):  # Wait until the holder owns the lock.
+            if subprocess.run(["flock", "-n", str(tmp_path / "deploy.lock"), "true"]).returncode:
+                break
+            __import__("time").sleep(0.1)
+        result, state = run(NEW, "--yes")
+    finally:
+        holder.kill()
+        holder.wait()
+    assert result.returncode == 1 and "另一个部署正在进行" in result.stderr
+    assert not any(entry[0] in {"docker", "git"} for entry in state["log"])
+    assert f"PM_GIT_REVISION={OLD}" in (app / ".env").read_text()

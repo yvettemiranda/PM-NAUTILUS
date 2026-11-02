@@ -61,9 +61,13 @@ done
 [ -n "$TARGET" ] || usage 1
 [[ "$TARGET" =~ ^[0-9a-f]{40}$ ]] || die "请使用完整的 40 位小写提交 SHA（git rev-parse <版本>）"
 [ "$(id -u)" -eq 0 ] || die "请用 sudo 运行：sudo deploy/deploy.sh $TARGET"
-for tool in docker git curl python3; do
+for tool in docker git curl python3 flock; do
     command -v "$tool" >/dev/null 2>&1 || die "缺少命令: $tool"
 done
+
+# One deploy at a time: a second concurrent run would interleave stop/backup/start.
+exec 9>"${PM_DEPLOY_LOCK:-/run/lock/pm-nautilus-deploy.lock}"
+flock -n 9 || die "另一个部署正在进行，本次未做任何改动"
 
 cd "$APP_DIR" || die "找不到程序目录 $APP_DIR"
 [ -f .env ] || die "$APP_DIR/.env 不存在"

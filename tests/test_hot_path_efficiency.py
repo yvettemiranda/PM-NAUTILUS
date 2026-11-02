@@ -7,9 +7,10 @@ pin that the cheaper paths act exactly like the original ones.
 """
 
 import asyncio
+from contextlib import contextmanager
 from itertools import count
 from random import Random
-from types import MethodType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -20,8 +21,13 @@ from pm_nautilus.market import FRESH_BASELINE_RECOVERY_SECONDS, PublicMarketHub
 from pm_nautilus.rules import Fees, Token
 import pm_nautilus.strategy as strategy_module
 from pm_nautilus.strategy import Runtime
+from pm_nautilus.test_runtime import TestRuntime
 
 DAY = 86_400_000_000_000
+# Production TEST accounts run TestRuntime (PAUSED deferral, preview tracking).
+BOTH_RUNTIMES = pytest.mark.parametrize(
+    "cls", [Runtime, TestRuntime], ids=["Runtime", "TestRuntime"]
+)
 
 
 def legacy_drain(self):
@@ -74,10 +80,10 @@ def tokens():
     return out
 
 
-def runtime(path):
+def runtime(path, cls=Runtime):
     clock = TestClock()
     clock.set_time(DAY)
-    r = Runtime(path, clock=clock)
+    r = cls(path, clock=clock)
     r.add_tokens(tokens())
     return r, clock
 
@@ -92,60 +98,84 @@ def state(r):
         for tid, b in r.books.items()
     }
     business = {k: v for k, v in r.business.items() if k != "cursor"}
-    return intents, business, books, r.cash(), r.status
-
-
-def deterministic_ids(monkeypatch):
-    """Client order IDs (and the trade IDs derived from them) repeat per run."""
-    counter = count()
-    monkeypatch.setattr(
-        strategy_module, "uuid4", lambda: SimpleNamespace(hex=f"{next(counter):032x}")
+    # What the page shows and what is still pending, not only what traded.
+    evaluations = {
+        eid: (status, winner and winner.token.token_id)
+        for eid, (status, winner) in r.evaluations.items()
+    }
+    return (
+        intents,
+        business,
+        books,
+        r.cash(),
+        r.status,
+        evaluations,
+        sorted(r.dirty),
+        sorted(r._time_sensitive_events),
+        sorted(getattr(r, "_test_preview_pending", ())),
     )
 
 
-def run_random_quotes(path, seed, monkeypatch, drain=None):
-    deterministic_ids(monkeypatch)
-    r, clock = runtime(path)
-    if drain is not None:
-        r.drain = MethodType(drain, r)
-    rng = Random(seed)
-    ids = [t.token_id for t in tokens()]
-    states = []
-    try:
-        r.start()
-        now = DAY
-        for step in range(400):
-            tid = rng.choice(ids)
-            ask = rng.randrange(10, 70) * 1000
-            bid = rng.randrange(max(1, ask // 2000), ask // 1000) * 1000
-            bids = [(bid, rng.randrange(1, 200) * 1_000_000)]
-            if rng.random() < 0.5:
-                bids.append((max(1000, bid - 5000), rng.randrange(1, 200) * 1_000_000))
-            asks = [(ask, rng.randrange(1, 200) * 1_000_000)]
-            if rng.random() < 0.3:
-                now += rng.randrange(1, 40) * 1_000_000_000
-                clock.set_time(now)
-            r.book(tid, bids, asks)
-            if step % 25 == 24:
-                # Control ticks dirty many Events at once: the ordered path.
-                r.refresh_eligibility()
-                r.drain()
-            states.append(state(r))
-        for tid in ids:
-            # Bids far above every target: owned positions sell in both runs.
-            r.book(tid, [(500_000, 1_000_000_000)], [(510_000, 100_000_000)])
-            states.append(state(r))
-        return states
-    finally:
-        r.close()
+@contextmanager
+def drain_variant(legacy):
+    """Repeat client order IDs (and trade IDs derived from them) per run.
+
+    The legacy variant replaces Runtime.drain itself, so TestRuntime's PAUSED
+    deferral still wraps whichever drain is under test.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        counter = count()
+        patch.setattr(
+            strategy_module, "uuid4", lambda: SimpleNamespace(hex=f"{next(counter):032x}")
+        )
+        if legacy:
+            patch.setattr(Runtime, "drain", legacy_drain)
+        yield
 
 
+def run_random_quotes(path, seed, cls, legacy):
+    with drain_variant(legacy):
+        r, clock = runtime(path, cls)
+        rng = Random(seed)
+        ids = [t.token_id for t in tokens()]
+        states = []
+        try:
+            r.start()
+            now = DAY
+            for step in range(400):
+                if step == 250:
+                    # PAUSED still sells and watches stops; TEST defers the rest.
+                    r.pause()
+                tid = rng.choice(ids)
+                ask = rng.randrange(10, 70) * 1000
+                bid = rng.randrange(max(1, ask // 2000), ask // 1000) * 1000
+                bids = [(bid, rng.randrange(1, 200) * 1_000_000)]
+                if rng.random() < 0.5:
+                    bids.append((max(1000, bid - 5000), rng.randrange(1, 200) * 1_000_000))
+                asks = [(ask, rng.randrange(1, 200) * 1_000_000)]
+                if rng.random() < 0.3:
+                    now += rng.randrange(1, 40) * 1_000_000_000
+                    clock.set_time(now)
+                r.book(tid, bids, asks)
+                if step % 25 == 24:
+                    # Control ticks dirty many Events at once: the ordered path.
+                    r.refresh_eligibility()
+                    r.drain()
+                states.append(state(r))
+            for tid in ids:
+                # Bids far above every target: owned positions sell in both runs.
+                r.book(tid, [(500_000, 1_000_000_000)], [(510_000, 100_000_000)])
+                states.append(state(r))
+            return states
+        finally:
+            r.close()
+
+
+@BOTH_RUNTIMES
 @pytest.mark.parametrize("seed", range(6))
-def test_single_event_fast_path_matches_original_drain_over_random_quotes(
-    tmp_path, monkeypatch, seed
-):
-    fast = run_random_quotes(tmp_path / "fast.sqlite", seed, monkeypatch)
-    slow = run_random_quotes(tmp_path / "slow.sqlite", seed, monkeypatch, legacy_drain)
+def test_single_event_fast_path_matches_original_drain_over_random_quotes(tmp_path, cls, seed):
+    fast = run_random_quotes(tmp_path / "fast" / "s.sqlite", seed, cls, legacy=False)
+    slow = run_random_quotes(tmp_path / "slow" / "s.sqlite", seed, cls, legacy=True)
     for step, (a, b) in enumerate(zip(fast, slow, strict=True)):
         assert a == b, step
     assert fast[-1][0]  # The scenario really traded.
@@ -208,9 +238,6 @@ class RecoveryService:
         self._availability_fresh_requested_at = dict(requested or {})
 
 
-recovery_service = RecoveryService
-
-
 def test_frame_without_due_baseline_skips_consumer_subscription_rebuilds():
     async def run():
         hub = PublicMarketHub()
@@ -224,16 +251,16 @@ def test_frame_without_due_baseline_skips_consumer_subscription_rebuilds():
             # No pending request, a fresh one, and a stale entry no longer pending.
             hub.services.update(
                 {
-                    recovery_service(),
-                    recovery_service({"1"}, {"1": now}),
-                    recovery_service((), {"2": now - 60}),
-                    recovery_service({"2"}, {"2": now - 60}, closed=True),
+                    RecoveryService(),
+                    RecoveryService({"1"}, {"1": now}),
+                    RecoveryService((), {"2": now - 60}),
+                    RecoveryService({"2"}, {"2": now - 60}, closed=True),
                 }
             )
             await hub.recover_consumer_baselines(group, ws)
             hub.baseline_consumers.assert_not_called()
             hub.services.add(
-                recovery_service({"1"}, {"1": now - FRESH_BASELINE_RECOVERY_SECONDS - 1})
+                RecoveryService({"1"}, {"1": now - FRESH_BASELINE_RECOVERY_SECONDS - 1})
             )
             await hub.recover_consumer_baselines(group, ws)
             hub.baseline_consumers.assert_called_once_with(group)
@@ -262,30 +289,33 @@ def test_membership_view_matches_sorted_subscription_ids():
     asyncio.run(run())
 
 
-def run_stop_scenario(path, monkeypatch, drain=None):
-    deterministic_ids(monkeypatch)
-    r, clock = runtime(path)
-    if drain is not None:
-        r.drain = MethodType(drain, r)
-    states = []
-    try:
-        quote_both(r, 0)
-        r.start()
-        for second in range(0, 120, 5):
-            clock.set_time(DAY + second * 1_000_000_000)
-            # Collapse the bid below the stop threshold, then keep quoting.
-            r.book("00", [(2_000 + second, 100_000_000)], [(20_000, 50_000_000)])
-            states.append(state(r))
-        return states
-    finally:
-        r.close()
+def run_stop_scenario(path, cls, legacy):
+    with drain_variant(legacy):
+        r, clock = runtime(path, cls)
+        states = []
+        try:
+            quote_both(r, 0)
+            r.start()
+            for second in range(0, 120, 5):
+                clock.set_time(DAY + second * 1_000_000_000)
+                # Collapse both outcomes' bids below the stop threshold, whichever
+                # one was bought, then keep quoting past the 30 s confirmation.
+                # The bid stays on tick (so the STOP can fill); its size changes
+                # the book version that the confirmation requires.
+                for tid in ("00", "01"):
+                    r.book(tid, [(2_000, (100 + second) * 1_000_000)], [(20_000, 50_000_000)])
+                states.append(state(r))
+            return states
+        finally:
+            r.close()
 
 
-def test_fast_path_keeps_stop_loss_exit_like_the_original(tmp_path, monkeypatch):
-    for r_path in ("stop-fast", "stop-slow"):
-        (tmp_path / r_path).mkdir()
-    fast = run_stop_scenario(tmp_path / "stop-fast" / "s.sqlite", monkeypatch)
-    slow = run_stop_scenario(tmp_path / "stop-slow" / "s.sqlite", monkeypatch, legacy_drain)
+@BOTH_RUNTIMES
+def test_fast_path_keeps_stop_loss_exit_like_the_original(tmp_path, cls):
+    fast = run_stop_scenario(tmp_path / "fast" / "s.sqlite", cls, legacy=False)
+    slow = run_stop_scenario(tmp_path / "slow" / "s.sqlite", cls, legacy=True)
     assert fast == slow
+    # The scenario really bought, exited through the stop-loss and released.
     business = fast[-1][1]
-    assert business["banned"] or business["cycles"]  # The position was bought.
+    assert "event-0" in business["banned"] and "event-0" not in business["cycles"]
+    assert any(i["side"] == "SELL" and i["kind"] == "STOP" for _, i in fast[-1][0])

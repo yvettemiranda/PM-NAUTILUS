@@ -139,7 +139,7 @@ $C up -d && $C ps
 curl -fsS -H 'Host: localhost' http://127.0.0.1:8765/api/health
 ```
 
-HTTPS：参照 `deploy/nginx.conf.example` 配一个独立虚拟主机，反代到 `127.0.0.1:8765`，先执行 `nginx -t` 再重载。不要直接公开容器端口，也不要通过明文 HTTP 传登录密码。钱包的备份和恢复接口需要样例中单独放宽的上传大小和超时设置。
+HTTPS：参照 `deploy/nginx.conf.example` 配一个独立虚拟主机，反代到 `127.0.0.1:8765`，先执行 `nginx -t` 再重载。不要直接公开容器端口，也不要通过明文 HTTP 传登录密码。钱包的备份和恢复接口需要样例中单独放宽的上传大小和超时设置。样例开启了 JSON／CSS／JS 的 gzip 压缩（实测接口传输量减少约 70%—90%，页面每 0.5 秒刷新一次，远程访问更流畅）；CSRF 令牌只在请求头里，不在响应正文中，所以压缩不会带来 BREACH 类风险。当前服务器以 `/etc/nginx/conf.d/pm-nautilus-gzip.conf` 启用同样设置。
 
 可选组件（样例都在 `deploy/` 下）：
 - `pm-nautilus-test-boot.service.example`：开机启动单元；不会自动启用 LIVE 或 START。
@@ -174,3 +174,12 @@ HTTPS：参照 `deploy/nginx.conf.example` 配一个独立虚拟主机，反代�
 | 赎回提示份额与程序记录不一致 | 检查 Polymarket 是否开启了自动赎回（Auto redeem），或钱包里有程序外的操作 |
 | 重复实例错误 | 同一数据目录只能有一个进程；不要绕过 `process.lock` |
 | COS 备份失败 | `journalctl -u pm-nautilus-offsite-backup`；检查 coscli 配置、子账号权限、磁盘空间，以及是否以 UID 10001 运行 |
+
+## 9. 服务器安全加固（需你本人在控制台操作）
+
+2026-11-02 只读检查：22 端口对所有 IP 开放，SSH 允许密码登录和 root 登录。程序本身不需要公网 SSH：日常用控制台的 OrcaTerm 免密登录（走腾讯云自动化助手，不经过 22 端口），万一不可用还有控制台的 VNC 登录。建议任选其一（推荐第 1 种，改动最小）：
+
+1. 轻量云控制台 → 防火墙：把 22 端口规则的来源改成你自己的 IP，或直接删除该规则。改完先用 OrcaTerm 免密登录确认还能进。
+2. 只允许密钥登录：在 `/etc/ssh/sshd_config` 设 `PasswordAuthentication no`、`PermitRootLogin no`，执行 `sudo sshd -t` 通过后再 `sudo systemctl reload ssh`。改之前先确认 OrcaTerm 免密登录可用。
+
+外部监控：健康接口 `https://<服务器地址>/api/health` 无需登录。可在腾讯云可观测平台的“云拨测”或任一在线监测服务中每分钟访问一次，失败时通知你。启用 LIVE 前应当具备。

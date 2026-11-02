@@ -35,6 +35,8 @@ APPROVAL_KEY = "redemption_approval"
 ZERO = "0x" + "00" * 20
 # Stable workers let Web3's per-thread HTTP sessions reuse their connections.
 _RPC_READ_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pm-polygon-read")
+# After this many batch-only failures, buy checks use separate reads until restart.
+BATCH_READ_FAILURE_LIMIT = 2
 _ACCOUNT_LOCKS = {}
 _ACCOUNT_LOCKS_GUARD = Lock()
 RESOLUTION_CONCURRENCY = 4
@@ -296,14 +298,39 @@ class PolygonWallet:
         wait(futures)
         return [future.result() for future in futures]
 
-    def preflight(self):
-        if self.w3.eth.chain_id != 137:
-            raise RedemptionCheckError("RPC不是Polygon主网")
+    def _code_addresses(self):
         contracts = [
             Web3.to_checksum_address(address) for address in (CTF, PUSD, *ADAPTERS.values())
         ]
         # EOA signer and funder are the same address; one fresh read covers both.
-        addresses = list(dict.fromkeys([*contracts, self.signer.address, self.funder]))
+        return contracts, list(dict.fromkeys([*contracts, self.signer.address, self.funder]))
+
+    @staticmethod
+    def _check_chain(chain_id):
+        if chain_id != 137:
+            raise RedemptionCheckError("RPC不是Polygon主网")
+
+    def _check_codes(self, contracts, codes):
+        if any(not codes[address] for address in contracts):
+            raise RedemptionCheckError("官方合约地址没有部署代码")
+        if codes[self.signer.address]:
+            raise RedemptionCheckError("签名账户含有合约或委托代码，需先单独核对")
+        if self.signature_type == 2:
+            if not codes[self.funder]:
+                raise RedemptionCheckError("资金地址不是已部署的Safe")
+        elif codes[self.funder]:
+            raise RedemptionCheckError("EOA资金地址含有合约代码")
+
+    def _check_safe(self, owners, threshold):
+        if threshold != 1 or len(owners) != 1 or owners[0].lower() != self.signer.address.lower():
+            raise RedemptionCheckError("Safe须为本签名账户可执行的单签钱包")
+
+    def _safe(self):
+        return self.w3.eth.contract(address=self.funder, abi=SAFE_ABI)
+
+    def preflight(self):
+        self._check_chain(self.w3.eth.chain_id)
+        contracts, addresses = self._code_addresses()
         codes = dict(
             zip(
                 addresses,
@@ -313,53 +340,121 @@ class PolygonWallet:
                 strict=True,
             )
         )
-        if any(not codes[address] for address in contracts):
-            raise RedemptionCheckError("官方合约地址没有部署代码")
-        if codes[self.signer.address]:
-            raise RedemptionCheckError("签名账户含有合约或委托代码，需先单独核对")
+        self._check_codes(contracts, codes)
         if self.signature_type == 2:
-            if not codes[self.funder]:
-                raise RedemptionCheckError("资金地址不是已部署的Safe")
-            safe = self.w3.eth.contract(address=self.funder, abi=SAFE_ABI)
+            safe = self._safe()
             owners, threshold = self._parallel_reads(
                 [safe.functions.getOwners().call, safe.functions.getThreshold().call]
             )
-            if (
-                threshold != 1
-                or len(owners) != 1
-                or owners[0].lower() != self.signer.address.lower()
-            ):
-                raise RedemptionCheckError("Safe须为本签名账户可执行的单签钱包")
-        elif codes[self.funder]:
-            raise RedemptionCheckError("EOA资金地址含有合约代码")
+            self._check_safe(owners, threshold)
 
-    def _operator_approvals(self, operators):
-        operators = tuple(operators.items())
-        values = self._parallel_reads(
-            [
-                self.ctf.functions.isApprovedForAll(
-                    self.funder, Web3.to_checksum_address(operator)
-                ).call
-                for _, operator in operators
-            ]
-        )
+    def _approval_call(self, operator):
+        return self.ctf.functions.isApprovedForAll(self.funder, Web3.to_checksum_address(operator))
+
+    @staticmethod
+    def _check_approvals(operators, values):
         approvals = {key: value for (key, _), value in zip(operators, values, strict=True)}
         if any(type(value) is not bool for value in approvals.values()):
             raise RedemptionCheckError("份额授权查询结果无效")
         return approvals
 
+    def _operator_approvals(self, operators):
+        operators = tuple(operators.items())
+        values = self._parallel_reads(
+            [self._approval_call(operator).call for _, operator in operators]
+        )
+        return self._check_approvals(operators, values)
+
     def adapter_approvals(self):
         return self._operator_approvals(ADAPTERS)
 
-    def buy_preflight(self):
-        self.preflight()
-        approvals = self._operator_approvals(
-            ADAPTERS | {exchange: exchange for exchange in EXCHANGES}
-        )
-        if not all(approvals[exchange] for exchange in EXCHANGES):
+    @staticmethod
+    def _buy_operators():
+        return ADAPTERS | {exchange: exchange for exchange in EXCHANGES}
+
+    @staticmethod
+    def _require_buy_approvals(approvals):
+        if not all(approvals[exchange] is True for exchange in EXCHANGES):
             raise RedemptionCheckError("交易所卖出份额授权尚未确认，不能新买入")
-        if not all(approvals[neg_risk] for neg_risk in ADAPTERS):
+        if not all(approvals[neg_risk] is True for neg_risk in ADAPTERS):
             raise RedemptionCheckError("赎回适配器授权尚未确认，不能新买入")
+
+    def _batch_reads(self, add_requests):
+        """Send fresh read requests in one JSON-RPC batch round trip.
+
+        ``add_requests`` adds every read and returns how many it added. Any
+        transport, RPC, decoding or count failure raises; nothing is cached.
+        """
+        with self.w3.batch_requests() as batch:
+            expected = add_requests(batch)
+            results = list(batch.execute())
+        if len(results) != expected:
+            raise ValueError("batched RPC returned an unexpected number of results")
+        return results
+
+    def _batched_or_separate(self, add_requests, separate):
+        """Return ``(True, batch results)`` or ``(False, separate())``.
+
+        The batch carries exactly the reads the separate path makes. If the RPC
+        cannot answer it, ``separate()`` repeats every read and alone decides.
+        A batch failure followed by a separate success counts toward using
+        separate reads only, for RPCs that do not support batches.
+        """
+        attempted = getattr(self, "_batch_failures", 0) < BATCH_READ_FAILURE_LIMIT
+        if attempted:
+            try:
+                # Persistent pool workers keep warm per-thread RPC sessions.
+                results = _RPC_READ_POOL.submit(self._batch_reads, add_requests).result()
+            except Exception:
+                pass
+            else:
+                self._batch_failures = 0
+                return True, results
+        value = separate()
+        if attempted:
+            self._batch_failures = getattr(self, "_batch_failures", 0) + 1
+        return False, value
+
+    def _separate_buy_preflight(self):
+        self.preflight()
+        self._require_buy_approvals(self._operator_approvals(self._buy_operators()))
+
+    def buy_preflight(self):
+        """Fresh wallet, Safe and approval checks before every new buy.
+
+        Fast path: chain, code, Safe owner/threshold and every approval in one
+        batched round trip, checked by the same validators as the separate
+        path, so its findings are final. Nothing is ever reused between buys.
+        """
+        operators = tuple(self._buy_operators().items())
+        plan = {}
+
+        def add(batch):
+            contracts, addresses = self._code_addresses()
+            safe = self._safe() if self.signature_type == 2 else None
+            plan.update(contracts=contracts, addresses=addresses, safe=safe)
+            batch.add(self.w3.eth.chain_id)
+            for address in addresses:
+                batch.add(self.w3.eth.get_code(address))
+            if safe is not None:
+                batch.add(safe.functions.getOwners())
+                batch.add(safe.functions.getThreshold())
+            for _, operator in operators:
+                batch.add(self._approval_call(operator))
+            return 1 + len(addresses) + (2 if safe is not None else 0) + len(operators)
+
+        batched, results = self._batched_or_separate(add, self._separate_buy_preflight)
+        if not batched:
+            return
+        contracts, addresses, safe = plan["contracts"], plan["addresses"], plan["safe"]
+        self._check_chain(results[0])
+        codes = results[1 : 1 + len(addresses)]
+        self._check_codes(contracts, dict(zip(addresses, codes, strict=True)))
+        approvals = results[1 + len(addresses) :]
+        if safe is not None:
+            owners, threshold, *approvals = approvals
+            self._check_safe(owners, threshold)
+        self._require_buy_approvals(self._check_approvals(operators, approvals))
 
     def owned_balances(self, claim):
         return self.token_balances(claim["payouts"])
@@ -385,14 +480,18 @@ class PolygonWallet:
         block = self.w3.eth.block_number
         if type(block) is not int or not 0 <= block < 2**256:
             raise RedemptionCheckError("份额余额查询区块无效")
-        balances = self._parallel_reads(
-            [
-                partial(
-                    self.ctf.functions.balanceOf(self.funder, int(tid)).call,
-                    block_identifier=block,
-                )
-                for tid in ids
-            ]
+        calls = [self.ctf.functions.balanceOf(self.funder, int(tid)) for tid in ids]
+
+        def add(batch):
+            for call in calls:
+                batch.add(call.call(block_identifier=block))
+            return len(calls)
+
+        _, balances = self._batched_or_separate(
+            add,
+            lambda: self._parallel_reads(
+                [partial(call.call, block_identifier=block) for call in calls]
+            ),
         )
         if any(type(value) is not int or not 0 <= value < 2**256 for value in balances):
             raise RedemptionCheckError("份额余额查询结果无效")

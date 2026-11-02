@@ -998,12 +998,16 @@ class LiveExecution(PolymarketExecutionClient):
             user_usdc_balance=float(Decimal(r.cash()) / SCALE),
         )
         token = r.tokens[i["token_id"]]
-        wallet_result, signed = await self._join_preparations(
+        # Three independent read/sign preparations overlap; none can POST. Every
+        # result is still required, and the control/plan checks below run after
+        # all of them finish, immediately before the ledger gate and POST.
+        wallet_result, signed, account = await self._join_preparations(
             [
                 self._timed_preparation(
                     o, "wallet_check_ms", asyncio.to_thread(self.wallet.buy_preflight)
                 ),
                 self._timed_preparation(o, "sign_ms", self._prepare_buy_signature(token, args)),
+                self._timed_preparation(o, "account_check_ms", self._check_buy_account(token)),
             ]
         )
         self._mark_submit_stage(o, "preparation_ms")
@@ -1016,6 +1020,11 @@ class LiveExecution(PolymarketExecutionClient):
             return
         if isinstance(signed, BaseException):
             raise signed
+        if isinstance(account, BaseException):
+            raise account  # The submit failure handler invalidates both readiness gates.
+        if account is not True:
+            self.deny(o, "账户开放挂单或同Condition份额核对未通过")
+            return
         # The pinned SDK has no maxSpend option and rounds the maker amount to
         # cents. Inspect the signed facts before allowing any POST boundary.
         try:
@@ -1028,15 +1037,7 @@ class LiveExecution(PolymarketExecutionClient):
         self._record_outbound_terms(o, token, executable_limit, maker, taker)
         self._check_buy_plan_current(i)
         if not self.buy_valid(o, i):
-            self.deny(o, "签名期间控制/资格发生变化")
-            return
-        if not await self._check_buy_account(r.tokens[i["token_id"]]):
-            self.deny(o, "账户开放挂单或同Condition份额核对未通过")
-            return
-        self._mark_submit_stage(o, "account_check_ms")
-        self._check_buy_plan_current(i)
-        if not self.buy_valid(o, i):
-            self.deny(o, "核对期间控制/资格发生变化")
+            self.deny(o, "签名/账户核对期间控制/资格发生变化")
             return
         self.generate_order_submitted(o.strategy_id, o.instrument_id, o.client_order_id, r.now)
         venue = self._expected_venue_order_id(signed, neg_risk=r.tokens[i["token_id"]].neg_risk)

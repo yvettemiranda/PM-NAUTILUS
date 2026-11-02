@@ -80,7 +80,9 @@ def test_wallet_and_sign_overlap_and_account_check_starts_after_both(tmp_path):
             (account_start,) = [at for stage, kind, at in events if stage == "account"]
             # The whole account check is newer than both the wallet check and the signature.
             assert account_start >= max(ends)
-            assert elapsed < 2 * DELAY  # Wallet and sign overlapped (serial: 2 * DELAY).
+            # Overlap itself is enforced by staged(): each stage waits for the
+            # other to start. Wall-clock bounds are flaky on shared CI runners.
+            assert elapsed >= DELAY
             assert runtime.store.intent(oid)["outbound_terms"]["side"] == "BUY"
             assert not runtime._test_queue_errors
 

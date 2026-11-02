@@ -9,7 +9,7 @@
 | 当前最新版 | [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) | 十个独立 TEST 账户、通用性能优化、账户故障隔离及 TEST/LIVE 后台互斥；后续开发从这里继续。 |
 | 十账户改造前基准 | [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027) | 固定源码 `4de107a4dc1a4abaaf08b330eb00803391268e2a`，仅供比较和追溯，保持原样。 |
 
-当前已部署应用为 [`7d47f50`](https://github.com/yvettemiranda/PM-NAUTILUS/commit/7d47f50cbacba33d603ac1f7ed1370c8171f8337)（2026-11-02，CI 1,317 项通过）：LIVE 买入提速（批量链上读取、钱包检查与签名并行，完整账户核对在两者之后）、独立审查与 Codex 审计后的部署和 LIVE 保护、交易所市价买单最低 1U 规则（TEST 与 LIVE 共用）。当前版本、部署记录与回滚信息以 [HANDOFF](HANDOFF.md) 为准，上线前清单见 [LIVE 准备检查](docs/LIVE_READINESS.md)。
+当前已部署应用为 [`2e07c7d`](https://github.com/yvettemiranda/PM-NAUTILUS/commit/2e07c7dfb03d3acecfa75960658a06632e67aa88)（2026-11-02，CI 1,339 项通过）：消除市场扫描期间的整核满载、TEST 行情热路径减负（交易决策不变）、公共元数据共享上限放宽、Nginx 压缩；此前的 LIVE 买入提速（批量链上读取、钱包检查与签名并行，完整账户核对在两者之后）、部署和 LIVE 保护、交易所市价买单最低 1U 规则（TEST 与 LIVE 共用）继续保留。当前版本、部署记录与回滚信息以 [HANDOFF](HANDOFF.md) 为准，上线前清单见 [LIVE 准备检查](docs/LIVE_READINESS.md)。
 
 2026-10-30 界面版本（8ab1937）验收：**1,256 项 Python、122 项页面回归、AMD64/ARM64 CI 与 Docker 验证全部通过**，服务器十个 TEST 和一个 LIVE 账本保全核对通过。[验证结果](docs/VALIDATION.md)与[当前交接](HANDOFF.md)分别记录证据和运行边界。
 

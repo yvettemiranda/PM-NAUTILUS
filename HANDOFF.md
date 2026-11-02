@@ -9,11 +9,21 @@
 | [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) | 当前十账户最新版及现行文档，默认开发和下载入口。 |
 | [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027) | 十账户改造前的固定源码 `4de107a4dc1a4abaaf08b330eb00803391268e2a`，不继续修改。 |
 
-当前已部署应用为 `ff5da9bb6722eb0e5a8925140631a154af7c4c9e`（2026-11-02，见下节）；此前为 `99eada51405358ec82b7b5bc6329c3141c1a8d04`（2026-11-01 第二次部署），同日上一版为 `6ae9fcaadff86db9405d22adf95b5e7677d01cce`，再前为 `8ab1937e84b1f63db3db46a07eca8a4d17876a58`。在此前启停、异常关闭、钱包取消和历史分批修复之上，本轮仅更新 HTML／CSS 界面，见 [Hallmark 界面说明](docs/archive/UI_HALLMARK_20261030.md)。此前业务保护保留，见 [修复说明](docs/archive/EGM_FIXES_20261030.md)。后续验收文档提交仅改 Markdown，服务器源码可同步到该文档提交；运行镜像及环境版本仍固定为上述应用 SHA，不为同步文档再次重启。
+当前已部署应用为 `8d13d084544b1d94d558c52f03b0bc1931bd0946`（2026-11-02，见下节）；此前为 `ff5da9bb6722eb0e5a8925140631a154af7c4c9e`（同日），再前为 `99eada51405358ec82b7b5bc6329c3141c1a8d04`（2026-11-01 第二次部署），同日上一版为 `6ae9fcaadff86db9405d22adf95b5e7677d01cce`，再前为 `8ab1937e84b1f63db3db46a07eca8a4d17876a58`。在此前启停、异常关闭、钱包取消和历史分批修复之上，本轮仅更新 HTML／CSS 界面，见 [Hallmark 界面说明](docs/archive/UI_HALLMARK_20261030.md)。此前业务保护保留，见 [修复说明](docs/archive/EGM_FIXES_20261030.md)。后续验收文档提交仅改 Markdown，服务器源码可同步到该文档提交；运行镜像及环境版本仍固定为上述应用 SHA，不为同步文档再次重启。
 
 旧工作分支和重复基准标签已从 GitHub 入口移除，旧 PR #18 已关闭，未将它的原地重签方案合入当前交易逻辑；相关问题已经由后续 PR #19 的终结未提交意图及重新评估机制覆盖。提交历史继续保留。后续操作以 `main` 和完整应用 SHA 为准，旧部署脚本中的历史分支名不再作为拉取入口。规则见 [版本维护](docs/VERSIONS.md)。
 
-## 最近一次部署：2026-11-02（ff5da9b）
+## 最近一次部署：2026-11-02（8d13d08，LIVE 买入延迟优化）
+
+- 原则：安全优先，每笔买入的每项检查照做、不缓存任何结论，只减少等待。
+- 钱包检查批量化：链 ID、官方合约/签名账户/资金地址代码、Safe 所有者与门限、全部 CTF 授权合成一次 JSON-RPC 批量请求（原先 Safe 钱包需 4—6 次往返）。校验函数与报错文字不变；批量结果有效即为最终结论。RPC 不支持批量或批量任一项失败时，逐项重新读取并以其结果为准；连续两次“批量失败而逐项成功”后改为只走逐项读取（重启后重试）。
+- 同 Condition 份额：先读固定区块号，再一次批量读取该区块的余额（原先每个余额还要额外查一次链 ID）。
+- 账户核对（开放挂单 + 份额）与钱包检查、签名三者并行。三项都必须通过；计划/控制复核仍在三项全部完成后、账本闸门和 POST 之前执行。
+- 新测试：真实 Web3 对本地 JSON-RPC 服务（一次往返、相同结论、回退、注入延迟）以及 LIVE 三项并行（注入延迟，任一失败都不 POST）。[CI 41386349887](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/41386349887) AMD64/ARM64 通过，1,297 项。
+- TEST 模式不涉及链上与 CLOB 账户读取，交易决策逻辑未改，TEST/LIVE 一致性不变。
+- 部署前快照 `pre-deploy-8d13d08`（lhsnap-ofn5tc9n，12:15）。一键脚本全程自动完成：停机前 TEST 1、2、3 RUNNING（持仓 30/42/51），4—10 PAUSED；备份 `/var/lib/pm-nautilus-deploy/20261102T041659Z-8d13d08/`（12 个文件，自检通过）；健康 ok、修订 8d13d08、10 个账户、后台错误为空；恢复 1、2、3 后全部 10 个账户状态与停机前一致。
+
+## 2026-11-02 部署（ff5da9b）
 
 - 内容：一键部署脚本 `deploy/deploy.sh`、可选的每日 COS 服务器外备份 `deploy/offsite-backup.py`、精简后的 [部署手册](docs/DEPLOY.md)、`app.py` 中无状态的网页安全与钱包记录校验移到 `web_security.py`、`live_wallet_records.py`（行为不变）。交易逻辑未改。CI 1,277 项通过。
 - 部署前在腾讯云控制台创建手动快照 `pre-deploy-ff5da9b`（lhsnap-8bducs9f，2026-11-02 11:03，状态正常）。

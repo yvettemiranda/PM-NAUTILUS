@@ -8,6 +8,9 @@ from pathlib import Path
 
 import pytest
 
+# The script targets the Linux server (GNU find/sed/chown); BSD tools differ.
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="deploy.sh targets Linux")
+
 SCRIPT = Path(__file__).resolve().parents[1] / "deploy" / "deploy.sh"
 OLD, NEW = "a" * 40, "c" * 40
 PASSWORD = 'pa"ss\\word-123456789'
@@ -37,18 +40,41 @@ if tool == "docker":
 if tool == "git":
     if "merge-base" in args and s.get("non_main"):
         sys.exit(1)
+    if "status" in args:
+        print(s.get("dirty", ""), end="")
+    if "checkout" in args:
+        s["head"] = args[-1]; save()
     if "rev-parse" in args:
-        print("b" * 40)
+        print(s.get("head", "b" * 40))
     sys.exit(0)
 if "-K" in args:
     s["auth"] = sys.stdin.read(); save()
 url = [a for a in args if a.startswith("http")][0]
+if url.startswith("https://api.github.com/"):
+    assert "/commits/" + s.get("head", "x") not in url  # Queried before checkout.
+    if s.get("ci") == "offline":
+        sys.exit(6)
+    runs = {
+        "pass": [("verify (ubuntu-24.04)", "success"), ("verify (ubuntu-24.04-arm)", "success")],
+        "fail": [("verify (ubuntu-24.04)", "success"), ("verify (ubuntu-24.04-arm)", "failure")],
+        "pending": [("verify (ubuntu-24.04)", None), ("verify (ubuntu-24.04-arm)", "success")],
+        "one": [("verify (ubuntu-24.04)", "success")],
+    }[s.get("ci", "pass")]
+    print(json.dumps({"check_runs": [
+        {"name": n, "status": "completed" if c else "in_progress", "conclusion": c}
+        for n, c in runs
+    ]}))
+    sys.exit(0)
 if not s["up"]:
     sys.exit(7)
 if "-D" in args:
     print("HTTP/1.1 200 OK\r\nx-pm-csrf: tok\r\n\r"); sys.exit(0)
 if url.endswith("/api/health"):
     built = any(e[0] == "docker" and "build" in e for e in s["log"])
+    if s.get("switch_after_accounts"):
+        # Flip once the pre-stop account queries have run (after the build).
+        queried = [e for e in s["log"] if e[0] == "curl" and any("account_id=4" in a for a in e)]
+        built = len(queried) >= 2
     live = s["live"] or (built and s.get("live_after_build", False))
     wallet = s.get("wallet_after_build") if built and s.get("wallet_after_build") else s["wallet"]
     print(json.dumps({
@@ -191,14 +217,34 @@ def test_deploy_refuses_unlocked_or_unknown_wallet_up_front(server, wallet):
     assert not docker_steps(state)
 
 
-def test_deploy_refuses_commit_not_on_main_unless_explicitly_allowed(server):
+@pytest.mark.parametrize(
+    "sim", [{"non_main": True}, {"ci": "fail"}, {"ci": "pending"}, {"ci": "one"}, {"ci": "offline"}]
+)
+def test_deploy_refuses_unverified_commit_unless_explicitly_allowed(server, sim):
     app, _, run = server
-    result, state = run(NEW, "--yes", non_main=True)
-    assert result.returncode == 1 and "--allow-non-main" in result.stderr
+    result, state = run(NEW, "--yes", **sim)
+    assert result.returncode == 1 and "--allow-unverified" in result.stderr
     assert not docker_steps(state) and f"PM_GIT_REVISION={OLD}" in (app / ".env").read_text()
-    result, state = run(NEW, "--yes", "--allow-non-main", non_main=True)
+    assert not any(e[0] == "git" and "checkout" in e for e in state["log"])
+    result, state = run(NEW, "--yes", "--allow-unverified", **sim)
     assert result.returncode == 0, result.stdout + result.stderr
     assert docker_steps(state) == ["build", "stop", "up"]
+
+
+def test_deploy_refuses_dirty_checkout_before_building(server):
+    app, _, run = server
+    result, state = run(NEW, "--yes", dirty=" M src/pm_nautilus/live.py\n?? scratch.py\n")
+    assert result.returncode == 1 and "未提交或未跟踪" in result.stderr
+    assert not docker_steps(state) and f"PM_GIT_REVISION={OLD}" in (app / ".env").read_text()
+
+
+@pytest.mark.parametrize("sim", [{"live_after_build": True}, {"wallet_after_build": "READY"}])
+def test_final_safety_check_runs_after_the_last_account_query(server, sim):
+    _, backups, run = server
+    result, state = run(NEW, "--yes", switch_after_accounts=True, **sim)
+    assert result.returncode == 1, result.stdout
+    assert docker_steps(state) == ["build"] and state["up"]
+    assert not backups.exists() or not any(backups.iterdir())
 
 
 def test_pruning_keeps_newest_complete_backups_and_never_counts_partial_ones(server):

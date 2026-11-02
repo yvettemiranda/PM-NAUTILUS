@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-command, fail-stop upgrade of a running PM-NAUTILUS Docker Compose server.
 #
-#   sudo deploy/deploy.sh <full 40-character commit SHA> [--yes] [--allow-non-main]
+#   sudo deploy/deploy.sh <full 40-character commit SHA> [--yes] [--allow-unverified]
 #
 # Order: preflight -> record which TEST accounts are RUNNING -> fetch and check
 # out the commit -> build the image while the old container keeps serving ->
@@ -12,8 +12,10 @@
 # Any failure stops immediately and prints how to roll back. The script never
 # enables LIVE, unlocks a wallet or starts an account that was not running.
 # It refuses to run while LIVE is enabled or a wallet is unlocked (checked at
-# the start and again right before the stop), and refuses commits that are not
-# on origin/main unless --allow-non-main is given.
+# the start and again immediately before the stop). It builds only a clean
+# checkout of exactly the target commit, and refuses a commit that is not on
+# origin/main or whose GitHub CI for that exact SHA has not fully passed,
+# unless --allow-unverified is given.
 
 set -Eeuo pipefail
 
@@ -23,6 +25,7 @@ KEEP_BACKUPS=${PM_KEEP_BACKUPS:-5}
 HEALTH_TIMEOUT=${PM_HEALTH_TIMEOUT:-240}
 MARKET_TIMEOUT=${PM_MARKET_TIMEOUT:-300}
 COMPOSE_FILES=${PM_COMPOSE_FILES:-compose.yaml}
+GITHUB_REPO=${PM_GITHUB_REPO:-yvettemiranda/PM-NAUTILUS}
 
 usage() {
     sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
@@ -42,12 +45,12 @@ die() {
 
 TARGET=""
 ASSUME_YES=0
-ALLOW_NON_MAIN=0
+ALLOW_UNVERIFIED=0
 for arg in "$@"; do
     case "$arg" in
         -h | --help) usage 0 ;;
         -y | --yes) ASSUME_YES=1 ;;
-        --allow-non-main) ALLOW_NON_MAIN=1 ;;
+        --allow-unverified) ALLOW_UNVERIFIED=1 ;;
         -*) die "未知参数: $arg" ;;
         *)
             [ -z "$TARGET" ] || die "只能指定一个提交"
@@ -115,6 +118,19 @@ require_safe_to_stop() {
     esac
 }
 
+# Every GitHub check run for this exact SHA must be completed and successful,
+# including both CI architectures. Prints a one-line summary.
+ci_passed() {
+    curl -sS --max-time 20 -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/$GITHUB_REPO/commits/$TARGET/check-runs?per_page=100" |
+        json "
+runs = d['check_runs']
+verify = [r for r in runs if r['name'].startswith('verify')]
+ok = len(verify) >= 2 and all(r['status'] == 'completed' and r['conclusion'] == 'success' for r in runs)
+print(f\"{sum(r['conclusion'] == 'success' for r in runs)}/{len(runs)} 项检查通过\")
+sys.exit(0 if ok else 1)"
+}
+
 account_states() {
     # Prints one "number status positionCount" line per TEST account.
     local count=$1 number
@@ -156,15 +172,30 @@ if [ "$ASSUME_YES" -ne 1 ]; then
 fi
 
 log "3/9 获取并检出目标版本"
+# Uncommitted or untracked source would enter the image under the target's name.
+DIRTY=$("${GIT[@]}" status --porcelain --untracked-files=all)
+[ -z "$DIRTY" ] || die "程序目录有未提交或未跟踪的文件，镜像将与目标版本不一致；请先核对:
+$DIRTY"
 "${GIT[@]}" fetch -q origin
 "${GIT[@]}" cat-file -e "$TARGET^{commit}" 2>/dev/null || die "远端没有提交 $TARGET"
-if ! "${GIT[@]}" merge-base --is-ancestor "$TARGET" origin/main; then
-    [ "$ALLOW_NON_MAIN" -eq 1 ] ||
-        die "$TARGET 不在 origin/main 上（未合并或未通过 CI）。确需部署请加 --allow-non-main"
-    info "注意：$TARGET 不在 origin/main 上（已用 --allow-non-main 确认）"
+UNVERIFIED=""
+"${GIT[@]}" merge-base --is-ancestor "$TARGET" origin/main || UNVERIFIED="不在 origin/main 上"
+if [ -z "$UNVERIFIED" ]; then
+    if CI_SUMMARY=$(ci_passed 2>/dev/null); then
+        info "GitHub CI（此提交）: $CI_SUMMARY"
+    else
+        UNVERIFIED="GitHub CI 未全部通过或无法确认（${CI_SUMMARY:-无响应}）"
+    fi
+fi
+if [ -n "$UNVERIFIED" ]; then
+    [ "$ALLOW_UNVERIFIED" -eq 1 ] ||
+        die "$TARGET $UNVERIFIED。等 CI 通过后再部署；确需部署请加 --allow-unverified"
+    info "注意：$TARGET $UNVERIFIED（已用 --allow-unverified 确认）"
 fi
 PREVIOUS_HEAD=$("${GIT[@]}" rev-parse HEAD)
 "${GIT[@]}" checkout -q --detach "$TARGET"
+[ "$("${GIT[@]}" rev-parse HEAD)" = "$TARGET" ] || die "检出后的版本不是 $TARGET"
+[ -z "$("${GIT[@]}" status --porcelain --untracked-files=all)" ] || die "检出后程序目录不干净"
 ROLLBACK_HINT="    还没有停机。恢复源码: sudo git -C $APP_DIR checkout --detach $PREVIOUS_HEAD"
 
 log "4/9 构建镜像（旧版本继续运行）"
@@ -173,11 +204,13 @@ PM_GIT_REVISION=$TARGET compose build
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 BACKUP="$BACKUP_ROOT/$STAMP-${TARGET:0:7}"
 log "5/9 记录停机前账户状态，停机并完整备份到 $BACKUP"
-require_safe_to_stop  # Re-check after the build: LIVE or a wallet may have changed.
 BEFORE=$(account_states "$ACCOUNT_COUNT")
 printf '%s\n' "$BEFORE" | sed 's/^/    /'
 RUNNING=$(printf '%s\n' "$BEFORE" | awk '$2 == "RUNNING" {print $1}' | xargs)
 info "部署后将恢复运行的账户: ${RUNNING:-无}"
+# Re-check as the last step before stopping: LIVE or a wallet may have
+# changed during the build or the account queries.
+require_safe_to_stop
 mkdir -p "$BACKUP"
 chmod 700 "$BACKUP_ROOT" "$BACKUP"
 compose stop

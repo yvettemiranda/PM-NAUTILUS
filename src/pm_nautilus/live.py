@@ -72,6 +72,10 @@ from .rules import (
     signed_buy_notional,
 )
 
+# The overlapped account check may finish at most this long before the other
+# preparations; otherwise it is repeated before the POST boundary.
+ACCOUNT_CHECK_MAX_LEAD_NS = 50_000_000
+
 
 class _ExactBuyOrderBuilder(OrderBuilder):
     """Only SDK BUY amount arithmetic changes; signing and fee guards stay official."""
@@ -1002,6 +1006,14 @@ class LiveExecution(PolymarketExecutionClient):
             user_usdc_balance=float(Decimal(r.cash()) / SCALE),
         )
         token = r.tokens[i["token_id"]]
+        account_done = []
+
+        async def account_check():
+            try:
+                return await self._check_buy_account(token)
+            finally:
+                account_done.append(perf_counter_ns())
+
         # Three independent read/sign preparations overlap; none can POST. Every
         # result is still required, and the control/plan checks below run after
         # all of them finish, immediately before the ledger gate and POST.
@@ -1011,7 +1023,7 @@ class LiveExecution(PolymarketExecutionClient):
                     o, "wallet_check_ms", asyncio.to_thread(self.wallet.buy_preflight)
                 ),
                 self._timed_preparation(o, "sign_ms", self._prepare_buy_signature(token, args)),
-                self._timed_preparation(o, "account_check_ms", self._check_buy_account(token)),
+                self._timed_preparation(o, "account_check_ms", account_check()),
             ]
         )
         self._mark_submit_stage(o, "preparation_ms")
@@ -1034,6 +1046,16 @@ class LiveExecution(PolymarketExecutionClient):
         if account is not True:
             self.deny(o, "账户开放挂单或同Condition份额核对未通过")
             return
+        if perf_counter_ns() - account_done[0] > ACCOUNT_CHECK_MAX_LEAD_NS:
+            # Signing or the wallet check outlasted the account check. Repeat it
+            # so the final open-order/inventory gate is as fresh as it was when
+            # the checks ran one after another. Errors propagate to the handler.
+            account = await self._timed_preparation(
+                o, "account_recheck_ms", self._check_buy_account(token)
+            )
+            if account is not True:
+                self.deny(o, "账户开放挂单或同Condition份额核对未通过")
+                return
         # The pinned SDK has no maxSpend option and rounds the maker amount to
         # cents. Inspect the signed facts before allowing any POST boundary.
         try:

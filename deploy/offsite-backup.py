@@ -209,15 +209,19 @@ def main(argv=None):
     uri = os.environ.get("PM_OFFSITE_COS_URI", "")
     if not args.no_upload and not uri:
         parser.error("PM_OFFSITE_COS_URI is not set (or pass --no-upload)")
-    archive = build_archive(app_dir, staging)
-    if not args.no_upload:
-        upload(
-            archive,
-            uri,
-            os.environ.get("PM_OFFSITE_COSCLI", "coscli"),
-            os.environ.get("PM_OFFSITE_COSCLI_CONFIG") or None,
-        )
-    prune(staging, max(1, keep))
+    try:
+        archive = build_archive(app_dir, staging)
+        if not args.no_upload:
+            upload(
+                archive,
+                uri,
+                os.environ.get("PM_OFFSITE_COSCLI", "coscli"),
+                os.environ.get("PM_OFFSITE_COSCLI_CONFIG") or None,
+            )
+    finally:
+        # Bounded on every path: repeated upload failures must not fill the disk.
+        if staging.is_dir():
+            prune(staging, max(1, keep))
     return 0
 
 

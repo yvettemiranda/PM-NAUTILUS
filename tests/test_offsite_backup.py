@@ -126,3 +126,21 @@ def test_scratch_paths_are_skipped_at_any_depth():
     assert offsite.skipped(Path("TEST/state.sqlite-wal"))
     assert not offsite.skipped(Path("LIVE/state.sqlite"))
     assert not offsite.skipped(Path("wallet/live.vault"))
+
+
+def test_failed_uploads_still_keep_local_archives_bounded(app_dir, tmp_path, monkeypatch):
+    def fail(cmd, **kw):
+        raise offsite.subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(offsite.subprocess, "run", fail)
+    monkeypatch.setenv("PM_APP_DIR", str(app_dir))
+    monkeypatch.setenv("PM_OFFSITE_STAGING", str(tmp_path / "staging"))
+    monkeypatch.setenv("PM_OFFSITE_COS_URI", "cos://bucket-1250000000/pm-nautilus/")
+    monkeypatch.setenv("PM_OFFSITE_KEEP_LOCAL", "1")
+    for second in range(3):
+        monkeypatch.setattr(
+            offsite.time, "gmtime", lambda s=second: (2026, 11, 2, 4, 17, s, 0, 0, 0)
+        )
+        with pytest.raises(offsite.subprocess.CalledProcessError):
+            offsite.main([])
+    assert len(list((tmp_path / "staging").glob("pm-nautilus-*.tar.gz"))) == 1

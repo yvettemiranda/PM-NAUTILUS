@@ -189,3 +189,56 @@ def test_signed_amount_below_one_dollar_never_reaches_post(tmp_path):
             assert runtime.held_cash() == 0
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("second", [True, False, ConnectionError("open orders unavailable")])
+def test_account_check_that_finished_early_is_repeated_before_post(tmp_path, second):
+    async def run():
+        async with controlled_runtime(tmp_path / "overlap-stale.sqlite") as runtime:
+            oid, order = await prepared_order(runtime)
+            client = runtime.client
+            overlapped(client)
+
+            def slow_sign(*_args, **_kwargs):
+                time.sleep(0.3)  # Signing outlasts the account check by far.
+                return SimpleNamespace(makerAmount=1_000_000, takerAmount=10_000_000)
+
+            client._http_client.create_market_order = Mock(side_effect=slow_sign)
+            client.wallet = SimpleNamespace(buy_preflight=Mock())
+            client._check_buy_account = AsyncMock(side_effect=[True, second])
+            await submit(client, order)
+
+            # The repeated check is the final account gate, after signing.
+            assert client._check_buy_account.await_count == 2
+            if second is True:
+                client._post_signed_order.assert_awaited_once()
+            else:
+                client._post_signed_order.assert_not_awaited()
+                assert runtime.store.intent(oid)["terminal"] is True
+            if isinstance(second, BaseException):
+                assert client.ready is False and runtime.status == "PAUSED"
+
+    asyncio.run(run())
+
+
+def test_account_check_finishing_with_the_others_is_not_repeated(tmp_path):
+    async def run():
+        async with controlled_runtime(tmp_path / "overlap-fresh.sqlite") as runtime:
+            _, order = await prepared_order(runtime)
+            client = runtime.client
+            client._post_signed_order = AsyncMock()
+            client._expected_venue_order_id = Mock(return_value=VenueOrderId("venue-fresh"))
+            client._http_client.create_market_order = Mock(
+                return_value=SimpleNamespace(makerAmount=1_000_000, takerAmount=10_000_000)
+            )
+
+            async def account(_token):
+                await asyncio.sleep(0.2)  # The slowest preparation, as in production.
+                return True
+
+            client._check_buy_account = AsyncMock(side_effect=account)
+            await submit(client, order)
+            assert client._check_buy_account.await_count == 1
+            client._post_signed_order.assert_awaited_once()
+
+    asyncio.run(run())

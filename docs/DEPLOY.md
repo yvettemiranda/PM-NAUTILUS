@@ -12,7 +12,7 @@
 | 版本 | `.env` 中的 `PM_GIT_REVISION`（完整 SHA），镜像标签同名 |
 | 健康接口 | `curl -H 'Host: localhost' http://127.0.0.1:8765/api/health`（无需登录） |
 | 部署备份 | `/var/lib/pm-nautilus-deploy/`（部署脚本自动生成，保留最近 5 份） |
-| 服务器外备份 | 腾讯云 COS（每日，见第 3.2 节） |
+| 服务器外备份 | 未启用（COS 未开通）；可选方案见第 3.2 节。部署前手动快照 `pre-deploy-ff5da9b`（2026-11-02） |
 
 数据目录里有 11 份账本：`TEST/state.sqlite`、`TEST/accounts/2…10/state.sqlite`、`LIVE/state.sqlite`，另有 `execution-mode.json`（运行模式意图）和 `wallet/live.vault`（加密钱包）。不要只复制其中一部分，也不要在程序运行时直接复制单个 `.sqlite` 文件（会漏掉 WAL 中的数据）。
 
@@ -49,7 +49,7 @@ sudo deploy/deploy.sh <完整的 40 位提交 SHA>
 
 由第 2 节的部署脚本在停机状态下完整复制，是每次升级前的一致性快照，保留最近 5 份。它和账本在同一块盘上，只能防止升级出错，防不了服务器损坏。
 
-### 3.2 服务器外备份：每日上传腾讯云 COS
+### 3.2 服务器外备份：每日上传腾讯云 COS（可选，当前未启用）
 
 腾讯云轻量应用服务器不支持定期自动快照，所以用 `deploy/offsite-backup.py` 做每日备份。它不停机：用 SQLite 官方在线备份接口从只读连接复制每份账本，得到一致的副本并做 `quick_check`；再连同模式文件和加密钱包打包，附带 SHA-256 清单，上传到 COS。它必须以 UID 10001 运行（脚本会检查），否则可能在数据目录里留下 root 属主的 SQLite 临时文件，导致程序打不开账本。
 

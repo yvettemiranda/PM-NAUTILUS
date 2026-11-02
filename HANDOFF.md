@@ -9,11 +9,20 @@
 | [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) | 当前十账户最新版及现行文档，默认开发和下载入口。 |
 | [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027) | 十账户改造前的固定源码 `4de107a4dc1a4abaaf08b330eb00803391268e2a`，不继续修改。 |
 
-当前已部署应用为 `99eada51405358ec82b7b5bc6329c3141c1a8d04`（2026-11-01 第二次部署，见下节）；同日上一版为 `6ae9fcaadff86db9405d22adf95b5e7677d01cce`，再前为 `8ab1937e84b1f63db3db46a07eca8a4d17876a58`。在此前启停、异常关闭、钱包取消和历史分批修复之上，本轮仅更新 HTML／CSS 界面，见 [Hallmark 界面说明](docs/archive/UI_HALLMARK_20261030.md)。此前业务保护保留，见 [修复说明](docs/archive/EGM_FIXES_20261030.md)。后续验收文档提交仅改 Markdown，服务器源码可同步到该文档提交；运行镜像及环境版本仍固定为上述应用 SHA，不为同步文档再次重启。
+当前已部署应用为 `ff5da9bb6722eb0e5a8925140631a154af7c4c9e`（2026-11-02，见下节）；此前为 `99eada51405358ec82b7b5bc6329c3141c1a8d04`（2026-11-01 第二次部署），同日上一版为 `6ae9fcaadff86db9405d22adf95b5e7677d01cce`，再前为 `8ab1937e84b1f63db3db46a07eca8a4d17876a58`。在此前启停、异常关闭、钱包取消和历史分批修复之上，本轮仅更新 HTML／CSS 界面，见 [Hallmark 界面说明](docs/archive/UI_HALLMARK_20261030.md)。此前业务保护保留，见 [修复说明](docs/archive/EGM_FIXES_20261030.md)。后续验收文档提交仅改 Markdown，服务器源码可同步到该文档提交；运行镜像及环境版本仍固定为上述应用 SHA，不为同步文档再次重启。
 
 旧工作分支和重复基准标签已从 GitHub 入口移除，旧 PR #18 已关闭，未将它的原地重签方案合入当前交易逻辑；相关问题已经由后续 PR #19 的终结未提交意图及重新评估机制覆盖。提交历史继续保留。后续操作以 `main` 和完整应用 SHA 为准，旧部署脚本中的历史分支名不再作为拉取入口。规则见 [版本维护](docs/VERSIONS.md)。
 
-## 最近一次部署：2026-11-01（99eada5）
+## 最近一次部署：2026-11-02（ff5da9b）
+
+- 内容：一键部署脚本 `deploy/deploy.sh`、可选的每日 COS 服务器外备份 `deploy/offsite-backup.py`、精简后的 [部署手册](docs/DEPLOY.md)、`app.py` 中无状态的网页安全与钱包记录校验移到 `web_security.py`、`live_wallet_records.py`（行为不变）。交易逻辑未改。CI 1,277 项通过。
+- 部署前在腾讯云控制台创建手动快照 `pre-deploy-ff5da9b`（lhsnap-8bducs9f，2026-11-02 11:03，状态正常）。
+- 首次使用部署脚本：预检、构建、停机前记录（TEST 1、2、3 RUNNING，持仓 28/40/51；4—10 PAUSED）、正常停机和完整备份均成功，备份在 `/var/lib/pm-nautilus-deploy/20261102T030603Z-ff5da9b/`。随后脚本的备份大小自检误报并按设计停在停止状态：它拿停机前测的大小作比较，而正常停机会合并并删除 SQLite WAL，数据目录因此变小。人工以 `diff -rq` 确认备份与停机后数据目录逐文件一致后，手动完成切换 `PM_GIT_REVISION`、`up -d`、健康检查、恢复 1、2、3。停机约 3 分钟。
+- 上线后：健康 ok、修订 ff5da9b、10 个账户可用、后台错误为空；重启后全部 PAUSED 且持仓与停机前一致，START 1、2、3 后为 RUNNING，4—10 保持 PAUSED。
+- 脚本修复 `4c12793`：改为与停机后的数据目录比较文件数和大小，测试替身在停机时删除 WAL 以覆盖此情况。只改脚本与测试，服务器源码更新到该提交即可，运行镜像不变。
+- 用户决定暂不开通 COS，服务器外备份未启用。
+
+## 2026-11-01 部署（99eada5）
 
 - TEST/LIVE 一致性审查后修复：Polymarket 拒绝签名金额低于 1 美元的可成交 BUY，原策略会计划此类订单（例如收费市场 1U 预算只签 0.96U，或一轮剩余预算不足 1U 的补仓），TEST 会成交而 LIVE 必被拒。现在 `Runtime.evaluate`（两种模式共用的买入决策点）跳过此类机会，LIVE `buy_valid` 对竞争结果采用同一规则。配置页手续费说明改为“买入手续费以 pUSD 另付并计入预算”（依据官方 SDK）。另将带日期的审计文档移入 `docs/archive/`。
 - [GitHub CI 41310180368](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/41310180368)：AMD64、ARM64 及 Docker verify 通过，1,266 项 Python 测试通过。

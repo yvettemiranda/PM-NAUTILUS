@@ -8,7 +8,9 @@ pin that the cheaper paths act exactly like the original ones.
 
 import asyncio
 from contextlib import contextmanager
+from dataclasses import replace
 from itertools import count
+import tracemalloc
 from random import Random
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -17,10 +19,10 @@ import pytest
 from nautilus_trader.common.component import TestClock
 
 from pm_nautilus.books import Side
-from pm_nautilus.market import FRESH_BASELINE_RECOVERY_SECONDS, PublicMarketHub
+from pm_nautilus.market import FRESH_BASELINE_RECOVERY_SECONDS, PublicMarketHub, _PublicRuntime
 from pm_nautilus.rules import Fees, Token
 import pm_nautilus.strategy as strategy_module
-from pm_nautilus.strategy import Runtime
+from pm_nautilus.strategy import Runtime, TokenRegistry
 from pm_nautilus.test_runtime import TestRuntime
 
 DAY = 86_400_000_000_000
@@ -319,3 +321,75 @@ def test_fast_path_keeps_stop_loss_exit_like_the_original(tmp_path, cls):
     business = fast[-1][1]
     assert "event-0" in business["banned"] and "event-0" not in business["cycles"]
     assert any(i["side"] == "SELL" and i["kind"] == "STOP" for _, i in fast[-1][0])
+
+
+# Production (2026-11-02, py-spy): while a discovery scan was in flight, every
+# account's 5 s loop ran a full subscription plan, and each plan copied every
+# account's ~28.6k (id, token) pairs in release_unmonitored. That kept one core
+# busy for minutes per scan, mostly in garbage collection of those tuples.
+CATALOG = 20_000
+NO_COPY_LIMIT = 64 * 1024  # One copy of this catalog peaks at about 1 MiB.
+
+
+def catalog():
+    base = tokens()[0]
+    shared = [replace(base, token_id=f"o{i}", event_id=f"oe{i}") for i in range(CATALOG)]
+    closed = [
+        replace(base, token_id=f"c{i}", event_id=f"ce{i}", condition_id=f"cc{i % 2}", open=False)
+        for i in range(6)
+    ]
+    # Closed tokens sit mid-mapping, so deletions happen between kept entries.
+    return shared[: CATALOG // 2] + closed + shared[CATALOG // 2 :]
+
+
+def peak_bytes(call):
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        before, _ = tracemalloc.get_traced_memory()
+        call()
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    return peak - before
+
+
+@BOTH_RUNTIMES
+def test_release_unmonitored_matches_original_without_copying_the_catalog(tmp_path, cls):
+    r, _ = runtime(tmp_path / "release.sqlite", cls)
+    try:
+        r.tokens.update({t.token_id: t for t in catalog()})
+        r.monitored.add("c1")  # Closed but still monitored (for example, held).
+        r.store.save_intent(  # Closed with order history: kept for accounting.
+            "historic", {"token_id": "c2", "event_id": "ce2", "side": "BUY", "terminal": True}
+        )
+        reference = TokenRegistry(r.tokens)
+        historical = r.store.historical_token_ids()
+        for tid, token in list(reference.items()):  # The original loop.
+            if not token.open and tid not in r.monitored and tid not in historical:
+                del reference[tid]
+        version = getattr(r.tokens, "test_version", 0)
+
+        assert peak_bytes(lambda: list(r.tokens.items())) > 8 * NO_COPY_LIMIT
+        assert peak_bytes(r.release_unmonitored) < NO_COPY_LIMIT
+
+        assert list(r.tokens.items()) == list(reference.items())
+        assert r.tokens._conditions == reference._conditions
+        assert {"c1", "c2"} <= r.tokens.keys() and not {"c0", "c3", "c4", "c5"} & r.tokens.keys()
+        if cls is TestRuntime:  # TEST caches see exactly the four removals.
+            assert r.tokens.test_version == version + 4
+    finally:
+        r.close()
+
+
+def test_public_release_matches_original_without_copying_the_catalog():
+    public = _PublicRuntime(None)
+    public.tokens = {t.token_id: t for t in catalog()}
+    public.monitored = {"c1"}
+    reference = dict(public.tokens)
+    for tid, token in list(reference.items()):  # The original loop.
+        if not token.open and tid not in public.monitored:
+            del reference[tid]
+
+    assert peak_bytes(public.release_unmonitored) < NO_COPY_LIMIT
+    assert list(public.tokens.items()) == list(reference.items())

@@ -340,9 +340,19 @@ class Runtime:
             if tid not in self.monitored and tid not in historical:
                 self.native.cache.purge_instrument(instrument_id(self.tokens[tid]))
                 del self.instrument_tokens[iid]
-        for tid, token in list(self.tokens.items()):
-            if not token.open and tid not in self.monitored and tid not in historical:
-                del self.tokens[tid]
+        # Every full subscription plan calls this for every account, several
+        # times a second while a discovery scan is in flight. Collect only the
+        # stale IDs from the live mapping: copying all (id, token) pairs first
+        # allocated tens of thousands of tuples per call, which kept one server
+        # core busy for minutes per scan (largely garbage collection). The same
+        # tokens are removed in the same order.
+        stale = [
+            tid
+            for tid, token in self.tokens.items()
+            if not token.open and tid not in self.monitored and tid not in historical
+        ]
+        for tid in stale:
+            del self.tokens[tid]
 
     def book(self, token_id, bids, asks, timestamp=None):
         b = self.books[token_id]

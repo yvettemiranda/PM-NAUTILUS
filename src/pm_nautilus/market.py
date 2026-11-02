@@ -1095,9 +1095,14 @@ class _PublicRuntime:
     def release_unmonitored(self):
         for tid in self.books.keys() - self.monitored:
             del self.books[tid]
-        for tid, token in list(self.tokens.items()):
-            if not token.open and tid not in self.monitored:
-                del self.tokens[tid]
+        # Runs on every full plan: collect stale IDs without copying the catalog.
+        stale = [
+            tid
+            for tid, token in self.tokens.items()
+            if not token.open and tid not in self.monitored
+        ]
+        for tid in stale:
+            del self.tokens[tid]
 
     def pause(self):
         for service in tuple(self.hub.services):

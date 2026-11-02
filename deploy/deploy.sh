@@ -172,8 +172,15 @@ cp -a runtime/server "$BACKUP/runtime-server"
 cp -a .env "$BACKUP/env.before"
 printf '%s\n' "$CURRENT" >"$BACKUP/previous-revision"
 printf '%s\n' "$BEFORE" >"$BACKUP/accounts-before"
-[ "$(du -sk "$BACKUP/runtime-server" | cut -f1)" -ge $((DATA_KB * 95 / 100)) ] ||
-    die "备份大小异常，已停止（服务保持停止，见上方回滚步骤）"
+# Compare with the stopped data directory: a graceful stop checkpoints and
+# removes SQLite WAL files, so the pre-stop size is legitimately larger.
+STOPPED_KB=$(du -sk runtime/server | cut -f1)
+BACKUP_KB=$(du -sk "$BACKUP/runtime-server" | cut -f1)
+SOURCE_FILES=$(find runtime/server -type f | wc -l)
+BACKUP_FILES=$(find "$BACKUP/runtime-server" -type f | wc -l)
+info "备份 ${BACKUP_KB} KB / ${BACKUP_FILES} 个文件（停机后数据目录 ${STOPPED_KB} KB / ${SOURCE_FILES} 个文件）"
+[ "$BACKUP_FILES" -eq "$SOURCE_FILES" ] && [ "$BACKUP_KB" -ge $((STOPPED_KB * 99 / 100)) ] ||
+    die "备份与停机后的数据目录不一致，已停止（服务保持停止，见下方回滚步骤）"
 
 log "6/9 切换版本并启动"
 sed -i "s/^PM_GIT_REVISION=.*/PM_GIT_REVISION=$TARGET/" .env

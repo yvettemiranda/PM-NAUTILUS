@@ -26,6 +26,9 @@ if tool == "id":
 if tool == "docker":
     if "stop" in args:
         s["up"] = False
+        # A graceful SQLite shutdown checkpoints and deletes its WAL files.
+        for wal in __import__("pathlib").Path("runtime/server").rglob("*-wal"):
+            wal.unlink()
     if "up" in args:
         env = dict(l.strip().split("=", 1) for l in open(".env") if "=" in l)
         s["up"], s["rev"] = True, env["PM_GIT_REVISION"]
@@ -66,6 +69,8 @@ def server(tmp_path):
     bin_dir.mkdir()
     (app / "runtime" / "server").mkdir(parents=True)
     (app / "runtime" / "server" / "state.sqlite").write_bytes(os.urandom(4096))
+    # Larger than the ledger: the data directory shrinks a lot when it is stopped.
+    (app / "runtime" / "server" / "state.sqlite-wal").write_bytes(os.urandom(1 << 20))
     (app / "compose.yaml").write_text("services: {}\n")
     env = app / ".env"
     env.write_text(

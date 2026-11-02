@@ -43,6 +43,15 @@ def app_dir(tmp_path):
     (data / "wallet" / "live.vault").write_bytes(b"encrypted")
     (data / "process.lock").write_text("")
     (data / "LIVE" / ".pm-live-upload-abc.pmnb").write_text("scratch")
+    # In-flight wallet export/restore work areas: whole directories are scratch.
+    export = data / "LIVE" / ".pm-live-export-x1"
+    export.mkdir()
+    (export / "snapshot.sqlite").write_bytes(b"half-written, not a database")
+    (export / "bundle.pmnb").write_bytes(b"partial")
+    restore = data / "LIVE" / ".pm-live-restore-y2" / "nested"
+    restore.mkdir(parents=True)
+    (restore / "payload.bin").write_bytes(b"decrypted bundle")
+    (restore / "restored.sqlite").write_bytes(b"partial")
     (app / ".env").write_text("PM_GIT_REVISION=" + "c" * 40 + "\n")
     yield app
     for db in open_ledgers:
@@ -109,3 +118,11 @@ def test_refuses_an_empty_data_directory_and_bad_destination(tmp_path):
         offsite.build_archive(tmp_path / "app", tmp_path / "staging")
     with pytest.raises(RuntimeError, match="cos://"):
         offsite.upload(tmp_path / "x.tar.gz", "s3://bucket/", "coscli", None)
+
+
+def test_scratch_paths_are_skipped_at_any_depth():
+    assert offsite.skipped(Path("LIVE/.pm-live-export-x/snapshot.sqlite"))
+    assert offsite.skipped(Path("LIVE/.pm-live-restore-y/a/b/payload.bin"))
+    assert offsite.skipped(Path("TEST/state.sqlite-wal"))
+    assert not offsite.skipped(Path("LIVE/state.sqlite"))
+    assert not offsite.skipped(Path("wallet/live.vault"))

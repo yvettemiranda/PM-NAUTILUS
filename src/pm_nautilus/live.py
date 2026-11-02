@@ -50,6 +50,7 @@ from .execution import TestExecution
 from .live_account_guard import audit_open_orders, condition_inventory_matches
 from .native import price, quantity, instrument_id
 from .order_terms import (
+    MIN_MARKETABLE_BUY_NOTIONAL,
     OrderTermsError,
     SellTerms,
     check_signed_buy,
@@ -989,6 +990,9 @@ class LiveExecution(PolymarketExecutionClient):
         if notional <= 0 or notional * SCALE // executable_limit < r.tokens[i["token_id"]].min_size:
             self.deny(o, "含费预算不足以满足交易所最小订单份额")
             return
+        if notional < MIN_MARKETABLE_BUY_NOTIONAL:
+            self.deny(o, "签名金额低于交易所 1U 市价买单下限")
+            return
         args = MarketOrderArgsV2(
             token_id=i["token_id"],
             amount=float(Decimal(notional) / SCALE),
@@ -1011,6 +1015,11 @@ class LiveExecution(PolymarketExecutionClient):
             ]
         )
         self._mark_submit_stage(o, "preparation_ms")
+        if isinstance(account, BaseException):
+            # An unconfirmed account check invalidates both readiness gates on
+            # every path, including when the wallet check failed as well.
+            self.ready = False
+            self.open_orders_clear = False
         if isinstance(wallet_result, BaseException):
             r.store.put("status", "PAUSED")
             r.store.put(
@@ -1033,6 +1042,9 @@ class LiveExecution(PolymarketExecutionClient):
             )
         except OrderTermsError as exc:
             self.deny(o, str(exc))
+            return
+        if maker < MIN_MARKETABLE_BUY_NOTIONAL:
+            self.deny(o, "签名金额低于交易所 1U 市价买单下限")
             return
         self._record_outbound_terms(o, token, executable_limit, maker, taker)
         self._check_buy_plan_current(i)

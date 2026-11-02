@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-command, fail-stop upgrade of a running PM-NAUTILUS Docker Compose server.
 #
-#   sudo deploy/deploy.sh <full 40-character commit SHA> [--yes]
+#   sudo deploy/deploy.sh <full 40-character commit SHA> [--yes] [--allow-non-main]
 #
 # Order: preflight -> record which TEST accounts are RUNNING -> fetch and check
 # out the commit -> build the image while the old container keeps serving ->
@@ -11,8 +11,9 @@
 #
 # Any failure stops immediately and prints how to roll back. The script never
 # enables LIVE, unlocks a wallet or starts an account that was not running.
-# It refuses to run while LIVE is enabled: after a restart the wallet stays
-# locked and must be handled by the owner in the web page.
+# It refuses to run while LIVE is enabled or a wallet is unlocked (checked at
+# the start and again right before the stop), and refuses commits that are not
+# on origin/main unless --allow-non-main is given.
 
 set -Eeuo pipefail
 
@@ -41,10 +42,12 @@ die() {
 
 TARGET=""
 ASSUME_YES=0
+ALLOW_NON_MAIN=0
 for arg in "$@"; do
     case "$arg" in
         -h | --help) usage 0 ;;
         -y | --yes) ASSUME_YES=1 ;;
+        --allow-non-main) ALLOW_NON_MAIN=1 ;;
         -*) die "未知参数: $arg" ;;
         *)
             [ -z "$TARGET" ] || die "只能指定一个提交"
@@ -97,6 +100,21 @@ json() { python3 -c "import json,sys; d=json.load(sys.stdin); $1"; }
 
 health() { curl -sS --max-time 10 -H "Host: $HOST" "$BASE/api/health"; }
 
+# A restart locks the wallet: refuse while LIVE runs or a wallet is unlocked.
+# Called at preflight and again immediately before the stop, after the build.
+require_safe_to_stop() {
+    local state live mode wallet
+    state=$(health) || die "当前服务没有响应 $BASE/api/health；请先手动核对"
+    read -r live mode wallet < <(printf '%s' "$state" |
+        json "print(d['liveExecutionEnabled'], d['activeExecutionMode'], d.get('liveWalletStatus'))")
+    [ "$live" = "False" ] || die "LIVE 已启用。重启后钱包会锁定，须由你在网页处理；本脚本不在 LIVE 期间部署"
+    [ "$mode" = "TEST" ] || die "当前运行模式为 $mode（不是 TEST）；请先在网页核对后再部署"
+    case "$wallet" in
+        UNCONFIGURED | LOCKED) ;;
+        *) die "LIVE 钱包当前状态为 $wallet（已解锁或异常）。重启会锁定钱包，请先在网页锁定或处理后再部署" ;;
+    esac
+}
+
 account_states() {
     # Prints one "number status positionCount" line per TEST account.
     local count=$1 number
@@ -117,11 +135,8 @@ on_error() {
 trap on_error ERR
 
 log "1/9 预检"
-CURRENT_HEALTH=$(health) || die "当前服务没有响应 $BASE/api/health；请先手动核对"
-read -r ACCOUNT_COUNT LIVE_ON MODE < <(printf '%s' "$CURRENT_HEALTH" |
-    json "print(d['testAccountCount'], d['liveExecutionEnabled'], d['activeExecutionMode'])")
-[ "$LIVE_ON" = "False" ] || die "LIVE 已启用。重启后钱包会锁定，须由你在网页处理；本脚本不在 LIVE 期间部署"
-[ "$MODE" = "TEST" ] || die "当前运行模式为 $MODE（不是 TEST）；请先在网页核对后再部署"
+require_safe_to_stop
+ACCOUNT_COUNT=$(health | json "print(d['testAccountCount'])")
 info "当前版本: ${CURRENT:-未知}  目标版本: $TARGET  TEST 账户数: $ACCOUNT_COUNT"
 [ "$CURRENT" != "$TARGET" ] || die "服务器已经是目标版本"
 DATA_KB=$(du -sk runtime/server | cut -f1)
@@ -144,7 +159,9 @@ log "3/9 获取并检出目标版本"
 "${GIT[@]}" fetch -q origin
 "${GIT[@]}" cat-file -e "$TARGET^{commit}" 2>/dev/null || die "远端没有提交 $TARGET"
 if ! "${GIT[@]}" merge-base --is-ancestor "$TARGET" origin/main; then
-    info "注意：$TARGET 不在 origin/main 上"
+    [ "$ALLOW_NON_MAIN" -eq 1 ] ||
+        die "$TARGET 不在 origin/main 上（未合并或未通过 CI）。确需部署请加 --allow-non-main"
+    info "注意：$TARGET 不在 origin/main 上（已用 --allow-non-main 确认）"
 fi
 PREVIOUS_HEAD=$("${GIT[@]}" rev-parse HEAD)
 "${GIT[@]}" checkout -q --detach "$TARGET"
@@ -156,6 +173,7 @@ PM_GIT_REVISION=$TARGET compose build
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 BACKUP="$BACKUP_ROOT/$STAMP-${TARGET:0:7}"
 log "5/9 记录停机前账户状态，停机并完整备份到 $BACKUP"
+require_safe_to_stop  # Re-check after the build: LIVE or a wallet may have changed.
 BEFORE=$(account_states "$ACCOUNT_COUNT")
 printf '%s\n' "$BEFORE" | sed 's/^/    /'
 RUNNING=$(printf '%s\n' "$BEFORE" | awk '$2 == "RUNNING" {print $1}' | xargs)
@@ -181,6 +199,8 @@ BACKUP_FILES=$(find "$BACKUP/runtime-server" -type f | wc -l)
 info "备份 ${BACKUP_KB} KB / ${BACKUP_FILES} 个文件（停机后数据目录 ${STOPPED_KB} KB / ${SOURCE_FILES} 个文件）"
 [ "$BACKUP_FILES" -eq "$SOURCE_FILES" ] && [ "$BACKUP_KB" -ge $((STOPPED_KB * 99 / 100)) ] ||
     die "备份与停机后的数据目录不一致，已停止（服务保持停止，见下方回滚步骤）"
+# Only verified backups carry this marker; pruning counts and deletes only them.
+touch "$BACKUP/.complete"
 
 log "6/9 切换版本并启动"
 sed -i "s/^PM_GIT_REVISION=.*/PM_GIT_REVISION=$TARGET/" .env
@@ -249,9 +269,10 @@ for k, v in d['marketData'].items():
     print('   ', k, v['status'], '行情组', f\"{v['readyGroupCount']}/{v['groupCount']}\", '盘口', f\"{v['readyBookCount']}/{v['tokenCount']}\")"
 
 trap - ERR
-# Keep the newest deploy backups only; never touch other directories.
-mapfile -t old < <(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -name '20*' | sort -r |
-    tail -n +"$((KEEP_BACKUPS + 1))")
+# Keep the newest verified deploy backups only. Incomplete directories from a
+# failed run are never counted or deleted here; they are left for inspection.
+mapfile -t old < <(find "$BACKUP_ROOT" -mindepth 2 -maxdepth 2 -name .complete -printf '%h\n' |
+    grep -E '/20[^/]*$' | sort -r | tail -n +"$((KEEP_BACKUPS + 1))")
 for dir in "${old[@]}"; do
     rm -rf -- "$dir"
     info "已清理旧部署备份 $dir"

@@ -143,3 +143,49 @@ def test_control_change_during_overlap_is_seen_after_all_checks(tmp_path):
             assert not runtime._test_queue_errors
 
     asyncio.run(run())
+
+
+def test_account_error_invalidates_gates_even_when_wallet_check_also_failed(tmp_path):
+    async def run():
+        async with controlled_runtime(tmp_path / "overlap-both.sqlite") as runtime:
+            oid, order = await prepared_order(runtime)
+            client = runtime.client
+            overlapped(
+                client,
+                wallet=ValueError("approval missing"),
+                account=ConnectionError("open orders unavailable"),
+            )
+            await submit(client, order)
+
+            client._post_signed_order.assert_not_awaited()
+            assert runtime.status == "PAUSED"
+            assert client.ready is False and client.open_orders_clear is False
+            assert runtime.store.intent(oid)["terminal"] is True
+
+    asyncio.run(run())
+
+
+def test_signed_amount_below_one_dollar_never_reaches_post(tmp_path):
+    async def run():
+        async with controlled_runtime(tmp_path / "overlap-floor.sqlite") as runtime:
+            oid, order = await prepared_order(runtime)
+            client = runtime.client
+            calls = overlapped(client)
+            sign = client._http_client.create_market_order.side_effect
+
+            def low_sign(*args, **kwargs):
+                sign(*args, **kwargs)  # Still overlaps the other checks.
+                # A signer that rounds below the venue's $1 marketable BUY floor.
+                return SimpleNamespace(makerAmount=990_000, takerAmount=9_900_000)
+
+            client._http_client.create_market_order.side_effect = low_sign
+            await submit(client, order)
+
+            assert calls == dict.fromkeys(STAGES, 1)
+            client._post_signed_order.assert_not_awaited()
+            kinds = [type(event).__name__ for _, event in runtime.store.events()]
+            assert "OrderSubmitted" not in kinds
+            assert runtime.store.intent(oid)["terminal"] is True
+            assert runtime.held_cash() == 0
+
+    asyncio.run(run())

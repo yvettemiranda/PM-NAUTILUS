@@ -9,10 +9,14 @@ Runs on the host with only the Python standard library and the official
   the app keeps writing (WAL readers do not block the writer), then verified
   with ``PRAGMA quick_check``;
 * other durable files (execution-mode.json, the encrypted wallet vault, ...)
-  are copied as-is; WAL/SHM side files, the process lock and upload scratch
-  files are skipped;
+  are copied as-is; WAL/SHM side files, the process lock and every ``.pm-*``
+  scratch file or directory (wallet export/restore/upload work areas, at any
+  depth) are skipped;
 * a manifest with SHA-256 checksums and the deployed revision is added, the
   archive is uploaded, and only the newest local archives are kept.
+
+The archive itself is not encrypted: the wallet vault inside stays encrypted by
+its own password, but the ledgers are plain. Protect the COS bucket accordingly.
 
 Run it as the application's UID (10001) so nothing it touches in the data
 directory can become root-owned. See deploy/pm-nautilus-offsite-backup.*.example.
@@ -42,7 +46,7 @@ from pathlib import Path
 
 SKIP_SUFFIXES = ("-wal", "-shm", "-journal")
 SKIP_NAMES = {"process.lock"}
-SKIP_PREFIXES = (".pm-",)  # live export/restore/upload/final scratch files
+SKIP_PREFIXES = (".pm-",)  # live export/restore/upload/final scratch files and dirs
 
 
 def log(message):
@@ -57,9 +61,14 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def skipped(path: Path) -> bool:
-    name = path.name
-    return name in SKIP_NAMES or name.endswith(SKIP_SUFFIXES) or name.startswith(SKIP_PREFIXES)
+def skipped(relative: Path) -> bool:
+    """Skip side files and anything inside a ``.pm-*`` scratch file or directory."""
+    name = relative.name
+    return (
+        name in SKIP_NAMES
+        or name.endswith(SKIP_SUFFIXES)
+        or any(part.startswith(SKIP_PREFIXES) for part in relative.parts)
+    )
 
 
 def copy_sqlite(source: Path, target: Path):
@@ -88,7 +97,11 @@ def require_ledger_owner(data_dir: Path):
     Root-owned side files would stop the application (UID 10001) from opening
     its own ledger, so only the ledger owner may run this backup.
     """
-    owners = {path.stat().st_uid for path in data_dir.rglob("*.sqlite") if path.is_file()}
+    owners = {
+        path.stat().st_uid
+        for path in data_dir.rglob("*.sqlite")
+        if path.is_file() and not skipped(path.relative_to(data_dir))
+    }
     if owners and os.geteuid() not in owners:
         raise RuntimeError(
             f"run as the ledger owner UID {sorted(owners)} (systemd User=10001), "
@@ -99,9 +112,9 @@ def require_ledger_owner(data_dir: Path):
 def snapshot(data_dir: Path, work: Path) -> list[dict]:
     files = []
     for path in sorted(data_dir.rglob("*")):
-        if not path.is_file() or path.is_symlink() or skipped(path):
-            continue
         relative = path.relative_to(data_dir)
+        if not path.is_file() or path.is_symlink() or skipped(relative):
+            continue
         target = work / "data" / relative
         if path.suffix == ".sqlite":
             copy_sqlite(path, target)

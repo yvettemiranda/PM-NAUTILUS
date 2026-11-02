@@ -35,6 +35,8 @@ if tool == "docker":
         s["status"] = {k: "PAUSED" for k in s["status"]}
     save(); sys.exit(0)
 if tool == "git":
+    if "merge-base" in args and s.get("non_main"):
+        sys.exit(1)
     if "rev-parse" in args:
         print("b" * 40)
     sys.exit(0)
@@ -46,9 +48,13 @@ if not s["up"]:
 if "-D" in args:
     print("HTTP/1.1 200 OK\r\nx-pm-csrf: tok\r\n\r"); sys.exit(0)
 if url.endswith("/api/health"):
+    built = any(e[0] == "docker" and "build" in e for e in s["log"])
+    live = s["live"] or (built and s.get("live_after_build", False))
+    wallet = s.get("wallet_after_build") if built and s.get("wallet_after_build") else s["wallet"]
     print(json.dumps({
         "status": "ok", "revision": s["rev"], "testAccountCount": 4,
-        "availableTestAccountCount": 4, "liveExecutionEnabled": s["live"],
+        "availableTestAccountCount": 4, "liveExecutionEnabled": live,
+        "liveWalletStatus": wallet,
         "activeExecutionMode": "TEST", "backgroundErrors": {},
         "marketData": {"TEST": {"status": "ok", "readyGroupCount": 5, "groupCount": 5,
                                 "readyBookCount": 9, "tokenCount": 9}},
@@ -85,12 +91,15 @@ def server(tmp_path):
     state = tmp_path / "state.json"
     status = {"1": "RUNNING", "2": "PAUSED", "3": "RUNNING", "4": "PAUSED"}
     state.write_text(
-        json.dumps({"up": True, "rev": OLD, "live": False, "status": status, "log": []})
+        json.dumps(
+            {"up": True, "rev": OLD, "live": False, "wallet": "LOCKED", "status": status, "log": []}
+        )
     )
 
-    def run(*args, live=False):
+    def run(*args, live=False, **sim):
         data = json.loads(state.read_text())
         data["live"] = live
+        data.update(sim)
         state.write_text(json.dumps(data))
         environ = os.environ | {
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
@@ -153,3 +162,65 @@ def test_deploy_requires_explicit_confirmation(server):
     result, state = run(NEW)  # stdin is empty: no "yes"
     assert result.returncode == 1 and "已取消" in result.stderr
     assert not any(entry[0] == "docker" for entry in state["log"])
+
+
+def docker_steps(state):
+    return [e[-1] if e[-1] != "-d" else "up" for e in state["log"] if e[0] == "docker"]
+
+
+@pytest.mark.parametrize(
+    "sim,message",
+    [
+        ({"live_after_build": True}, "LIVE 已启用"),
+        ({"wallet_after_build": "READY"}, "LIVE 钱包当前状态为 READY"),
+    ],
+)
+def test_deploy_rechecks_live_and_wallet_after_build_before_stopping(server, sim, message):
+    app, backups, run = server
+    result, state = run(NEW, "--yes", **sim)
+    assert result.returncode == 1 and message in result.stderr
+    assert docker_steps(state) == ["build"]  # Never stopped; old version keeps serving.
+    assert state["up"] and f"PM_GIT_REVISION={OLD}" in (app / ".env").read_text()
+
+
+@pytest.mark.parametrize("wallet", ["READY", "BLOCKED", "PAUSED", "ERROR", None])
+def test_deploy_refuses_unlocked_or_unknown_wallet_up_front(server, wallet):
+    _, _, run = server
+    result, state = run(NEW, "--yes", wallet=wallet)
+    assert result.returncode == 1 and "LIVE 钱包当前状态" in result.stderr
+    assert not docker_steps(state)
+
+
+def test_deploy_refuses_commit_not_on_main_unless_explicitly_allowed(server):
+    app, _, run = server
+    result, state = run(NEW, "--yes", non_main=True)
+    assert result.returncode == 1 and "--allow-non-main" in result.stderr
+    assert not docker_steps(state) and f"PM_GIT_REVISION={OLD}" in (app / ".env").read_text()
+    result, state = run(NEW, "--yes", "--allow-non-main", non_main=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert docker_steps(state) == ["build", "stop", "up"]
+
+
+def test_pruning_keeps_newest_complete_backups_and_never_counts_partial_ones(server):
+    app, backups, run = server
+    backups.mkdir()
+    for stamp in ("20260101T000000Z", "20260102T000000Z", "20260103T000000Z"):
+        (backups / f"{stamp}-old").mkdir()
+        (backups / f"{stamp}-old" / ".complete").touch()
+    for stamp in ("20260104T000000Z", "20260105T000000Z", "20260106T000000Z"):
+        (backups / f"{stamp}-partial").mkdir()  # Failed runs: no marker.
+    result, _ = run(NEW, "--yes", **{})
+    assert result.returncode == 0, result.stdout + result.stderr
+    names = sorted(path.name for path in backups.iterdir())
+    new = [name for name in names if name.endswith(NEW[:7])]
+    assert len(new) == 1 and (backups / new[0] / ".complete").exists()
+    # 4 complete backups exist and the default keeps 5: nothing complete is pruned,
+    # and partial directories are neither counted nor deleted.
+    assert {"20260101T000000Z-old", "20260104T000000Z-partial"} <= set(names)
+    result, _ = run(OLD, "--yes")
+    result, _ = run(NEW, "--yes")
+    result, _ = run(OLD, "--yes")
+    names = sorted(path.name for path in backups.iterdir())
+    complete = [n for n in names if (backups / n / ".complete").exists()]
+    assert len(complete) == 5 and "20260101T000000Z-old" not in names
+    assert {"20260104T000000Z-partial", "20260105T000000Z-partial"} <= set(names)

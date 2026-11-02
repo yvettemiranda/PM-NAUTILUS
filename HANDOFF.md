@@ -22,6 +22,7 @@
 - 新测试：真实 Web3 对本地 JSON-RPC 服务（一次往返、相同结论、回退、注入延迟）以及 LIVE 三项并行（注入延迟，任一失败都不 POST）。[CI 41386349887](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/41386349887) AMD64/ARM64 通过，1,297 项。
 - TEST 模式不涉及链上与 CLOB 账户读取，交易决策逻辑未改，TEST/LIVE 一致性不变。
 - 部署前快照 `pre-deploy-8d13d08`（lhsnap-ofn5tc9n，12:15）。一键脚本全程自动完成：停机前 TEST 1、2、3 RUNNING（持仓 30/42/51），4—10 PAUSED；备份 `/var/lib/pm-nautilus-deploy/20261102T041659Z-8d13d08/`（12 个文件，自检通过）；健康 ok、修订 8d13d08、10 个账户、后台错误为空；恢复 1、2、3 后全部 10 个账户状态与停机前一致。
+- 清理（12:30）：GitHub 删除已合并的 `review/live-latency-20261102`，仅保留 `main` 与基准分支 `baseline/pre-test-10-accounts-20261027`（CI 历史作为追溯资料保留）。服务器删除 10 个旧的手动停机备份目录（`/var/lib/pm-nautilus-{egm-fixes,readonly-audit,review,review-…b,test-*,ui-hallmark,universal-test-optimization}`，均早于脚本备份）、`/home/ubuntu` 下两个验证目录、`/tmp` 旧脚本与日志；旧镜像只留当前 8d13d08 与两个回滚镜像 ff5da9b、99eada5（与存储维护规则一致），删除 verify 镜像和 hello-world，清理 24 小时前的构建缓存；云端删除旧快照 `pre-deploy-ff5da9b`。保留：`/var/lib/pm-nautilus-deploy/` 两份脚本备份、`/var/lib/pm-nautilus-maintenance`（存储维护定时任务状态）、快照 `pre-deploy-8d13d08`。磁盘占用 25G→12G（26%），应用健康。
 
 ## 2026-11-02 部署（ff5da9b）
 

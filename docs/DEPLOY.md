@@ -12,7 +12,7 @@
 | 版本 | `.env` 中的 `PM_GIT_REVISION`（完整 SHA），镜像标签同名 |
 | 健康接口 | `curl -H 'Host: localhost' http://127.0.0.1:8765/api/health`（无需登录） |
 | 部署备份 | `/var/lib/pm-nautilus-deploy/`（部署脚本自动生成，保留最近 5 份） |
-| 服务器外备份 | 未启用（COS 未开通）；可选方案见第 3.2 节。部署前手动快照 `pre-deploy-ff5da9b`、`pre-deploy-8d13d08`（2026-11-02，免费配额 2 个已用满，下次部署前先删较旧的一个） |
+| 服务器外备份 | 未启用（COS 未开通）；可选方案见第 3.2 节。部署前手动快照 `pre-deploy-8d13d08`（2026-11-02；免费配额 2 个，下次部署前再建一个，之后删较旧的） |
 
 数据目录里有 11 份账本：`TEST/state.sqlite`、`TEST/accounts/2…10/state.sqlite`、`LIVE/state.sqlite`，另有 `execution-mode.json`（运行模式意图）和 `wallet/live.vault`（加密钱包）。不要只复制其中一部分，也不要在程序运行时直接复制单个 `.sqlite` 文件（会漏掉 WAL 中的数据）。
 

@@ -140,7 +140,9 @@ def test_paused_active_intent_without_position_is_not_deferred(tmp_path, monkeyp
         evaluate = Mock(wraps=runtime.evaluate)
         monkeypatch.setattr(runtime, "evaluate", evaluate)
         quote(runtime)
-        assert evaluate.call_count == 2
+        # Not deferred: the owned Event is evaluated. A single dirty Event has
+        # no cross-Event ordering, so drain runs only its dispatch evaluation.
+        assert evaluate.call_count == 1
         assert all(call.args[0] == "event" for call in evaluate.call_args_list)
         assert not runtime.native.cache.orders()
     finally:

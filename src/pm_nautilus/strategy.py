@@ -725,8 +725,6 @@ class Runtime:
                 or static_reason(t, self.preferences, self.now, self.official_tags)
             ):
                 continue
-            bid = b.bid.available() if self.mode == "TEST" else list(b.bid.external.items())
-            ask = b.ask.available() if self.mode == "TEST" else list(b.ask.external.items())
             cache_key = (
                 t,
                 config_key,
@@ -741,6 +739,10 @@ class Runtime:
             if cached is not None and cached[0] == cache_key:
                 p = cached[1]
             else:
+                # Depth lists are needed only to compute a new preview. The key
+                # above already covers the book revision and TEST consumption.
+                bid = b.bid.available() if self.mode == "TEST" else list(b.bid.external.items())
+                ask = b.ask.available() if self.mode == "TEST" else list(b.ask.external.items())
                 p = preview(t, self.preferences, bid, ask, min(cash, remaining), budget)
                 self._preview_cache[tid] = cache_key, p
             # The single BUY decision point for TEST and LIVE: never plan an
@@ -783,22 +785,30 @@ class Runtime:
         # an unbounded new-cycle loop. A later event/control tick permits re-entry.
         pending = self.dirty
         self.dirty = set()
-        # Current readiness must be established before cross-Event cash allocation.
-        # Preview pass has no order, stop, budget or journal side effects.
-        for eid in pending:
-            self.evaluate(eid, dispatch=False)
+        if len(pending) > 1:
+            # Current readiness must be established before cross-Event cash
+            # allocation. Preview pass has no order, stop, budget or journal
+            # side effects.
+            for eid in pending:
+                self.evaluate(eid, dispatch=False)
 
-        def key(eid):
-            ready = self.evaluations.get(eid, ("NO_WINNER", None))[0] == "READY"
-            ts = [self.tokens[x] for x in self.events.get(eid, set())]
-            progress = min((t.progress(self.now) for t in ts), default=0)
-            return (
-                not ready,
-                progress * (1 if self.preferences.candidateSortDirection == "ASC" else -1),
-                eid,
-            )
+            def key(eid):
+                ready = self.evaluations.get(eid, ("NO_WINNER", None))[0] == "READY"
+                ts = [self.tokens[x] for x in self.events.get(eid, set())]
+                progress = min((t.progress(self.now) for t in ts), default=0)
+                return (
+                    not ready,
+                    progress * (1 if self.preferences.candidateSortDirection == "ASC" else -1),
+                    eid,
+                )
 
-        for eid in sorted(pending, key=key):
+            order = sorted(pending, key=key)
+        else:
+            # One Event has no cross-Event ordering or cash allocation. Its
+            # side-effect-free preview would only repeat the dispatch pass's
+            # identical reads, so the dispatch evaluation runs alone.
+            order = list(pending)
+        for eid in order:
             self.evaluate(eid)
         exits = [eid for eid in self.dirty if eid in self.business["cycles"]]
         self.dirty = set()

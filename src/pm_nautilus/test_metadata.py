@@ -10,8 +10,12 @@ from .rules import Fees, Token
 
 
 CACHE_SCHEMA_VERSION = 1
-MAX_CACHE_ENTRIES = 32_768
-MAX_CACHE_BYTES = 32 * 1024 * 1024
+# Ten TEST accounts load identical open-market metadata (about 28.6k tokens in
+# 2026-11, ~1.4 KB of budget each). When the budget is smaller than that set,
+# every rejected token is decoded and kept separately by every account. The
+# memo holds weak references only, so its cost follows the live token set.
+MAX_CACHE_ENTRIES = 65_536
+MAX_CACHE_BYTES = 128 * 1024 * 1024
 CacheInfo = namedtuple("CacheInfo", "hits misses entries bytes admission_rejects")
 
 

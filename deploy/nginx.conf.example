@@ -4,6 +4,14 @@ server {
     server_name pm.example.com;
     ssl_certificate /etc/letsencrypt/live/pm.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/pm.example.com/privkey.pem;
+    # The page polls 30–130 KB of JSON twice a second; nginx's default
+    # gzip_types covers only text/html. Bodies carry no secret (the CSRF token
+    # is a response header), so compression is BREACH-safe. Binary downloads
+    # (application/octet-stream) stay uncompressed.
+    gzip on;
+    gzip_types application/json text/css application/javascript text/plain image/svg+xml;
+    gzip_min_length 1024;
+    gzip_vary on;
     location / {
         proxy_pass http://127.0.0.1:8765;
         proxy_set_header Host $host;

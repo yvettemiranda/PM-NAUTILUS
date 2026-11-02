@@ -591,7 +591,7 @@ class MarketService:
     def refresh_stream_readiness(self, group):
         entry = self.streams.get(group)
         if entry is not None and entry.get("state") in {"AWAITING_BOOKS", "READY"}:
-            if all(self.runtime.books[tid].ready for tid in self.subscription_ids(group)):
+            if all(self.runtime.books[tid].ready for tid in self.subscription_members(group)):
                 self.stream_state(group, "READY")
 
     async def _sync_subscriptions(self):
@@ -759,6 +759,14 @@ class MarketService:
     def subscription_ids(self, group):
         return tuple(sorted(self.active_groups.get(group, group)))
 
+    def subscription_members(self, group):
+        """The same IDs as subscription_ids, unsorted, for membership checks only.
+
+        Callers must not mutate or retain it; anything sent to the venue keeps
+        the sorted subscription_ids order.
+        """
+        return self.active_groups.get(group, group)
+
     def socket_opened(self, group, ws):
         self.sockets[group] = ws
 
@@ -768,8 +776,30 @@ class MarketService:
     def baseline_consumers(self, group):
         return [self]
 
+    def baseline_recovery_services(self):
+        """Every service whose pending baseline requests could be due."""
+        return (self,)
+
     def consumer_subscription_ids(self, service):
         return service.desired_subscription_ids()
+
+    def baseline_recovery_due(self, now):
+        """Cheap necessary condition for recover_consumer_baselines to act.
+
+        A token is due only when it is still pending a fresh baseline and its
+        request is at least FRESH_BASELINE_RECOVERY_SECONDS old. Checking that
+        over a superset of the consumers avoids rebuilding every consumer's
+        subscription set on each received frame when nothing can be due.
+        """
+        return any(
+            tid in getattr(service, "_availability_fresh_pending", ())
+            and now - requested_at >= FRESH_BASELINE_RECOVERY_SECONDS
+            for service in self.baseline_recovery_services()
+            if not getattr(service, "closed", False)
+            for tid, requested_at in getattr(
+                service, "_availability_fresh_requested_at", {}
+            ).items()
+        )
 
     async def recover_consumer_baselines(self, group, ws):
         """Bounded escalation when an idempotent subscribe returned no snapshot.
@@ -777,6 +807,8 @@ class MarketService:
         Only the affected token's baselines are invalidated. Other outcomes on
         this connection keep their continuous books, heartbeat and shadow depth.
         """
+        if not self.baseline_recovery_due(asyncio.get_running_loop().time()):
+            return
         async with self.subscription_lock:
             if self.closed or group not in self.streams:
                 return
@@ -877,11 +909,13 @@ class MarketService:
                 continue
             messages = json.loads(raw)
             for msg in messages if isinstance(messages, list) else [messages]:
-                self.message(msg, self.subscription_ids(group))
+                # Read per message: a subscription change during the yield below
+                # applies to the next message. message() copies this set.
+                self.message(msg, self.subscription_members(group))
                 # Large snapshot bursts must allow other sockets' timers to run.
                 await asyncio.sleep(0)
             if self.streams[group]["state"] != "READY" and all(
-                self.runtime.books[tid].ready for tid in self.subscription_ids(group)
+                self.runtime.books[tid].ready for tid in self.subscription_members(group)
             ):
                 self.stream_state(group, "READY")
 
@@ -1179,6 +1213,13 @@ class PublicMarketHub(MarketService):
 
     def subscription_ids(self, group):
         return tuple(sorted(self.active_groups.get(group, ())))
+
+    def subscription_members(self, group):
+        return self.active_groups.get(group, ())
+
+    def baseline_recovery_services(self):
+        # baseline_consumers(group) is always a subset of these services.
+        return tuple(self.services)
 
     def socket_opened(self, group, ws):
         self.sockets[group] = ws

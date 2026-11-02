@@ -118,7 +118,19 @@ def test_entry_and_byte_budgets_keep_live_subset_instead_of_scan_thrashing():
     small = TestMetadataMemo(max_bytes=1)
     assert small.decode("1", encoded(tokens[0]), Store.decode_token_payload) == tokens[0]
     assert small.info().entries == 0 and small.info().bytes == 0
-    assert MAX_CACHE_BYTES == 32 * 1024**2 and MAX_CACHE_ENTRIES == 32_768
+    assert MAX_CACHE_BYTES == 128 * 1024**2 and MAX_CACHE_ENTRIES == 65_536
+
+
+def test_default_budget_admits_a_full_catalog_of_realistic_metadata():
+    from pm_nautilus.test_metadata import CACHE_SCHEMA_VERSION, _weight
+
+    # Production open-market payloads are ~540 characters on average and at
+    # most ~734; token IDs are 77 digits. Budget the largest observed size.
+    token_id, payload = "9" * 77, "x" * 740
+    key = (CACHE_SCHEMA_VERSION, Store.decode_token_payload, token_id, payload)
+    weight = _weight((token_id, payload), set()) + sys.getsizeof(key) + 512
+    assert MAX_CACHE_ENTRIES * weight <= MAX_CACHE_BYTES
+    assert MAX_CACHE_ENTRIES >= 2 * 28_570  # Room for catalog growth.
 
 
 def test_byte_budget_rejects_admission_without_evicting_a_live_value():

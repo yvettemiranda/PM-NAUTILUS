@@ -9,7 +9,7 @@
 | 当前最新版 | [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) | 十个独立 TEST 账户、通用性能优化、账户故障隔离及 TEST/LIVE 后台互斥；后续开发从这里继续。 |
 | 十账户改造前基准 | [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027) | 固定源码 `4de107a4dc1a4abaaf08b330eb00803391268e2a`，仅供比较和追溯，保持原样。 |
 
-当前已部署应用为 [`8eafbeb`](https://github.com/yvettemiranda/PM-NAUTILUS/commit/8eafbeb06792accd85a555f99b01ee61be369838)（2026-11-02，CI 1,309 项通过）：LIVE 买入提速（批量链上读取、账户核对并行且最终核对保持新鲜）、独立审查与 Codex 审计后的部署和 LIVE 保护、交易所市价买单最低 1U 规则（TEST 与 LIVE 共用）。当前版本、部署记录与回滚信息以 [HANDOFF](HANDOFF.md) 为准，上线前清单见 [LIVE 准备检查](docs/LIVE_READINESS.md)。
+当前已部署应用为 [`7d47f50`](https://github.com/yvettemiranda/PM-NAUTILUS/commit/7d47f50cbacba33d603ac1f7ed1370c8171f8337)（2026-11-02，CI 1,317 项通过）：LIVE 买入提速（批量链上读取、钱包检查与签名并行，完整账户核对在两者之后）、独立审查与 Codex 审计后的部署和 LIVE 保护、交易所市价买单最低 1U 规则（TEST 与 LIVE 共用）。当前版本、部署记录与回滚信息以 [HANDOFF](HANDOFF.md) 为准，上线前清单见 [LIVE 准备检查](docs/LIVE_READINESS.md)。
 
 2026-10-30 界面版本（8ab1937）验收：**1,256 项 Python、122 项页面回归、AMD64/ARM64 CI 与 Docker 验证全部通过**，服务器十个 TEST 和一个 LIVE 账本保全核对通过。[验证结果](docs/VALIDATION.md)与[当前交接](HANDOFF.md)分别记录证据和运行边界。
 

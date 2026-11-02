@@ -9,11 +9,17 @@
 | [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) | 当前十账户最新版及现行文档，默认开发和下载入口。 |
 | [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027) | 十账户改造前的固定源码 `4de107a4dc1a4abaaf08b330eb00803391268e2a`，不继续修改。 |
 
-当前已部署应用为 `8eafbeb06792accd85a555f99b01ee61be369838`（2026-11-02，见下节）；此前为 `8d13d084544b1d94d558c52f03b0bc1931bd0946`、`ff5da9bb6722eb0e5a8925140631a154af7c4c9e`（同日），再前为 `99eada51405358ec82b7b5bc6329c3141c1a8d04`（2026-11-01 第二次部署），同日上一版为 `6ae9fcaadff86db9405d22adf95b5e7677d01cce`，再前为 `8ab1937e84b1f63db3db46a07eca8a4d17876a58`。在此前启停、异常关闭、钱包取消和历史分批修复之上，本轮仅更新 HTML／CSS 界面，见 [Hallmark 界面说明](docs/archive/UI_HALLMARK_20261030.md)。此前业务保护保留，见 [修复说明](docs/archive/EGM_FIXES_20261030.md)。后续验收文档提交仅改 Markdown，服务器源码可同步到该文档提交；运行镜像及环境版本仍固定为上述应用 SHA，不为同步文档再次重启。
+当前已部署应用为 `7d47f50cbacba33d603ac1f7ed1370c8171f8337`（2026-11-02，见下节）；此前为 `8eafbeb06792accd85a555f99b01ee61be369838`、`8d13d084544b1d94d558c52f03b0bc1931bd0946`、`ff5da9bb6722eb0e5a8925140631a154af7c4c9e`（同日），再前为 `99eada51405358ec82b7b5bc6329c3141c1a8d04`（2026-11-01 第二次部署），同日上一版为 `6ae9fcaadff86db9405d22adf95b5e7677d01cce`，再前为 `8ab1937e84b1f63db3db46a07eca8a4d17876a58`。在此前启停、异常关闭、钱包取消和历史分批修复之上，本轮仅更新 HTML／CSS 界面，见 [Hallmark 界面说明](docs/archive/UI_HALLMARK_20261030.md)。此前业务保护保留，见 [修复说明](docs/archive/EGM_FIXES_20261030.md)。后续验收文档提交仅改 Markdown，服务器源码可同步到该文档提交；运行镜像及环境版本仍固定为上述应用 SHA，不为同步文档再次重启。
 
 旧工作分支和重复基准标签已从 GitHub 入口移除，旧 PR #18 已关闭，未将它的原地重签方案合入当前交易逻辑；相关问题已经由后续 PR #19 的终结未提交意图及重新评估机制覆盖。提交历史继续保留。后续操作以 `main` 和完整应用 SHA 为准，旧部署脚本中的历史分支名不再作为拉取入口。规则见 [版本维护](docs/VERSIONS.md)。
 
-## 最近一次部署：2026-11-02（8eafbeb，审计修复）
+## 最近一次部署：2026-11-02（7d47f50，恢复串行最终账户核对）
+
+- Codex 复核指出：8eafbeb 的 50 ms 判定以整个账户检查的结束时间为准，较慢的份额查询会掩盖已过时的挂单查询（挂单查询很快返回、签名期间出现外部挂单、份额查询稍后结束→不重查）。成立。已删除该判定：钱包检查与签名仍并行（批量 RPC 保留），完整账户核对（挂单 + 份额）在两者都完成后执行，之后再做计划/控制复核，与提速前顺序一致。代价是账户核对的约 1—2 次往返不再与签名重叠。
+- 其他：部署脚本加互斥锁（同一时间只允许一个部署）；服务器外备份失败时删除 `.partial` 并清理旧残留；其余文档中的“当前已部署版本”统一指向本文件；部署手册约定部署期间不操作网页。应用层维护锁暂缓。
+- [CI 41399599027](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/41399599027) 双架构通过（各 1,317 项）。部署前快照 `pre-deploy-7d47f50`（lhsnap-j5pykcyd，14:35）；备份 `/var/lib/pm-nautilus-deploy/20261102T063635Z-7d47f50/`；停机前 TEST 1、2、3 RUNNING（持仓 30/42/53），4—10 PAUSED；健康 ok、修订 7d47f50、10 个账户、后台错误为空；恢复后 10 个账户状态一致，行情全部就绪。删除镜像 ff5da9b（保留 7d47f50 与回滚 8eafbeb、8d13d08）和旧快照 `pre-deploy-8eafbeb`；磁盘 30%。
+
+## 2026-11-02 部署（8eafbeb，审计修复）
 
 - 依据：独立审查与 Codex 审计。采纳：
   - 部署脚本拒绝有未提交或未跟踪文件的程序目录，检出后再核对 HEAD；目标提交须在 `origin/main` 上，且 GitHub 对该 SHA 的全部检查（两种架构）通过，否则须显式 `--allow-unverified`；LIVE／钱包安全检查移到停机前最后一步（账户查询之后）。

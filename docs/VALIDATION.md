@@ -2,9 +2,9 @@
 
 当前版本入口为 [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main)，唯一固定基准为 [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027)（`4de107a`）。旧分支、标签和旧测试数量不再作为当前版本说明；历史原文可在固定基准及 Git 提交记录中追溯。
 
-## 当前已部署应用：8eafbeb（2026-11-02）
+## 当前已部署应用：7d47f50（2026-11-02）
 
-完整 SHA `8eafbeb06792accd85a555f99b01ee61be369838`。[CI 41395563254](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/41395563254)：AMD64／ARM64 各 1,309 项 Python 测试与 Docker verify 通过；页面测试 122 项通过。部署脚本自身核对了该 SHA 的全部 CI 检查后才构建。部署过程、备份和上线核对见 [HANDOFF](../HANDOFF.md)。新增部署脚本测试只在 Linux 运行（脚本使用 GNU 工具，面向服务器），在 macOS 上自动跳过。
+完整 SHA `7d47f50cbacba33d603ac1f7ed1370c8171f8337`。[CI 41399599027](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/41399599027)：AMD64／ARM64 各 1,317 项 Python 测试与 Docker verify 通过；页面测试 122 项通过。部署脚本核对该 SHA 的全部 CI 检查后才构建。部署过程、备份和上线核对见 [HANDOFF](../HANDOFF.md)。部署脚本测试只在 Linux 运行（脚本使用 GNU 工具），在 macOS 上自动跳过。
 
 ## 2026-10-30 界面版本验收：8ab1937
 

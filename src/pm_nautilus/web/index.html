@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="light" />
     <title>PM-NAUTILUS</title>
     <meta name="description" content="PM-NAUTILUS TEST and LIVE trading account interface." />
-    <link rel="stylesheet" href="/styles.css?v=20261030-hallmark" />
+    <link rel="stylesheet" href="/styles.css?v=20261104-ui4" />
   </head>
   <body>
     <main class="app-shell">
@@ -327,6 +327,8 @@
         </form>
       </section>
 
+      <div class="workspace">
+      <div class="workspace-side">
       <section class="equity-panel" aria-label="资金概览">
         <div id="net-pnl-label" class="equity-label">累计盈亏估算</div>
         <div class="equity-head"><strong id="net-pnl">—</strong><span id="net-return"></span></div>
@@ -341,8 +343,7 @@
           </div>
         </div>
         <div id="curve-note" class="field-note" hidden></div>
-        <div class="equity-money"><div><span>总资产估算</span><strong id="total-funds">—</strong></div><div><span>可用现金</span><strong id="available-cash">—</strong></div></div>
-        <p id="valuation-note" class="field-note" hidden></p>
+        <div class="equity-money"><div><div class="money-label"><span>总资产估算</span><details class="valuation-flag"><summary title="估值提示，点击查看"><span aria-hidden="true">!</span><span class="sr-only">估值提示</span></summary><p id="valuation-note" class="field-note" hidden></p></details></div><strong id="total-funds">—</strong></div><div><div class="money-label"><span>可用现金</span></div><strong id="available-cash">—</strong></div></div>
         <details id="portfolio-details"><summary>资金明细</summary>
           <section id="portfolio" class="portfolio" aria-label="资金明细">
             <article><span>已实现</span><strong id="realized-pnl">—</strong></article>
@@ -355,6 +356,8 @@
           <p id="cash-note" class="field-note"></p><p id="valuation-detail" class="field-note" hidden></p><p class="field-note">持仓按可成交买盘扣费估值；暂无报价时按成本暂计、浮盈亏暂记 0。历史采样与已实现盈亏保留。</p>
         </details>
       </section>
+      </div>
+      <div class="workspace-main">
       <nav class="view-tabs" role="tablist" aria-label="交易信息">
         <button id="tab-positions" role="tab" aria-controls="positions-panel" aria-selected="true">持仓 <span id="tab-position-count"></span><span id="positions-dot" class="status-dot" aria-live="off"></span></button>
         <button id="tab-records" role="tab" aria-controls="trade-records-panel" aria-selected="false">记录<span id="records-dot" class="status-dot" aria-live="off"></span></button>
@@ -412,6 +415,8 @@
           <span id="display-count" class="count">当前显示0 / 0</span>
         </div>
       </section>
+      </div>
+      </div>
 
       <p id="message" role="status" aria-live="polite"></p>
     </main>

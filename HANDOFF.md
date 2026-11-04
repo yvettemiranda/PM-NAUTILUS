@@ -9,11 +9,18 @@
 | [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) | 当前十账户最新版及现行文档，默认开发和下载入口。 |
 | [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027) | 十账户改造前的固定源码 `4de107a4dc1a4abaaf08b330eb00803391268e2a`，不继续修改。 |
 
-当前已部署应用为 `2e07c7dfb03d3acecfa75960658a06632e67aa88`（2026-11-02，见下节）；此前为 `a4c5df4a8ee525bd7890de73f3587207fbaddf5c`、`7d47f50cbacba33d603ac1f7ed1370c8171f8337`、`8eafbeb06792accd85a555f99b01ee61be369838`、`8d13d084544b1d94d558c52f03b0bc1931bd0946`、`ff5da9bb6722eb0e5a8925140631a154af7c4c9e`（同日），再前为 `99eada51405358ec82b7b5bc6329c3141c1a8d04`（2026-11-01 第二次部署），同日上一版为 `6ae9fcaadff86db9405d22adf95b5e7677d01cce`，再前为 `8ab1937e84b1f63db3db46a07eca8a4d17876a58`。在此前启停、异常关闭、钱包取消和历史分批修复之上，本轮仅更新 HTML／CSS 界面，见 [Hallmark 界面说明](docs/archive/UI_HALLMARK_20261030.md)。此前业务保护保留，见 [修复说明](docs/archive/EGM_FIXES_20261030.md)。后续验收文档提交仅改 Markdown，服务器源码可同步到该文档提交；运行镜像及环境版本仍固定为上述应用 SHA，不为同步文档再次重启。
+当前已部署应用为 `181b378579eb1e7558d28120927a63237d0e6497`（2026-11-04，界面改版，见下节）；此前为 `2e07c7dfb03d3acecfa75960658a06632e67aa88`、`a4c5df4a8ee525bd7890de73f3587207fbaddf5c`、`7d47f50cbacba33d603ac1f7ed1370c8171f8337`、`8eafbeb06792accd85a555f99b01ee61be369838`、`8d13d084544b1d94d558c52f03b0bc1931bd0946`、`ff5da9bb6722eb0e5a8925140631a154af7c4c9e`（同日），再前为 `99eada51405358ec82b7b5bc6329c3141c1a8d04`（2026-11-01 第二次部署），同日上一版为 `6ae9fcaadff86db9405d22adf95b5e7677d01cce`，再前为 `8ab1937e84b1f63db3db46a07eca8a4d17876a58`。现行界面见[界面改版说明](docs/archive/UI_LIGHT_20261104.md)（此前为 [Hallmark 界面](docs/archive/UI_HALLMARK_20261030.md)）。此前业务保护保留，见 [修复说明](docs/archive/EGM_FIXES_20261030.md)。后续验收文档提交仅改 Markdown，服务器源码可同步到该文档提交；运行镜像及环境版本仍固定为上述应用 SHA，不为同步文档再次重启。
 
 旧工作分支和重复基准标签已从 GitHub 入口移除，旧 PR #18 已关闭，未将它的原地重签方案合入当前交易逻辑；相关问题已经由后续 PR #19 的终结未提交意图及重新评估机制覆盖。提交历史继续保留。后续操作以 `main` 和完整应用 SHA 为准，旧部署脚本中的历史分支名不再作为拉取入口。规则见 [版本维护](docs/VERSIONS.md)。
 
-## 最近一次部署：2026-11-02 22:55（2e07c7d，消除扫描期间的整核满载）
+## 最近一次部署：2026-11-04 17:26（181b378，浅色界面改版）
+
+- 内容：只改 `web/index.html`、`web/styles.css`，见[界面改版说明](docs/archive/UI_LIGHT_20261104.md)。浅色朴素风格；宽屏左右两栏（左侧资金与曲线，右侧持仓／记录／市场）；“暂无报价／赎回待核查”提示改为“总资产估算”旁的小标记，点击才显示原文。`app.js`、Python、配置、依赖和测试未改；143 个元素 ID 及 62 个按钮、输入框的属性与改版前一致；交易逻辑不变。
+- [PR #21](https://github.com/yvettemiranda/PM-NAUTILUS/pull/21)，`main` 快进到该提交（SHA 不变）。[CI 41805782216](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/41805782216)（main）及分支、PR 两次运行，双架构各 1,339 项 Python、122 项页面测试通过。第一次运行部署脚本时 main 上的 CI 尚未结束（4/6），脚本在停机前按设计拒绝；CI 全部通过后重跑。
+- 部署前快照 `pre-deploy-181b378`（lhsnap-6blj7x7f，17:14，状态正常）；你已在控制台删除 `pre-deploy-7d47f50`，现保留 `pre-deploy-181b378` 与 `pre-deploy-a4c5df4`，配额已满，下次部署前先删较旧的 `pre-deploy-a4c5df4`。
+- 备份 `/var/lib/pm-nautilus-deploy/20261104T092551Z-181b378/`（12 个文件）；停机前 TEST 1、2、3、4 RUNNING（持仓 45/62/76/25；4 号初始资金 1000U，由你此前启动），5—10 PAUSED；健康 ok、修订 181b378、10 个账户、后台错误为空；恢复后 10 个账户状态与停机前一致，行情组 5/5、盘口全部就绪。脚本清理了最旧的部署备份（8d13d08）。镜像中的网页文件哈希与仓库一致。删除镜像 7d47f50（保留 181b378 与回滚 2e07c7d、a4c5df4）。容器重启 0 次，磁盘 34%。
+
+## 2026-11-02 22:55 部署（2e07c7d，消除扫描期间的整核满载）
 
 - 发现：a4c5df4 上线后用腾讯云监控和进程 CPU 观察到，程序全天每约 9 分钟就有约 4 分钟占满一个 CPU 核（实例 CPU 平台约 52%）。这一现象早于本轮改动就存在。py-spy：市场扫描进行中（约 4 分钟），按设计不复用已完成的订阅规划，所以每个账户的 5 秒循环都做一次完整规划；每次规划对 10 个账户逐一调用 `release_unmonitored`，它先把约 2.86 万个（ID，代币）整份复制成列表，再找已关闭的代币。120 秒采样中，规划占约 6,100 次，仅这一行就占 4,633 次（主要是复制产生的大量临时对象及其垃圾回收）。
 - 改动：只从原映射里挑出要删除的 ID，然后删除；删除的代币和顺序与原来相同。公共行情源的同名函数同样处理。对照测试覆盖 `Runtime` 与 `TestRuntime`（映射顺序、条件索引、TEST 版本计数），并用 tracemalloc 限制峰值分配。本地大堆模拟：每次约 1 ms（原 3—5 ms），不再触发垃圾回收。

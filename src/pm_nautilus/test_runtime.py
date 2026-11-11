@@ -124,8 +124,15 @@ class TestRuntime(Runtime):
     def refresh_eligibility(self):
         previous = self.monitored
         result = super().refresh_eligibility()
+        paused = self.status == "PAUSED"
+        if paused and not self.paused_full_feed and self.dirty:
+            # PAUSED keeps deferred Events dirty until START. Events this
+            # account no longer monitors (and owns no work in) need no deferral:
+            # START marks every then-eligible Event dirty anyway. Without this,
+            # they stayed dirty forever and every public frame drained them.
+            self.dirty &= set(self.events) | self._maintenance_events()
         self._test_preview_pending.update(self.dirty)
-        self._test_can_defer = self.status == "PAUSED"
+        self._test_can_defer = paused
         if previous != self.monitored:
             self.test_market_epoch += 1
         return result

@@ -525,3 +525,20 @@ def test_frames_without_an_idle_accounts_tokens_skip_it_unless_work_is_pending(
             idle.close()
 
     asyncio.run(run())
+
+
+def test_paused_account_drops_deferred_work_for_markets_it_no_longer_monitors(tmp_path):
+    reference, clock, token = setup(tmp_path / "reference")
+    reference.close()
+    r = TestRuntime(tmp_path / "t.sqlite", clock=clock)
+    try:
+        r.add_tokens([token])
+        r.start()
+        r.book(token.token_id, [(15_000, 100_000)], [(900_000, 100_000)], 1)
+        r.pause()
+        r.refresh_eligibility()
+        assert r.monitored == set() and r.dirty == set()
+        r.start()  # START still evaluates every eligible Event.
+        assert token.event_id in r.evaluations
+    finally:
+        r.close()

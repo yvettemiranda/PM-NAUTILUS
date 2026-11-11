@@ -53,6 +53,7 @@ def quote(runtime, items, *, buy=True):
         (False, True, {"market:market-1", "market:market-2"}),
     ],
 )
+@pytest.mark.usefixtures("paused_full_feed")
 def test_markets_in_same_event_choose_one_side_per_configured_scope(
     tmp_path, split, independent, expected
 ):

@@ -30,7 +30,16 @@ class TestMarketService(MarketService):
     async def start_async(self):
         if self.closed:
             raise ValueError("该TEST账户后台已停止，请重新启动程序后恢复")
-        return await super().start_async()
+        result = await super().start_async()
+        if self.hub is not None and self._scan_finished_at is not None and not self.closed:
+            # A PAUSED account held only owned markets. Subscribe the full
+            # eligible set now rather than at the next 5 s control tick. Books
+            # that are not ready yet keep their events INCOMPLETE (no buy).
+            try:
+                await self.sync_subscriptions()
+            except Exception:
+                pass  # The 5 s control loop plans again and owns error reporting.
+        return result
 
     async def sync_subscriptions(self):
         if type(self.hub) is TestMarketHub:

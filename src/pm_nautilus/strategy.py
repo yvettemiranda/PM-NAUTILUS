@@ -356,7 +356,7 @@ class Runtime:
         settled = set(self.business["settled"])
         eligible = {
             tid
-            for tid, t in self.tokens.items()
+            for tid, t in self._eligibility_candidates()
             if static_reason(t, self.preferences, now, self.official_tags) is None
             and t.condition_id not in settled
             and not self.market_is_unavailable(tid)
@@ -421,6 +421,10 @@ class Runtime:
         self.dirty.update(self._terminal_events)
         self._terminal_events.clear()
         self.dirty.update(self._time_sensitive_events & self.events.keys())
+
+    def _eligibility_candidates(self):
+        """Tokens whose markets this account may monitor; every token here."""
+        return self.tokens.items()
 
     def note_terminal(self, event_id, token=None):
         self._terminal_events.add(event_id)

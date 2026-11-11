@@ -55,6 +55,7 @@ def test_test_summary_matches_detailed_response_with_unpriced_owned_rights(
         runtime.close()
 
 
+@pytest.mark.usefixtures("paused_full_feed")
 def test_test_summary_counts_pending_and_unknown_events_without_candidate_book_reads(
     tmp_path, monkeypatch
 ):

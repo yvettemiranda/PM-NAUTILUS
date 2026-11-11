@@ -374,6 +374,7 @@ def test_failed_account_reset_is_quarantined_without_stopping_other_accounts(tmp
     asyncio.run(run())
 
 
+@pytest.mark.usefixtures("paused_full_feed")
 def test_synthetic_shared_feed_ten_account_load_and_http_responsiveness(tmp_path, monkeypatch):
     """Use production message handling; print measured, non-production capacity evidence."""
     reference, clock, token = setup(tmp_path / "reference")

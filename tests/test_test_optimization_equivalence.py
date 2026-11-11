@@ -205,6 +205,7 @@ def test_paused_target_and_stop_exits_and_restart_match_original_engine(tmp_path
     asyncio.run(run())
 
 
+@pytest.mark.usefixtures("paused_full_feed")
 def test_market_preview_is_current_read_only_and_start_uses_latest_ordering(tmp_path):
     async def run():
         async with paired_runtimes(tmp_path) as (pair, tokens):
@@ -332,6 +333,7 @@ async def replay_workload(
             runtime.close()
 
 
+@pytest.mark.usefixtures("paused_full_feed")
 @pytest.mark.parametrize("running_accounts", [0, 1, 2, 10])
 def test_ten_accounts_642_token_replay_preserves_every_financial_result(tmp_path, running_accounts):
     async def run():

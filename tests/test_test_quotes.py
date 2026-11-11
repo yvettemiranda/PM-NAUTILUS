@@ -23,6 +23,9 @@ from test_lifecycle import controlled_factory
 from test_test_optimization_equivalence import DAY, book_message, semantic_state, token_set
 
 
+pytestmark = pytest.mark.usefixtures("paused_full_feed")
+
+
 async def idle_socket(_group):
     await asyncio.Future()
 

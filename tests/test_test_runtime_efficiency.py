@@ -43,6 +43,7 @@ def quote(runtime, token="1", bid=15_000, ask=20_000, bid_size=100_000_000):
     runtime.book(token, [(bid, bid_size)], [(ask, 50_000_000)])
 
 
+@pytest.mark.usefixtures("paused_full_feed")
 def test_paused_empty_account_preserves_quotes_and_defers_only_candidate_work(
     tmp_path, monkeypatch
 ):

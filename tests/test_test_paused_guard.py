@@ -56,6 +56,7 @@ def test_stable_empty_quotes_use_one_read_only_version_check_and_preserve_pendin
     assert runtime.store.db.total_changes == changes
 
 
+@pytest.mark.usefixtures("paused_full_feed")
 @pytest.mark.parametrize("foreign", [False, True])
 def test_raw_status_change_is_seen_on_the_next_drain_and_uses_real_start_rules(runtime, foreign):
     before = runtime._test_empty_paused_proof

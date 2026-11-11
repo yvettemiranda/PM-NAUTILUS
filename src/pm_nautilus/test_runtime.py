@@ -56,6 +56,32 @@ class TestRuntime(Runtime):
         if token is not None:
             self._test_preview_pending.add(self.cycle_id(token))
 
+    # When False (production), a PAUSED account monitors only markets it still
+    # owns work in; see _eligibility_candidates. Tests of unrelated shared-feed
+    # mechanisms may set True to keep the earlier full PAUSED feed.
+    paused_full_feed = False
+
+    def _eligibility_candidates(self):
+        """A PAUSED TEST account takes no market data it cannot act on.
+
+        PAUSED opens nothing new, so only markets with owned work stay
+        monitored: open cycles (target sells, stop-loss) and active orders.
+        Every other market would cost the shared feed, this account's quote
+        handling and its 5 s eligibility pass. START restores the full set
+        before any buy can be planned (refresh_eligibility in _finish_start).
+        """
+        if self.paused_full_feed:
+            return super()._eligibility_candidates()
+        try:
+            paused = self.status == "PAUSED"
+        except Exception:
+            paused = False  # Unreadable status: keep the original complete set.
+        if not paused:
+            return super()._eligibility_candidates()
+        owned = {cycle["token_id"] for cycle in self.business["cycles"].values()}
+        owned.update(intent["token_id"] for intent in self.store.intents(active_only=True).values())
+        return [(tid, self.tokens[tid]) for tid in sorted(owned) if tid in self.tokens]
+
     def defer_native_quote(self, token):
         """A PAUSED TEST account keeps every Python quote but not its Nautilus copy.
 

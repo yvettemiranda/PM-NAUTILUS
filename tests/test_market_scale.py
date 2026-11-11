@@ -10,6 +10,8 @@ import asyncio
 from random import Random
 from types import SimpleNamespace
 
+import pytest
+
 from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.enums import BookAction, BookType
 
@@ -115,6 +117,7 @@ def periodic(service):
     return run()
 
 
+@pytest.mark.usefixtures("paused_full_feed")
 def test_periodic_requests_reuse_a_recent_plan_but_changes_plan_immediately(tmp_path, monkeypatch):
     async def run():
         async with complete_hub(tmp_path, monkeypatch, count=3, service_type=TestMarketService) as (
@@ -153,6 +156,7 @@ def test_periodic_requests_reuse_a_recent_plan_but_changes_plan_immediately(tmp_
     asyncio.run(run())
 
 
+@pytest.mark.usefixtures("paused_full_feed")
 def test_live_consumer_always_uses_the_original_planning_path(tmp_path, monkeypatch):
     async def run():
         async with complete_hub(tmp_path, monkeypatch, count=2, service_type=TestMarketService) as (
@@ -412,3 +416,66 @@ def test_continuous_snapshots_publish_only_changed_levels_with_identical_book(tm
         asyncio.run(service.close())
     finally:
         r.close()
+
+
+def test_paused_test_account_monitors_only_owned_markets_and_start_restores_all(tmp_path):
+    reference, clock, token = setup(tmp_path / "reference")
+    reference.close()
+    from dataclasses import replace
+
+    other = replace(
+        token, token_id="2", event_id="event-2", market_id="market-2", condition_id="c2"
+    )
+    r = TestRuntime(tmp_path / "t.sqlite", clock=clock)
+    try:
+        r.add_tokens([token, other])
+        r.update_preferences({"maxBuyPriceCents": "3", "orderAmount": "2"})
+        assert r.status == "PAUSED"
+        r.refresh_eligibility()
+        assert r.monitored == set() and r.events == {}
+        r.start()
+        assert r.monitored == {token.token_id, other.token_id}
+        # Buy one market, then pause: only the owned market stays monitored.
+        r.book(token.token_id, [(15_000, 100_000_000)], [(20_000, 100_000_000)], 1000)
+        assert token.token_id in {c["token_id"] for c in r.business["cycles"].values()}
+        r.pause()
+        r.refresh_eligibility()
+        assert r.monitored == {token.token_id}
+        # A PAUSED account still sells its position at the target.
+        r.book(token.token_id, [(500_000, 1_000_000_000)], [(510_000, 100_000_000)], 2000)
+        assert any(i["side"] == "SELL" for i in r.store.intents().values())
+    finally:
+        r.close()
+
+
+def test_start_subscribes_a_previously_idle_paused_account_at_once(tmp_path, monkeypatch):
+    from pm_nautilus.test_market import TestMarketHub
+
+    from test_market_efficiency import IdleSocket
+
+    reference, clock, token = setup(tmp_path / "reference")
+    reference.close()
+    monkeypatch.setattr("pm_nautilus.market.connect", lambda *a, **k: IdleSocket())
+
+    async def run():
+        hub = TestMarketHub()
+        runtime = TestRuntime(tmp_path / "t.sqlite", clock=clock)
+        service = TestMarketService(runtime, hub=hub)
+        try:
+            runtime.add_tokens([token])
+            await service.sync_subscriptions()
+            assert service.desired_subscription_ids() == set() and not hub.active_groups
+            service._scan_finished_at = 0.0
+            await service.start_async()
+            assert service.desired_subscription_ids() == {token.token_id}
+            assert set().union(*hub.active_groups.values()) == {token.token_id}
+            runtime.pause()
+            runtime.refresh_eligibility()
+            await service.sync_subscriptions()
+            assert not set().union(*hub.active_groups.values())
+        finally:
+            await service.close()
+            await hub.close()
+            runtime.close()
+
+    asyncio.run(run())

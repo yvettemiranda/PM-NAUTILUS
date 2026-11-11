@@ -19,6 +19,9 @@ from test_runtime import setup
 from test_lifecycle import controlled_factory
 
 
+pytestmark = pytest.mark.usefixtures("paused_full_feed")
+
+
 @asynccontextmanager
 async def complete_hub(path, monkeypatch, count=2, service_type=MarketService):
     reference, clock, token = setup(path / "reference")

@@ -9,9 +9,17 @@
 | [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) | 当前十账户最新版及现行文档，默认开发和下载入口。 |
 | [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027) | 十账户改造前的固定源码 `4de107a4dc1a4abaaf08b330eb00803391268e2a`，不继续修改。 |
 
-当前运行镜像及服务器应用源码固定为 `c96feed9922755faa5dd42fa7e923c2ac2153485`。前一应用版本为 `181b378579eb1e7558d28120927a63237d0e6497`。其他版本和恢复点见下方历史记录。现行界面布局见 [界面改版说明](docs/archive/UI_LIGHT_20261104.md)，新开关和报告见 [可选策略与账本分析](docs/STRATEGY_PREFERENCES.md)。
+当前运行镜像及服务器源码固定为 `8e13d2d4f985bb452e0ac05bf36092ca623326d7`（应用代码与 `c96feed` 相同，只多文档）。服务器已于 2026-11-11 重装系统，旧账本只在云端快照中，见下一节。其他版本和恢复点见下方历史记录。现行界面布局见 [界面改版说明](docs/archive/UI_LIGHT_20261104.md)，新开关和报告见 [可选策略与账本分析](docs/STRATEGY_PREFERENCES.md)。
 
 旧工作分支和重复基准标签已从 GitHub 入口移除，旧 PR #18 已关闭，未将它的原地重签方案合入当前交易逻辑；相关问题已经由后续 PR #19 的终结未提交意图及重新评估机制覆盖。提交历史继续保留。后续操作以 `main` 和完整应用 SHA 为准，旧部署脚本中的历史分支名不再作为拉取入口。规则见 [版本维护](docs/VERSIONS.md)。
+
+## 2026-11-11 18:10 服务器重装后全新部署 `8e13d2d`
+
+- 你在控制台重装了系统（Ubuntu 26.04），所有旧账本、部署备份和镜像都已清空。若需要找回旧数据，只能从云端快照 `pre-deploy-181b378`（lhsnap-6blj7x7f）或 `pre-deploy-a4c5df4` 恢复到别的实例里读取。重装前的过载原因：5 个账户同时开启两个市场扩展开关，订阅量约为原来的 12 倍，2 核 2G 机器跟不上。以后这两个开关建议只在一个账户上开。
+- 按部署手册第 6 节安装：apt 装 Docker 29.1、Compose 2.40、Nginx 1.28，snap 装 certbot 5.10；检出 `8e13d2d`（两项 GitHub 检查成功）。`.env` 由你本人输入网页密码（root 所有，600）；`PM_ALLOWED_HOSTS=localhost,127.0.0.1,43.159.133.129`，`PM_TRUST_HTTPS_PROXY=true`，`PM_LIVE_ENABLED=false`。没有执行仓库公开策略规则初始化，参数由你在网页上设置。
+- HTTPS：Let's Encrypt IP 证书 `pm-nautilus-ip`（shortlived 档，有效期约 6 天，未登记邮箱），续期由 `snap.certbot.renew.timer` 负责，`renew_hook = systemctl reload nginx`，续期演练成功。Nginx 配置为 `/etc/nginx/conf.d/pm-http.conf`（80：ACME 验证，其余跳转 HTTPS）和 `pm-https.conf`（按 `deploy/nginx.conf.example`，含 gzip），已删除默认站点。
+- 验收：容器 healthy，健康接口 200，修订 8e13d2d，10 个 TEST 账户均 PAUSED，LIVE 关闭、钱包未配置，应用端口只监听 127.0.0.1:8765。外部 HTTPS 返回 401（需要登录），HTTP 返回 301。已安装存储维护定时任务（试运行 normal、errors=0）。容器使用 `restart: unless-stopped`，没有装开机启动单元。
+- 待你处理：22 端口仍对所有 IP 开放，建议在防火墙中限制来源，或改为只用密钥登录。
 
 ## 2026-11-11 部署 `c96feed`
 

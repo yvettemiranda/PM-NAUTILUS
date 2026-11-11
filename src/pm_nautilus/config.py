@@ -1,6 +1,7 @@
 """One validated configuration shared by TEST, LIVE and the original UI."""
 
 from decimal import Decimal, ROUND_HALF_UP
+from functools import lru_cache
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -18,6 +19,14 @@ OPTIONAL_PROFILE_FIELDS = frozenset(
 
 
 def micros(value: object) -> int:
+    # Public quotes repeat the same price/size strings constantly. The result
+    # of a str is fixed; errors are never cached and raise exactly as before.
+    if type(value) is str:
+        return _micros_str(value)
+    return _micros(value)
+
+
+def _micros(value: object) -> int:
     d = Decimal(str(value))
     if not d.is_finite():
         raise ValueError("数值必须有限")
@@ -25,6 +34,9 @@ def micros(value: object) -> int:
     if abs(n) > SAFE_INTEGER:
         raise ValueError("数值超出支持范围")
     return n
+
+
+_micros_str = lru_cache(maxsize=65_536)(_micros)
 
 
 def units(value: int | None) -> str | None:

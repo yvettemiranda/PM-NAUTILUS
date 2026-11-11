@@ -190,6 +190,9 @@ class Runtime:
             self.storage_guard.require_safe()
 
     def market_is_unavailable(self, token_id):
+        if not self.market_availability:
+            # The usual case; called for every outcome on every evaluation.
+            return False
         direct = self.market_availability.get(token_id)
         if direct is not None and direct.get("status") == "UNAVAILABLE":
             return True
@@ -453,10 +456,11 @@ class Runtime:
     def book(self, token_id, bids, asks, timestamp=None):
         b = self.books[token_id]
         shadow = self.shadow_depth(b)
+        previous = (dict(b.bid.external), dict(b.ask.external)) if b.ready else None
         if not b.snapshot(bids, asks, self.now if timestamp is None else timestamp):
             return
         self.checkpoint_shadow(token_id, shadow)
-        self.native.feed(self.tokens[token_id], b)
+        self.native.feed(self.tokens[token_id], b, previous)
         self.dirty.add(self.cycle_id(self.tokens[token_id]))
         self.drain()
 

@@ -1,6 +1,7 @@
 """Version-pinned Nautilus components; no independent order/position state machine."""
 
 from decimal import Decimal
+from functools import lru_cache
 import asyncio
 
 from nautilus_trader.cache.cache import Cache
@@ -21,10 +22,14 @@ from nautilus_trader.risk.engine import RiskEngine
 from .config import SCALE
 
 
+# Nautilus Price/Quantity values are immutable. Book prices sit on a small
+# tick grid and sizes repeat, so identical conversions are reused.
+@lru_cache(maxsize=65_536)
 def quantity(n):
     return Quantity.from_str(f"{Decimal(n) / SCALE:.6f}")
 
 
+@lru_cache(maxsize=8_192)
 def price(n):
     return Price.from_str(f"{Decimal(n) / SCALE:.6f}")
 
@@ -135,12 +140,26 @@ class Native:
         defer = getattr(owner, "defer_native_quote", None)
         return defer is not None and defer(t)
 
-    def feed(self, t, book):
-        """Publish complete public books through Nautilus DataEngine and Strategy."""
+    def feed(self, t, book, previous=None):
+        """Publish complete public books through Nautilus DataEngine and Strategy.
+
+        ``previous`` is the (bids, asks) external depth this book had just
+        before its snapshot. When every earlier change of this book was already
+        published here, only the changed levels are published: applying them
+        gives the same L2 book as CLEAR plus every level, for a fraction of the
+        objects. Anything else, or a snapshot with no changed level, publishes
+        the complete book as before.
+        """
         if self._deferred(t):
             return
         iid = instrument_id(t)
         self.ensure_instrument(t)
+        if previous is not None and getattr(book, "_native_revision", None) == book.revision - 1:
+            deltas = self._changed_levels(iid, book, previous)
+            if deltas:
+                self.data.process(OrderBookDeltas(iid, deltas))
+                book._native_revision = book.revision
+                return
         deltas = [OrderBookDelta.clear(iid, 0, book.timestamp, book.timestamp)]
         values = [(OrderSide.BUY, p, q) for p, q in book.bid.external.items()]
         values += [(OrderSide.SELL, p, q) for p, q in book.ask.external.items()]
@@ -157,6 +176,31 @@ class Native:
                 )
             )
         self.data.process(OrderBookDeltas(iid, deltas))
+        book._native_revision = book.revision
+
+    @staticmethod
+    def _changed_levels(iid, book, previous):
+        changes = []
+        for order_side, old, new in (
+            (OrderSide.BUY, previous[0], book.bid.external),
+            (OrderSide.SELL, previous[1], book.ask.external),
+        ):
+            for p in sorted(old.keys() | new.keys()):
+                q = new.get(p, 0)
+                if old.get(p, 0) != q:
+                    changes.append((order_side, p, q))
+        return [
+            OrderBookDelta(
+                iid,
+                BookAction.UPDATE if q else BookAction.DELETE,
+                BookOrder(order_side, price(p), quantity(q), 0),
+                128 if i == len(changes) - 1 else 0,
+                0,
+                book.timestamp,
+                book.timestamp,
+            )
+            for i, (order_side, p, q) in enumerate(changes)
+        ]
 
     def feed_delta(self, t, book, side, levels):
         """Publish accepted public changes without rebuilding unchanged levels."""
@@ -180,6 +224,7 @@ class Native:
         ]
         if deltas:
             self.data.process(OrderBookDeltas(iid, deltas))
+        book._native_revision = book.revision
 
     def stop(self):
         for c in (self.strategy, self.execution, self.risk, self.data):

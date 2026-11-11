@@ -11,7 +11,7 @@ from random import Random
 from types import SimpleNamespace
 
 from nautilus_trader.model.book import OrderBook
-from nautilus_trader.model.enums import BookType
+from nautilus_trader.model.enums import BookAction, BookType
 
 from pm_nautilus.market import MarketService, PublicMarketHub
 from pm_nautilus.native import instrument_id
@@ -336,3 +336,79 @@ def test_native_deferral_never_changes_a_test_decision(tmp_path, monkeypatch):
         for step, (a, b) in enumerate(zip(deferred, original, strict=True)):
             assert a == b, (seed, step)
         assert deferred[-1][0]  # The scenario traded.
+
+
+def published_levels(received, token):
+    book = applied(received, token)
+    return native_levels(book, "bids"), native_levels(book, "asks")
+
+
+def python_levels(book):
+    return (
+        sorted(book.bid.external.items(), reverse=True),
+        sorted(book.ask.external.items()),
+    )
+
+
+def test_continuous_snapshots_publish_only_changed_levels_with_identical_book(tmp_path):
+    reference, clock, token = setup(tmp_path / "reference")
+    reference.close()
+    r = TestRuntime(tmp_path / "t.sqlite", clock=clock)
+    received = []
+    try:
+        r.add_tokens([token])
+        r.update_preferences({"maxBuyPriceCents": "1"})
+        r.start()
+        service = MarketService(r)
+        r.native.bus.subscribe("data.book.deltas.*", received.append)
+        rng = Random(11)
+        ts = 1000
+
+        def levels(lo, hi):
+            return [
+                (p * 1000, rng.randrange(1, 40) * 1_000_000)
+                for p in sorted(rng.sample(range(lo, hi), rng.randrange(0, 6)))
+            ]
+
+        snapshot_kinds = []
+        for step in range(300):
+            ts += 1
+            roll = rng.random()
+            if roll < 0.35:
+                before = len(received)
+                r.book(token.token_id, levels(2, 20), levels(21, 40), ts)
+                if len(received) > before:
+                    snapshot_kinds.append(
+                        any(d.action == BookAction.CLEAR for d in received[-1].deltas)
+                    )
+            elif roll < 0.45:
+                r.disconnect([token.token_id])
+            else:
+                side = rng.choice(("BUY", "SELL"))
+                p = rng.randrange(2, 20) if side == "BUY" else rng.randrange(21, 40)
+                service.message(
+                    dict(
+                        event_type="price_change",
+                        timestamp=str(ts),
+                        market=token.condition_id,
+                        price_changes=[
+                            dict(
+                                asset_id=token.token_id,
+                                side=side,
+                                price=f"0.{p:03d}",
+                                size=str(rng.randrange(0, 40)),
+                            )
+                        ],
+                    ),
+                    {token.token_id},
+                )
+            book = r.books[token.token_id]
+            if received:
+                assert published_levels(received, token) == tuple(
+                    [(p, q) for p, q in side_levels] for side_levels in python_levels(book)
+                ), step
+        # Both paths ran: complete books after (re)connect, changed levels otherwise.
+        assert True in snapshot_kinds and False in snapshot_kinds
+        asyncio.run(service.close())
+    finally:
+        r.close()

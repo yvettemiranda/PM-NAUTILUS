@@ -127,6 +127,13 @@ class PMStrategy(Strategy):
 
 
 class Runtime:
+    # Candidate batching (0 = off: every quote evaluates its Event at once).
+    # When set, Events without an open position are evaluated together at most
+    # once per interval; Events holding a position (target sells, stop-loss)
+    # are always evaluated on every quote. Books are updated on every quote
+    # either way, so a batch always evaluates the latest depth.
+    CANDIDATE_BATCH_NS = 0
+
     def __init__(
         self, path: str | Path, mode="TEST", clock=None, live_factory=None, storage_guard=None
     ):
@@ -152,6 +159,8 @@ class Runtime:
         self._cycle_scope_keys = {}
         self.instrument_tokens = {}
         self.dirty = set()
+        self._candidate_backlog = set()
+        self._candidate_flushed_at = None
         self.evaluations = {}
         self._preview_cache = {}
         self._time_sensitive_events = set()
@@ -917,6 +926,8 @@ class Runtime:
         # an unbounded new-cycle loop. A later event/control tick permits re-entry.
         pending = self.dirty
         self.dirty = set()
+        if self.CANDIDATE_BATCH_NS:
+            pending = self._batch_candidates(pending)
         if len(pending) > 1:
             # Current readiness must be established before cross-Event cash
             # allocation. Preview pass has no order, stop, budget or journal
@@ -946,6 +957,21 @@ class Runtime:
         self.dirty = set()
         for eid in exits:
             self.evaluate(eid)
+
+    def _batch_candidates(self, pending):
+        cycles = self.business["cycles"]
+        held = {eid for eid in pending if eid in cycles}
+        self._candidate_backlog.update(pending - held)
+        now = self.now
+        if (
+            self._candidate_flushed_at is None
+            or now - self._candidate_flushed_at >= self.CANDIDATE_BATCH_NS
+            or now < self._candidate_flushed_at
+        ):
+            held.update(self._candidate_backlog)
+            self._candidate_backlog = set()
+            self._candidate_flushed_at = now
+        return held
 
     def submit(
         self, t, side, qty, limit, cash=0, kind="TARGET", targets=None, execution_limit=None
@@ -1051,6 +1077,7 @@ class Runtime:
             raise ValueError("账本核对失败，不能启动: " + ", ".join(result["errors"]))
         self._start_epoch += 1
         self.store.put("status", "RUNNING")
+        self._candidate_flushed_at = None  # START evaluates every candidate at once.
         self.refresh_eligibility()
         self.drain()
 

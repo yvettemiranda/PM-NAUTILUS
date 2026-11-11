@@ -27,6 +27,9 @@ TAGS = f"{GAMMA}/tags/102982/related-tags/tags"
 HEARTBEAT_SECONDS = 10
 RECOVERY_SECONDS = 30
 AVAILABILITY_RECHECK_SECONDS = 300
+# Full public market discovery interval. Held positions never wait for it:
+# their books stay subscribed and are processed on every quote.
+DISCOVERY_SECONDS = 300
 CLOB_BOOK = "https://clob.polymarket.com/book"
 FRESH_BASELINE_RECOVERY_SECONDS = 30
 DISCOVERY_PAGE_ATTEMPTS = 3
@@ -1020,7 +1023,8 @@ class MarketService:
                     completed.result()
                 if self.scan_task is None and (
                     self._scan_finished_at is None
-                    or asyncio.get_running_loop().time() - self._scan_finished_at >= 300
+                    or asyncio.get_running_loop().time() - self._scan_finished_at
+                    >= DISCOVERY_SECONDS
                 ):
                     # Public discovery may await hundreds of cursor pages. Keep
                     # control checks independent without overlapping scans or
@@ -1219,7 +1223,11 @@ class PublicMarketHub(MarketService):
                 requested and not published
                 for requested, published in zip(scope, self._published_market_scope, strict=True)
             )
-            if self.discovered_at is None or now - self.discovered_at >= 300 or needs_expansion:
+            if (
+                self.discovered_at is None
+                or now - self.discovered_at >= DISCOVERY_SECONDS
+                or needs_expansion
+            ):
                 self._scan_tick_versions = dict(self._tick_versions)
                 try:
                     await super().scan()

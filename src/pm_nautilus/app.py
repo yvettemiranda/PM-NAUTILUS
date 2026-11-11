@@ -79,8 +79,28 @@ async def _finish_before_cancel(operation, *, cleanup_cancelled_result=None):
         raise
 
 
+def _apply_pacing(env):
+    """Optional server pacing; unset keeps the built-in defaults."""
+    import pm_nautilus.market as market_module
+    from .strategy import Runtime as StrategyRuntime
+
+    discovery = env.get("PM_DISCOVERY_SECONDS")
+    if discovery:
+        value = int(discovery)
+        if not 60 <= value <= 3600:
+            raise ValueError("PM_DISCOVERY_SECONDS 须为 60–3600")
+        market_module.DISCOVERY_SECONDS = value
+    batch = env.get("PM_CANDIDATE_BATCH_SECONDS")
+    if batch:
+        value = float(batch)
+        if not 0 <= value <= 10:
+            raise ValueError("PM_CANDIDATE_BATCH_SECONDS 须为 0–10")
+        StrategyRuntime.CANDIDATE_BATCH_NS = int(value * 1_000_000_000)
+
+
 def create_app(data_dir=None, public_data=True, test_clock=None):
     root = Path(data_dir or os.getenv("PM_DATA_DIR", "runtime"))
+    _apply_pacing(os.environ)
     password = os.getenv("PM_UI_PASSWORD", "")
     allowed = set(os.getenv("PM_ALLOWED_HOSTS", "localhost,127.0.0.1,::1,testserver").split(","))
     if password and len(password) < 16:

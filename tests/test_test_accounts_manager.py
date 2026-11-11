@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from pm_nautilus.app import create_app
+from pm_nautilus.config import OPTIONAL_PROFILE_FIELDS
 import pm_nautilus.app as app_module
 from pm_nautilus.market import MarketService
 from pm_nautilus.performance import PerformanceSampler
@@ -72,6 +73,30 @@ def test_new_account_copies_only_settings_and_is_not_reseeded(tmp_path):
         finally:
             reopened.close()
     finally:
+        source.close()
+
+
+def test_finishes_interrupted_initialization_from_legacy_defaults(tmp_path):
+    accounts = TestAccounts(tmp_path)
+    source = Store(accounts.path(1))
+    account = Store(accounts.path(2))
+    generation = account.generation
+    try:
+        previous = account.get("preferences")
+        account.put(
+            "preferences", {k: v for k, v in previous.items() if k not in OPTIONAL_PROFILE_FIELDS}
+        )
+        account.close()
+        customized = source.get("preferences") | {"orderAmount": "3", "buyBestLevelOnly": True}
+        source.put("preferences", customized)
+
+        accounts.prepare(2, source)
+        account = Store(accounts.path(2))
+        assert account.generation == generation
+        assert account.get("test_account_initialized") is True
+        assert account.get("preferences") == customized
+    finally:
+        account.close()
         source.close()
 
 

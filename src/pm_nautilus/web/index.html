@@ -126,7 +126,10 @@
                 <label><input id="binary-market" type="checkbox" value="BINARY" /><span>二元市场</span></label>
                 <label><input id="ternary-market" type="checkbox" value="TERNARY" /><span>三元市场</span></label>
                 <label><input id="multi-market" type="checkbox" value="MULTI" /><span>多元市场（4+）</span></label>
+                <label><input id="include-independent-multi-markets" type="checkbox" aria-describedby="market-type-note" /><span>纳入独立多市场事件</span></label>
+                <label><input id="include-augmented-neg-risk" type="checkbox" aria-describedby="market-type-note" /><span>纳入扩展负风险事件</span></label>
               </div>
+              <p id="market-type-note" class="field-note">独立多市场事件按各二元市场分别计算预算。扩展负风险事件仅纳入已命名的具体结果。仍按已选类型、栏目和交易条件筛选。</p>
             </fieldset>
 
             <div class="config-block">
@@ -165,6 +168,10 @@
                 </label>
               </div>
               <p class="field-note">含上下限，步长 0.1¢。</p>
+              <div class="check-options">
+                <label><input id="buy-best-level-only" type="checkbox" aria-describedby="buy-best-level-note" /><span>仅买最低卖价一档</span></label>
+              </div>
+              <p id="buy-best-level-note" class="field-note">以当前最低卖价为限价，深度不足时可部分成交。</p>
             </div>
 
             <div class="config-block target-formula-block">
@@ -286,7 +293,7 @@
                   </span>
                 </label>
                 <label class="field">
-                  <span>每事件本轮预算</span>
+                  <span id="order-amount-label">每事件本轮预算</span>
                   <span class="unit-input">
                     <input id="order-amount" type="number" min="0.01" step="0.01" inputmode="decimal" />
                     <span>U</span>
@@ -294,6 +301,10 @@
                 </label>
               </div>
               <p class="field-note">首笔成交后固定本轮预算；买入手续费以 pUSD 另付并计入预算。交易所市价买单最低 1U，扣除手续费后不足 1U 的买入不会下单。</p>
+              <div class="check-options">
+                <label><input id="cycle-per-market" type="checkbox" aria-describedby="cycle-per-market-note" /><span>按市场分别开仓和计算预算</span></label>
+              </div>
+              <p id="cycle-per-market-note" class="field-note">开启后，同一事件的各市场各用一轮预算，可能增加总资金占用。已有轮次沿用原范围。</p>
               <div class="stop-loss-settings">
                 <label class="stop-loss-toggle">
                   <input id="stop-loss-enabled" type="checkbox" />
@@ -420,6 +431,6 @@
 
       <p id="message" role="status" aria-live="polite"></p>
     </main>
-    <script type="module" src="/app.js?v=20261027-accounts1"></script>
+    <script type="module" src="/app.js?v=20261111-strategy-options"></script>
   </body>
 </html>

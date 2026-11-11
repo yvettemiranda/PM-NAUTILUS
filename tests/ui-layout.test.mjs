@@ -391,6 +391,32 @@ test('market refresh restores focus to the expanded market link rather than its 
   assert.equal(page.context.document.activeElement, refreshedLink);
 });
 
+test('two market cycles in the same event retain independent expansion and focus', () => {
+  const page = pageHarness();
+  seedTestDashboard(page);
+  page.ui.activeTab = 'market';
+  const market = {
+    eventId: 'shared-event', eventTitle: 'Shared event', marketUrl: 'https://example.com/event',
+    progressPercent: 20, status: 'NO_WINNER', outcomes: [],
+  };
+  const first = {...market, cycleId: 'condition-a'};
+  const second = {...market, cycleId: 'condition-b'};
+  page.ui.events = [first, second];
+  page.ui.displayCandidateCount = 2;
+  page.context.renderCandidatesForTest();
+  const container = page.element('#candidates');
+  const secondRow = container.querySelector('details[data-event="condition-b"]');
+  secondRow.open = true;
+  secondRow.querySelector('.market-link').focus();
+
+  page.ui.events = [{...first, progressPercent: 21}, second];
+  page.context.renderCandidatesForTest();
+  const nextSecond = container.querySelector('details[data-event="condition-b"]');
+  assert.equal(container.querySelector('details[data-event="condition-a"]').open, false);
+  assert.equal(nextSecond.open, true);
+  assert.equal(page.context.document.activeElement, nextSecond.querySelector('.market-link'));
+});
+
 test('opening the record tab reveals and loads records without requiring another expand action', () => {
   const page = pageHarness();
   seedTestDashboard(page);

@@ -1,4 +1,4 @@
-"""Shared Strategy, durable Event cycles, targets, stop observations and control."""
+"""Shared strategy, durable cycles, targets, stop observations and control."""
 
 from dataclasses import asdict
 from copy import deepcopy
@@ -114,12 +114,16 @@ class PMStrategy(Strategy):
         # is performed on a quote update.
         tid = self.owner.instrument_tokens.get(str(deltas.instrument_id))
         if tid is not None:
-            self.owner.dirty.add(self.owner.tokens[tid].event_id)
+            self.owner.dirty.add(self.owner.cycle_id(self.owner.tokens[tid]))
 
     def on_order_filled(self, event):
-        self.owner.dirty.add(
-            self.owner.tokens[self.owner.store.intent(event.client_order_id)["token_id"]].event_id
-        )
+        intent = self.owner.store.intent(event.client_order_id)
+        if intent is not None:
+            self.owner.dirty.add(intent["event_id"])
+            return
+        tid = self.owner.instrument_tokens.get(str(event.instrument_id))
+        if tid is not None:
+            self.owner.dirty.add(self.owner.cycle_id(self.owner.tokens[tid]))
 
 
 class Runtime:
@@ -142,6 +146,10 @@ class Runtime:
         self.official_tags = set(self.store.get("official_tags", []))
         self.monitored = set()
         self.events = {}
+        self._cycle_by_token = {
+            cycle["token_id"]: key for key, cycle in self.business["cycles"].items()
+        }
+        self._cycle_scope_keys = {}
         self.instrument_tokens = {}
         self.dirty = set()
         self.evaluations = {}
@@ -248,7 +256,7 @@ class Runtime:
                     continue
                 self.tokens[t.token_id] = t
                 self.store.save_token(t)
-                self.dirty.add(t.event_id)
+                self.dirty.add(self.cycle_id(t))
                 if str(instrument_id(t)) in self.instrument_tokens:
                     self.native.data.process(make_instrument(t))
         if official_tags is not None:
@@ -258,6 +266,86 @@ class Runtime:
 
     def condition_token_ids(self, condition_id):
         return self.tokens.condition_token_ids(condition_id)
+
+    def _new_cycle_id(self, token):
+        if token.independent_market:
+            return f"market:{token.market_id}"
+        if self.preferences.cyclePerMarket and token.condition_id:
+            return f"condition:{token.condition_id}"
+        return token.event_id
+
+    def cycle_id(self, token):
+        """Use the persisted scope of a position until its cycle is released."""
+        key = self._cycle_by_token.get(token.token_id)
+        cycle = self.business["cycles"].get(key)
+        if cycle and cycle["token_id"] == token.token_id:
+            return key
+        return self._new_cycle_id(token)
+
+    def cycle_stopped(self, token):
+        banned = self.business["banned"]
+        return bool(banned) and (
+            token.event_id in banned
+            or f"market:{token.market_id}" in banned
+            or f"condition:{token.condition_id}" in banned
+        )
+
+    def _remember_cycle_scope(self, token, key):
+        for identity in (("event", token.event_id), ("condition", token.condition_id)):
+            self._cycle_scope_keys.setdefault(identity, set()).add(key)
+
+    def _cycle_scope_conflicts(self, token, key):
+        condition_keys = self._cycle_scope_keys.get(("condition", token.condition_id), ())
+        event_keys = self._cycle_scope_keys.get(("event", token.event_id), ())
+        if not condition_keys and not event_keys:
+            return False
+        prefixes = ("market:", "condition:")
+        # Preserve Event-to-Event behavior for the legacy mode. Only an
+        # existing market scope can overlap a new unprefixed Event scope.
+        other_keys = {
+            other
+            for other in condition_keys
+            if key.startswith(prefixes) or other.startswith(prefixes)
+        }
+        # Ordinary Event and Condition scopes overlap during a setting
+        # transition. Explicit independent markets have their own budgets.
+        if key == token.event_id:
+            other_keys.update(k for k in event_keys if k.startswith("condition:"))
+        elif key.startswith("condition:") and token.event_id in event_keys:
+            other_keys.add(token.event_id)
+        other_keys.discard(key)
+        if not other_keys:
+            return False
+
+        # The index may retain a key until the next eligibility refresh. Only
+        # its current owner or active intent can block the buy. A reused Event
+        # key might now belong to a different market than the index entry.
+        def overlaps(other_key, token_id):
+            other = self.tokens[token_id]
+            event_overlaps = (key == token.event_id and other_key.startswith("condition:")) or (
+                other_key == token.event_id and key.startswith("condition:")
+            )
+            return other.condition_id == token.condition_id or (
+                event_overlaps and other.event_id == token.event_id
+            )
+
+        for other_key in other_keys:
+            cycle = self.business["cycles"].get(other_key)
+            if cycle and overlaps(other_key, cycle["token_id"]):
+                return True
+            if any(
+                overlaps(other_key, intent["token_id"])
+                for intent in self.active_intents(other_key).values()
+            ):
+                return True
+        return False
+
+    def cycle_buy_allowed(self, token, key):
+        return (
+            self.cycle_id(token) == key
+            and not self.cycle_stopped(token)
+            and not self._cycle_scope_conflicts(token, key)
+        )
 
     def refresh_eligibility(self):
         now = self.now
@@ -272,7 +360,7 @@ class Runtime:
         }
         self.events = {}
         for tid in eligible:
-            self.events.setdefault(self.tokens[tid].event_id, set()).add(tid)
+            self.events.setdefault(self.cycle_id(self.tokens[tid]), set()).add(tid)
         self.monitored = set(eligible)
         for cycle in self.business["cycles"].values():
             self.monitored.add(cycle["token_id"])
@@ -297,9 +385,14 @@ class Runtime:
             self.dirty.update(self.events)
             self.dirty.update(self.business["cycles"])
             self._refresh_control = control
+        self._cycle_scope_keys.clear()
+        for key, cycle in self.business["cycles"].items():
+            self._remember_cycle_scope(self.tokens[cycle["token_id"]], key)
         active = {}
         for oid, intent in self.store.intents(active_only=True).items():
-            active.setdefault(intent["event_id"], []).append(oid)
+            key = intent["event_id"]
+            active.setdefault(key, []).append(oid)
+            self._remember_cycle_scope(self.tokens[intent["token_id"]], key)
         states = {
             eid: (
                 tuple(sorted(active.get(eid, []))),
@@ -326,8 +419,11 @@ class Runtime:
         self._terminal_events.clear()
         self.dirty.update(self._time_sensitive_events & self.events.keys())
 
-    def note_terminal(self, event_id):
+    def note_terminal(self, event_id, token=None):
         self._terminal_events.add(event_id)
+        if token is not None and self._new_cycle_id(token) != event_id:
+            # This release can unlock several groups under the current setting.
+            self._refresh_control = None
 
     def release_unmonitored(self):
         # Called only after obsolete feed tasks have been cancelled and awaited.
@@ -361,7 +457,7 @@ class Runtime:
             return
         self.checkpoint_shadow(token_id, shadow)
         self.native.feed(self.tokens[token_id], b)
-        self.dirty.add(self.tokens[token_id].event_id)
+        self.dirty.add(self.cycle_id(self.tokens[token_id]))
         self.drain()
 
     @staticmethod
@@ -386,7 +482,7 @@ class Runtime:
         for tid in token_ids:
             if tid in self.books:
                 self.books[tid].disconnect()
-                self.dirty.add(self.tokens[tid].event_id)
+                self.dirty.add(self.cycle_id(self.tokens[tid]))
 
     def recover_projection(self):
         # Rebuild missing application effects from committed native events.
@@ -458,13 +554,14 @@ class Runtime:
             return
         tid = intent["token_id"]
         t = self.tokens[tid]
-        # Only this Event can change in a synchronous native projection. Keep an
+        key = intent["event_id"]
+        # Only this cycle can change in a synchronous native projection. Keep an
         # undo snapshot of those rows, rather than copying every historical claim.
-        previous_cycle = deepcopy(self.business["cycles"].get(t.event_id))
+        previous_cycle = deepcopy(self.business["cycles"].get(key))
         previous_targets = {
-            key: deepcopy(value)
-            for key, value in self.business["targets"].items()
-            if value["event_id"] == t.event_id
+            target_id: deepcopy(value)
+            for target_id, value in self.business["targets"].items()
+            if value["event_id"] == key
         }
         previous_claim = deepcopy(self.business["claims"].get(t.condition_id))
         previous_scalars = {
@@ -482,12 +579,12 @@ class Runtime:
             self._project_transaction(seq, event, intent, t)
         except Exception as exc:
             if previous_cycle is None:
-                self.business["cycles"].pop(t.event_id, None)
+                self.business["cycles"].pop(key, None)
             else:
-                self.business["cycles"][t.event_id] = previous_cycle
-            for key in list(self.business["targets"]):
-                if self.business["targets"][key]["event_id"] == t.event_id:
-                    del self.business["targets"][key]
+                self.business["cycles"][key] = previous_cycle
+            for target_id in list(self.business["targets"]):
+                if self.business["targets"][target_id]["event_id"] == key:
+                    del self.business["targets"][target_id]
             self.business["targets"].update(previous_targets)
             if previous_claim is None:
                 self.business["claims"].pop(t.condition_id, None)
@@ -503,6 +600,7 @@ class Runtime:
 
     def _project_transaction(self, seq, event, intent, t):
         was_terminal = intent.get("terminal", False)
+        key = intent["event_id"]
         with self.store.transaction():
             if isinstance(event, OrderFilled):
                 self.apply_fill(event, intent, t)
@@ -519,10 +617,15 @@ class Runtime:
                 )
             self.store.save_intent(event.client_order_id, intent)
             self.business["cursor"] = seq
-            self.release_cycle(t.event_id)
-            self.store.save_business_event(self.business, t.event_id, t.condition_id)
+            self.release_cycle(key)
+            self.store.save_business_event(self.business, key, t.condition_id)
+        if key in self.business["cycles"]:
+            self._cycle_by_token[t.token_id] = key
+            self._remember_cycle_scope(t, key)
+        elif self._cycle_by_token.get(t.token_id) == key:
+            del self._cycle_by_token[t.token_id]
         if intent.get("terminal") and not was_terminal:
-            self.note_terminal(t.event_id)
+            self.note_terminal(key, t)
 
     def apply_fill(self, e, intent, t):
         info = e.info or {}
@@ -540,7 +643,8 @@ class Runtime:
         )
         cycles = self.business["cycles"]
         targets = self.business["targets"]
-        cycle = cycles.get(t.event_id)
+        cycle_key = intent["event_id"]
+        cycle = cycles.get(cycle_key)
         if e.order_side == OrderSide.BUY:
             frozen = info.get("pm_rules", {})
             if cycle is None:
@@ -561,9 +665,9 @@ class Runtime:
                         )
                     ),
                 }
-                cycles[t.event_id] = cycle
+                cycles[cycle_key] = cycle
             if cycle["token_id"] != t.token_id:
-                raise ValueError("同Event出现兄弟成交冲突")
+                raise ValueError("同周期出现兄弟成交冲突")
             cycle["spent"] += amount
             cycle["quantity"] += qty
             cycle["cost"] += amount
@@ -580,14 +684,14 @@ class Runtime:
             key = f"{e.client_order_id}:{e.trade_id}"
             targets[key] = {
                 "id": key,
-                "event_id": t.event_id,
+                "event_id": cycle_key,
                 "token_id": t.token_id,
                 "price": frozen.get("target", target_price(p, t.tick, self.preferences)),
                 "qty": qty,
                 "created": e.ts_event,
             }
         else:
-            if cycle is None or qty > cycle["quantity"]:
+            if cycle is None or cycle["token_id"] != t.token_id or qty > cycle["quantity"]:
                 raise ValueError("卖出超过本程序仓位")
             allocated_cost = (
                 cycle["cost"]
@@ -606,7 +710,7 @@ class Runtime:
             ids = intent.get("targets", list(targets))
             for key in ids:
                 target = targets.get(key)
-                if target is None or target["event_id"] != t.event_id:
+                if target is None or target["event_id"] != cycle_key:
                     continue
                 used = min(remain, target["qty"])
                 target["qty"] -= used
@@ -619,7 +723,7 @@ class Runtime:
             b = self.books[t.token_id]
             (b.ask if e.order_side == OrderSide.BUY else b.bid).consume(p, gross)
             self.store.save_book(t.token_id, b)
-        self.dirty.add(t.event_id)
+        self.dirty.add(cycle_key)
 
     def release_cycle(self, eid):
         cycle = self.business["cycles"].get(eid)
@@ -732,6 +836,7 @@ class Runtime:
             if (
                 not self.market_can_trade(tid)
                 or not b.ready
+                or self.cycle_stopped(t)
                 or static_reason(t, self.preferences, self.now, self.official_tags)
             ):
                 continue
@@ -751,15 +856,24 @@ class Runtime:
             else:
                 # Depth lists are needed only to compute a new preview. The key
                 # above already covers the book revision and TEST consumption.
-                bid = b.bid.available() if self.mode == "TEST" else list(b.bid.external.items())
-                ask = b.ask.available() if self.mode == "TEST" else list(b.ask.external.items())
+                if self.mode == "TEST":
+                    bid = b.bid.available()
+                    ask = b.ask.available()
+                    if self.preferences.buyBestLevelOnly and not b.available_best_ask():
+                        ask = []
+                else:
+                    bid = list(b.bid.external.items())
+                    ask = list(b.ask.external.items())
                 p = preview(t, self.preferences, bid, ask, min(cash, remaining), budget)
                 self._preview_cache[tid] = cache_key, p
             # The single BUY decision point for TEST and LIVE: never plan an
             # order the CLOB would reject for being under its $1 minimum.
             if p and meets_marketable_buy_minimum(p, min(cash, remaining)):
                 opportunities.append(p)
-        winner = arbitrate(opportunities, self.preferences, self.now)
+        scope = self.cycle_id if eid.startswith(("market:", "condition:")) else None
+        winner = arbitrate(opportunities, self.preferences, self.now, cycle_id=scope)
+        if winner and not self.cycle_buy_allowed(winner.token, eid):
+            return
         if winner:
             status = "READY"
             # Only the lifecycle part of the rank changes without new quotes.
@@ -834,6 +948,9 @@ class Runtime:
             return None
         if (kind != "SETTLEMENT" or side != "SELL") and not self.market_can_trade(t.token_id):
             return None
+        cycle_key = self.cycle_id(t)
+        if side == "BUY" and self._cycle_scope_conflicts(t, cycle_key):
+            return None
         terms = None
         if side == "SELL" and kind != "SETTLEMENT":
             try:
@@ -849,7 +966,9 @@ class Runtime:
             kind = "BUY"
         oid = ClientOrderId(f"PM-{self.mode}-{uuid4().hex}")
         intent = {
-            "event_id": t.event_id,
+            # Keep the existing indexed column as the persisted cycle identity.
+            # Original Gamma identities live on the token metadata.
+            "event_id": cycle_key,
             "token_id": t.token_id,
             "side": side,
             "cash": cash,
@@ -883,6 +1002,7 @@ class Runtime:
                 client_order_id=oid,
             )
         self.store.save_intent(oid, intent)
+        self._remember_cycle_scope(t, cycle_key)
         self.store.journal(order.init_event)
         self.strategy.submit_order(order)
         return str(oid)
@@ -974,7 +1094,7 @@ class Runtime:
         if self.mode == "TEST" and new.budget > initial:
             raise ValueError("每轮金额不得超过总模拟资金")
         with self.store.transaction():
-            self.store.put("preferences", new.model_dump(mode="json"))
+            self.store.put("preferences", new.storage())
             if self.mode == "TEST":
                 self.store.put("initial_capital", initial)
         self.preferences = new

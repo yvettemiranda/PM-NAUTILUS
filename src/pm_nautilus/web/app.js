@@ -479,7 +479,7 @@ function renderLiveWallet() {
   approve.disabled = approvalAction.disabled;
   approve.textContent = approvalAction.label;
   $("#wallet-rules-summary").textContent = ui.preferences
-    ? `每 Event 每轮 ${formatMoney(ui.preferences.orderAmount)} · 主动止损${ui.preferences.stopLossEnabled ? "开启" : "关闭"}`
+    ? `${budgetScopeLabel(ui.preferences.cyclePerMarket)}每轮 ${formatMoney(ui.preferences.orderAmount)} · 主动止损${ui.preferences.stopLossEnabled ? "开启" : "关闭"}`
     : "正在读取交易规则…";
   const ready = wallet?.readiness?.ready === true && status === "READY" && Boolean(ui.dashboard && ui.preferences);
   $("#wallet-confirm-rules").disabled = !secure || !ready || ui.walletPending || ui.configDirty;
@@ -1135,7 +1135,8 @@ function renderCandidates() {
           const sellLabel = isReady ? "可卖" : "参考卖价";
           const selectedTitle = candidate.marketQuestion && candidate.marketQuestion !== (event.eventTitle || candidate.eventTitle)
             ? `<span class="selected-outcome">${escapeHtml(candidate.marketQuestion)}</span>` : "";
-          return `<details class="market-row event-row${isReady ? "" : " is-stale"}" data-event="${escapeHtml(event.eventId || event.eventTitle || "")}" ${openIds.has(String(event.eventId || event.eventTitle || "")) ? "open" : ""}>
+          const rowId = String(event.cycleId || event.eventId || event.eventTitle || "");
+          return `<details class="market-row event-row${isReady ? "" : " is-stale"}" data-event="${escapeHtml(rowId)}" ${openIds.has(rowId) ? "open" : ""}>
             <summary class="market-summary"><div class="market-copy"><span class="position-title">${eventTitle}</span>${selectedTitle}<span class="position-sub"><span class="direction-label">${escapeHtml(candidate.direction || "待定")}</span><span class="event-status event-status-${escapeHtml(String(event.status).toLowerCase())}">${escapeHtml(statusText)}</span></span></div>
               <div class="market-summary-prices"><span>${buyLabel}<strong>${formatCents(candidate.executableBuyPrice)}</strong></span><span>${sellLabel}<strong>${formatCents(candidate.bestBid)}</strong></span></div>
             </summary>
@@ -1260,11 +1261,24 @@ function renderStopLossControl() {
   );
 }
 
+function budgetScopeLabel(cyclePerMarket) {
+  return cyclePerMarket === true ? "每市场" : "每事件";
+}
+
+function renderBudgetScope() {
+  $("#order-amount-label").textContent = `${budgetScopeLabel($("#cycle-per-market").checked)}本轮预算`;
+}
+
 function renderPreferences(preferences, strategy, force = false) {
   if (ui.configDirty && !force) return;
   $("#binary-market").checked = preferences.marketTypes.includes("BINARY");
   $("#ternary-market").checked = preferences.marketTypes.includes("TERNARY");
   $("#multi-market").checked = preferences.marketTypes.includes("MULTI");
+  $("#include-independent-multi-markets").checked = preferences.includeIndependentMultiMarkets === true;
+  $("#include-augmented-neg-risk").checked = preferences.includeAugmentedNegRisk === true;
+  $("#cycle-per-market").checked = preferences.cyclePerMarket === true;
+  $("#buy-best-level-only").checked = preferences.buyBestLevelOnly === true;
+  renderBudgetScope();
   $("#min-buy-price").value = String(preferences.minBuyPriceCents);
   $("#max-buy-price").value = String(preferences.maxBuyPriceCents);
   $("#target-sell-increase").value = String(preferences.targetSellPriceIncreaseCents);
@@ -1420,6 +1434,8 @@ function collectConfigPayload() {
   const maxMarketDurationDays = Number($("#max-market-duration").value);
   const initialCapital = Number($("#initial-capital").value);
   const orderAmount = Number($("#order-amount").value);
+  const cyclePerMarket = $("#cycle-per-market").checked;
+  const budgetScope = budgetScopeLabel(cyclePerMarket);
   const minBidAskRatioPercent = Number($("#bid-ask-ratio").value);
   const maxMarketProgressPercent = Number($("#market-progress-filter").value);
   if (!isTenthCent(minBuyPriceCents) || minBuyPriceCents < 0.1 || minBuyPriceCents > 99) {
@@ -1450,8 +1466,8 @@ function collectConfigPayload() {
     throw new Error("最短市场总时长不能超过最长市场总时长");
   }
   if (ui.displayMode === "TEST" && (!Number.isFinite(initialCapital) || initialCapital <= 0)) throw new Error("总模拟资金必须大于0");
-  if (!Number.isFinite(orderAmount) || orderAmount <= 0) throw new Error("每 Event 每轮金额必须大于0");
-  if (ui.displayMode === "TEST" && orderAmount > initialCapital) throw new Error("每 Event 每轮金额不能超过总模拟资金");
+  if (!Number.isFinite(orderAmount) || orderAmount <= 0) throw new Error(`${budgetScope}每轮金额必须大于0`);
+  if (ui.displayMode === "TEST" && orderAmount > initialCapital) throw new Error(`${budgetScope}每轮金额不能超过总模拟资金`);
   if (!Number.isInteger(minBidAskRatioPercent) || minBidAskRatioPercent < 1 || minBidAskRatioPercent > 100) {
     throw new Error("最低买卖盘比例必须是1至100之间的整数");
   }
@@ -1476,6 +1492,10 @@ function collectConfigPayload() {
     maxMarketProgressPercent,
     ...(ui.displayMode === "TEST" ? { initialCapital } : {}),
     orderAmount,
+    includeIndependentMultiMarkets: $("#include-independent-multi-markets").checked,
+    includeAugmentedNegRisk: $("#include-augmented-neg-risk").checked,
+    cyclePerMarket,
+    buyBestLevelOnly: $("#buy-best-level-only").checked,
   };
 }
 
@@ -1496,6 +1516,10 @@ function savedPreferencePayload(overrides = {}) {
     minBidAskRatioPercent: ui.preferences.minBidAskRatioPercent,
     maxMarketProgressPercent: ui.preferences.maxMarketProgressPercent,
     orderAmount: Number(ui.preferences.orderAmount),
+    includeIndependentMultiMarkets: ui.preferences.includeIndependentMultiMarkets === true,
+    includeAugmentedNegRisk: ui.preferences.includeAugmentedNegRisk === true,
+    cyclePerMarket: ui.preferences.cyclePerMarket === true,
+    buyBestLevelOnly: ui.preferences.buyBestLevelOnly === true,
     ...overrides,
   };
 }
@@ -1521,6 +1545,7 @@ $("#config-form").addEventListener("input", () => {
 });
 
 $("#stop-loss-enabled").addEventListener("change", renderStopLossControl);
+$("#cycle-per-market").addEventListener("change", renderBudgetScope);
 
 $("#target-sell-formula").addEventListener("keydown", (event) => {
   const formula = event.currentTarget;

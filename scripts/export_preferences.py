@@ -52,9 +52,7 @@ def export_preferences(db_path: Path, mode: str) -> str:
     if set(rows) != {"mode", "preferences"} or _read_json(rows["mode"]) != mode:
         raise ValueError("missing preferences or mismatched mode")
     saved = _read_json(rows["preferences"])
-    if not isinstance(saved, dict) or set(saved) != set(Preferences.model_fields):
-        raise ValueError("preferences fields differ from the current schema")
-    validated = Preferences(**saved).model_dump(mode="json")
+    validated = Preferences.from_profile(saved).model_dump(mode="json")
     return json.dumps(validated, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
 

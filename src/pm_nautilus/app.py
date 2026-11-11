@@ -1603,7 +1603,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                     await services[mode].sync_subscriptions()
             else:
                 prefs = Preferences(**(cold[mode].get("preferences") | payload))
-                cold[mode].put("preferences", prefs.model_dump(mode="json"))
+                cold[mode].put("preferences", prefs.storage())
             return view(mode) | {"cancelledBuyCount": count}
 
         if mode == "LIVE":

@@ -905,21 +905,22 @@ class RedemptionService:
 
     def identify(self, token, payouts):
         r = self.r
-        cycle = r.business["cycles"].get(token.event_id)
+        cycle_key = r.cycle_id(token)
+        cycle = r.business["cycles"].get(cycle_key)
         if (
             not cycle
             or cycle["token_id"] != token.token_id
             or token.condition_id in r.business["claims"]
         ):
             return
-        if r.active_intents(token.event_id):
-            r.cancel_buys(token.event_id)
+        if r.active_intents(cycle_key):
+            r.cancel_buys(cycle_key)
             return  # No redemption can race outstanding venue inventory changes.
         claim = {
             "condition_id": token.condition_id,
             "market_id": token.market_id,
             "token_id": token.token_id,
-            "event_id": token.event_id,
+            "event_id": cycle_key,
             "neg_risk": token.neg_risk,
             "rights": {token.token_id: cycle["quantity"]},
             "payouts": payouts,
@@ -936,7 +937,7 @@ class RedemptionService:
                 r.business["claims"][token.condition_id] = claim
                 r.business["settled"].append(token.condition_id)
                 r.business["targets"] = {
-                    k: v for k, v in targets.items() if v["event_id"] != token.event_id
+                    k: v for k, v in targets.items() if v["event_id"] != cycle_key
                 }
                 r.store.put("business", r.business)
         except BaseException:

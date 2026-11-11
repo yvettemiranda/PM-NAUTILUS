@@ -1,12 +1,20 @@
 """One validated configuration shared by TEST, LIVE and the original UI."""
 
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Literal
+from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SCALE = 1_000_000
 SAFE_INTEGER = 9_007_199_254_740_991
+OPTIONAL_PROFILE_FIELDS = frozenset(
+    {
+        "includeIndependentMultiMarkets",
+        "includeAugmentedNegRisk",
+        "cyclePerMarket",
+        "buyBestLevelOnly",
+    }
+)
 
 
 def micros(value: object) -> int:
@@ -40,6 +48,10 @@ class Preferences(BaseModel):
     maxMarketDurationDays: int = Field(30, ge=1, le=365, strict=True)
     maxMarketProgressPercent: int = Field(20, ge=1, le=100, strict=True)
     orderAmount: Decimal = Decimal("1")
+    includeIndependentMultiMarkets: bool = Field(False, strict=True)
+    includeAugmentedNegRisk: bool = Field(False, strict=True)
+    cyclePerMarket: bool = Field(False, strict=True)
+    buyBestLevelOnly: bool = Field(False, strict=True)
 
     @model_validator(mode="after")
     def check(self):
@@ -87,6 +99,22 @@ class Preferences(BaseModel):
     @property
     def multiplier(self):
         return micros(self.targetSellPriceMultiplier)
+
+    @classmethod
+    def from_profile(cls, data: object) -> Self:
+        """Validate a complete public profile, including profiles from older ledgers."""
+        if not isinstance(data, dict):
+            raise ValueError("strategy profile must be a JSON object")
+        fields = cls.model_fields.keys()
+        required_fields = fields - OPTIONAL_PROFILE_FIELDS
+        if not required_fields <= data.keys() <= fields:
+            raise ValueError("strategy profile has missing or unexpected Preferences fields")
+        return cls.model_validate(data)
+
+    def storage(self) -> dict:
+        """Keep disabled additions out of legacy-compatible ledger preferences."""
+        disabled = {name for name in OPTIONAL_PROFILE_FIELDS if not getattr(self, name)}
+        return self.model_dump(mode="json", exclude=disabled)
 
     def public(self):
         out = self.model_dump(mode="json")

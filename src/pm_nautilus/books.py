@@ -70,6 +70,19 @@ class Book:
     timestamp: int = 0
     revision: int = 0
 
+    def best_ask_price(self) -> int | None:
+        return min(
+            (price for price, quantity in self.ask.external.items() if quantity), default=None
+        )
+
+    def available_best_ask(self) -> list[Level]:
+        """Available TEST quantity at the public best Ask."""
+        price = self.best_ask_price()
+        if price is None:
+            return []
+        quantity = self.ask.external[price] - self.ask.consumed.get(price, 0)
+        return [(price, quantity)] if quantity > 0 else []
+
     def snapshot(self, bids: list[Level], asks: list[Level], timestamp: int):
         # A reconnect snapshot establishes a new stream baseline. Venue snapshot
         # clocks can lag the old stream's delta clock (observed by 1 ms).

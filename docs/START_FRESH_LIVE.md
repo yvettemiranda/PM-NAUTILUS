@@ -45,7 +45,7 @@ GitHub 有程序、说明和你同意公开的 `config/strategy-profile.json`。
 <details>
 <summary>给协助安装者：空白账本的公开规则导入</summary>
 
-先确认目标提交、服务器、HTTPS、`config/strategy-profile.json` 的 15 个规则字段及用户意愿。按[部署手册第 3 节](DEPLOY.md)的三条命令，在**第一次启动应用前**初始化并将确认过的文件导入空白 TEST 1／LIVE，脚本会拒绝用过的账本。首次启动由 TEST 1 建立 2—10 号空白账户，已有账户不会被重写；随后在已认证网页分别读回各 TEST 及 LIVE 规则，不能假设 TEST 的修改自动同步到 LIVE。
+先确认目标提交、服务器、HTTPS 和 `config/strategy-profile.json` 中的规则。历史规则文件缺少四个新增开关时，取默认值 `false`。按[部署手册第 3 节](DEPLOY.md)的三条命令，在**第一次启动应用前**将确认过的文件导入空白 TEST 1／LIVE。脚本会拒绝用过的账本。首次启动由 TEST 1 建立 2—10 号空白账户，随后在已认证网页分别读回各 TEST 及 LIVE 规则。
 
 钱包文件位于持久数据卷的 `/data/wallet/live.vault`，应为只有应用账户可读写的 `0600` 文件。服务器端签名需要在解锁后持有密钥；严禁把数据卷、明文秘密或备份加入 Git。启用前必须从实际交易出口检查地理限制、完整账户挂单和持仓、LIVE 账本归属与余额授权。`LIVE / PAUSED` 不是只读核对的替代品，因为已有仓位的维护仍可能运行。
 

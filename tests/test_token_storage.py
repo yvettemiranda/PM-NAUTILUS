@@ -64,6 +64,13 @@ def test_codec_v1_dictionary_and_existing_fixture_are_frozen():
         "t", "e", "m", "c", "YES", 2, False, 0, 864_000_000_000_000, Fees(False), 1_000_000, 1000
     )
     assert Store.decode_token_payload(encoded) == canonical(expected)
+    assert Store.encode_token_payload(canonical(expected)) == encoded
+
+
+@pytest.mark.parametrize("marker", ["independent_market", "augmented_neg_risk"])
+def test_market_scope_marker_survives_storage_round_trip(marker):
+    expected = canonical(token(**{marker: True}))
+    assert Store.decode_token_payload(Store.encode_token_payload(expected)) == expected
 
 
 @pytest.mark.parametrize("open", [False, True])

@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from fractions import Fraction
 from functools import lru_cache
-from typing import Literal
+from typing import Callable, Literal
 
 from .config import SCALE, Preferences
 from .order_terms import (
@@ -127,13 +127,20 @@ class Token:
     category_labels: tuple[str, ...] = ()
     game_start_ns: int | None = None
     open: bool = True
+    independent_market: bool = False
+    augmented_neg_risk: bool = False
 
     def progress(self, now: int) -> Fraction:
         return Fraction((now - self.opened_ns) * 100, self.ends_ns - self.opened_ns)
 
 
 def static_reason(t: Token, c: Preferences, now: int, official_tags: set[str]) -> str | None:
-    if not t.open or not t.condition_id:
+    if (
+        not t.open
+        or not t.condition_id
+        or (t.independent_market and not c.includeIndependentMultiMarkets)
+        or (t.augmented_neg_risk and not c.includeAugmentedNegRisk)
+    ):
         return "CLOSED"
     kind = "BINARY" if t.result_count == 2 else "TERNARY" if t.result_count == 3 else "MULTI"
     if t.result_count < 2 or kind not in c.marketTypes:
@@ -200,6 +207,13 @@ def plan_buy(
     config: Preferences,
     quote_budget: int | None = None,
 ) -> list[Fill]:
+    if config.buyBestLevelOnly:
+        best = min((p for p, q in asks if 0 < p <= limit and q > 0), default=0)
+        if not best:
+            return []
+        if best < limit and quote_budget is not None:
+            quote_budget = min(quote_budget, signed_buy_notional(budget, fees, tick, best))
+        limit = best
     if quote_budget is None:
         quote_budget = signed_buy_notional(budget, fees, tick, limit)
     levels = sorted((p, q) for p, q in asks if 0 < p <= limit and q > 0)
@@ -347,10 +361,9 @@ def preview(
         return None
     if t.tick not in SUPPORTED_CLOB_TICKS:
         return None
-    preliminary_quote = signed_buy_notional(available, t.fees, t.tick, c.max_price)
-    preliminary = plan_buy(
-        asks, available, c.max_price, t.min_size, t.fees, t.tick, c, preliminary_quote
-    )
+    limit = min(p for p, q in asks if q) if c.buyBestLevelOnly else c.max_price
+    preliminary_quote = signed_buy_notional(available, t.fees, t.tick, limit)
+    preliminary = plan_buy(asks, available, limit, t.min_size, t.fees, t.tick, c, preliminary_quote)
     if not preliminary:
         return None
     signed_limit = max(f.price for f in preliminary)
@@ -387,11 +400,18 @@ def meets_marketable_buy_minimum(p: Preview, cash: int) -> bool:
     return notional >= MIN_MARKETABLE_BUY_NOTIONAL
 
 
-def arbitrate(previews: list[Preview], c: Preferences, now: int) -> Preview | None:
+def arbitrate(
+    previews: list[Preview],
+    c: Preferences,
+    now: int,
+    *,
+    cycle_id: Callable[[Token], str] | None = None,
+) -> Preview | None:
     if not previews:
         return None
-    if len({p.token.event_id for p in previews}) != 1:
-        raise ValueError("仲裁必须属于同一Event")
+    keys = {p.token.event_id if cycle_id is None else cycle_id(p.token) for p in previews}
+    if len(keys) != 1:
+        raise ValueError("仲裁必须属于同一Event" if cycle_id is None else "仲裁必须属于同一周期")
     return min(previews, key=lambda p: p.rank(c, now))
 
 

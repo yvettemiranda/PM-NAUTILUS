@@ -796,11 +796,17 @@ class LiveExecution(PolymarketExecutionClient):
         task.add_done_callback(done)
 
     def _check_buy_plan_current(self, i):
-        """Keep useful partial/better FAKs; skip a currently empty signed price."""
+        """Revalidate the signed limit against current executable asks."""
         r = self.owner
         book = r.books[i["token_id"]]
         limit = i.get("outbound_terms", {}).get("limit", i.get("execution_limit", i["limit"]))
-        if book.ready and not any(0 < p <= limit and q > 0 for p, q in book.ask.external.items()):
+        if not book.ready:
+            return
+        if r.preferences.buyBestLevelOnly:
+            if book.best_ask_price() != limit:
+                raise _StaleBuyPlan("最优卖价已变化")
+            return
+        if not any(0 < p <= limit and q > 0 for p, q in book.ask.external.items()):
             # New strategy evaluation, not an in-place change to signed terms,
             # decides whether the new price still meets every original rule.
             raise _StaleBuyPlan("签名买价内已无可执行卖盘")
@@ -808,14 +814,15 @@ class LiveExecution(PolymarketExecutionClient):
     def buy_valid(self, o, i):
         r = self.owner
         t = r.tokens[i["token_id"]]
-        cycle = r.business["cycles"].get(t.event_id)
+        cycle_key = i["event_id"]
+        cycle = r.business["cycles"].get(cycle_key)
         basic = (
             r.status == "RUNNING"
             and getattr(r, "storage_can_open", True)
             and getattr(r, "market_can_trade", lambda _: True)(t.token_id)
             and r.books[t.token_id].ready
             and static_reason(t, r.preferences, r.now, r.official_tags) is None
-            and t.event_id not in r.business["banned"]
+            and r.cycle_buy_allowed(t, cycle_key)
             and r.cash() >= r.held_cash()
             and (
                 not cycle
@@ -831,7 +838,7 @@ class LiveExecution(PolymarketExecutionClient):
         )
         if not basic or i["limit"] != r.preferences.max_price or i["fees"] != asdict(t.fees):
             return False
-        ids = {t.token_id} if cycle else r.events.get(t.event_id, set())
+        ids = {t.token_id} if cycle else r.events.get(cycle_key, set())
         ids = {tid for tid in ids if getattr(r, "market_can_trade", lambda _: True)(tid)}
         if not ids or any(not r.books[tid].ready for tid in ids):
             return False
@@ -839,7 +846,9 @@ class LiveExecution(PolymarketExecutionClient):
         for tid in ids:
             token = r.tokens[tid]
             book = r.books[tid]
-            if static_reason(token, r.preferences, r.now, r.official_tags):
+            if r.cycle_stopped(token) or static_reason(
+                token, r.preferences, r.now, r.official_tags
+            ):
                 continue
             p = preview(
                 token,
@@ -853,7 +862,8 @@ class LiveExecution(PolymarketExecutionClient):
             # never buy (under the CLOB $1 BUY floor) cannot outrank this order.
             if p and (tid == t.token_id or meets_marketable_buy_minimum(p, i["cash"])):
                 opportunities.append(p)
-        winner = arbitrate(opportunities, r.preferences, r.now)
+        scope = r.cycle_id if cycle_key.startswith(("market:", "condition:")) else None
+        winner = arbitrate(opportunities, r.preferences, r.now, cycle_id=scope)
         return bool(winner and winner.token.token_id == t.token_id)
 
     def deny(self, o, reason):
@@ -1162,7 +1172,7 @@ class LiveExecution(PolymarketExecutionClient):
             if current.limit != terms["limit"]:
                 raise ValueError("提交前卖出价格已变化")
             check_signed_sell(signed, current)
-            cycle = r.business["cycles"].get(token.event_id)
+            cycle = r.business["cycles"].get(i.get("event_id", token.event_id))
             if (
                 not cycle
                 or cycle["token_id"] != token.token_id
@@ -1417,7 +1427,7 @@ class LiveExecution(PolymarketExecutionClient):
                     r.store.save_intent(oid, i)
                     r.release_cycle(i["event_id"])
                     r.store.put("business", r.business)
-                r.note_terminal(i["event_id"])
+                r.note_terminal(i["event_id"], r.tokens[i["token_id"]])
 
     async def generate_order_status_reports(self, command):
         await self.sync_owned()

@@ -51,11 +51,9 @@ def _read_json(raw):
 
 
 def load_profile(path: Path) -> dict:
-    """Reject metadata, credentials and partial or malformed strategy profiles."""
+    """Require a complete strategy profile, with defaults for later additions."""
     data = _read_json(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict) or set(data) != set(Preferences.model_fields):
-        raise ValueError("strategy profile must contain exactly the Preferences fields")
-    return Preferences.model_validate(data).model_dump(mode="json")
+    return Preferences.from_profile(data).storage()
 
 
 def _check_fresh(connection: sqlite3.Connection, schema: str, mode: str) -> None:
@@ -87,11 +85,7 @@ def _check_fresh(connection: sqlite3.Connection, schema: str, mode: str) -> None
     if decoded["business"] != _EMPTY_BUSINESS:
         raise ValueError(f"{mode} database has business activity")
     saved = decoded["preferences"]
-    if not isinstance(saved, dict) or set(saved) != set(Preferences.model_fields):
-        raise ValueError(f"{mode} database has unexpected preferences")
-    if Preferences.model_validate(saved).model_dump(mode="json") != Preferences().model_dump(
-        mode="json"
-    ):
+    if Preferences.from_profile(saved).storage() != Preferences().storage():
         raise ValueError(f"{mode} database preferences were already edited")
 
 
@@ -138,7 +132,7 @@ def apply_preferences(data_dir: Path, profile_path: Path) -> None:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", required=True, type=Path, help="Stopped app data directory")
-    parser.add_argument("--profile", required=True, type=Path, help="Public 15-field JSON profile")
+    parser.add_argument("--profile", required=True, type=Path, help="Public strategy JSON profile")
     args = parser.parse_args(argv)
     try:
         apply_preferences(args.data_dir, args.profile)

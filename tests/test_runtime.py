@@ -1,3 +1,4 @@
+import pytest
 from nautilus_trader.common.component import TestClock
 from pm_nautilus.strategy import Runtime
 from pm_nautilus.rules import Token, Fees
@@ -124,6 +125,28 @@ def setup(tmp_path, fees=False):
     )
     r.add_tokens([t])
     return r, clock, t
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_test_buy_best_level_does_not_treat_consumed_depth_as_new_ask(tmp_path, enabled):
+    r, _, _ = setup(tmp_path)
+    try:
+        r.update_preferences({"buyBestLevelOnly": enabled, "maxBuyPriceCents": 3, "orderAmount": 2})
+        bids = [(15_000, 100_000_000)]
+        asks = [(20_000, 10_000_000), (30_000, 100_000_000)]
+        r.book("1", bids, asks)
+        r.start()
+        r.book("1", bids, asks)
+        r.drain()
+        consumed = r.books["1"].ask.consumed
+        assert consumed[20_000] == 10_000_000
+        assert (30_000 in consumed) is not enabled
+        assert r.business["cycles"]["event"]["quantity"] == sum(consumed.values())
+        buy = next(i for i in r.store.intents().values() if i["side"] == "BUY")
+        assert buy["execution_limit"] == (20_000 if enabled else 30_000)
+        assert r.validate()["ok"]
+    finally:
+        r.close()
 
 
 def test_native_buy_target_sell_and_recovery(tmp_path):

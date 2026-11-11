@@ -335,6 +335,7 @@ def test_failed_resolution_identification_restores_targets_and_retries_without_d
     owner = SimpleNamespace(
         store=store,
         business=business,
+        cycle_id=lambda token: token.event_id,
         active_intents=Mock(return_value={}),
         cancel_buys=Mock(),
         refresh_eligibility=Mock(),

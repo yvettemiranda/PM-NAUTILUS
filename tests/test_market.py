@@ -6,7 +6,7 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
-from pm_nautilus.market import normalize, resolution, MarketService
+from pm_nautilus.market import normalize, resolution, MarketService, PublicMarketHub
 from test_runtime import setup
 from websockets.exceptions import ConnectionClosedError
 
@@ -50,6 +50,124 @@ def category_response(req):
     if req.url.path == "/tags/slug/art":
         return httpx.Response(200, json={"id": "1422", "slug": "art", "label": "Art"})
     return None
+
+
+def market_option(i, **changes):
+    return (
+        event(i)["markets"][0]
+        | {
+            "conditionId": "0x" + f"{i:064x}",
+            "clobTokenIds": [str(2 * i), str(2 * i + 1)],
+        }
+        | changes
+    )
+
+
+def test_independent_multi_market_discovery_is_opt_in_and_keeps_venue_ids():
+    payload = event(10)
+    payload["markets"] = [
+        market_option(11),
+        market_option(12),
+        market_option(13, version="v2"),
+        market_option(14, id=None),
+    ]
+    assert normalize(payload) == []
+    assert normalize(payload, include_augmented=True) == []
+    tokens = normalize(payload, include_independent=True)
+    assert [(t.event_id, t.market_id, t.result_count) for t in tokens] == [
+        ("10", "11", 2),
+        ("10", "11", 2),
+        ("10", "12", 2),
+        ("10", "12", 2),
+    ]
+    assert len({t.condition_id for t in tokens}) == 2
+    assert all(t.independent_market and not t.neg_risk for t in tokens)
+
+
+def test_augmented_neg_risk_admits_only_named_options_when_enabled():
+    payload = event(20)
+    payload.update(
+        negRisk=True,
+        negRiskAugmented=True,
+        markets=[
+            market_option(21, groupItemTitle="Named candidate"),
+            market_option(22, question="Will another named candidate win?"),
+            market_option(23, negRiskOther=True, groupItemTitle="Other"),
+            market_option(24, groupItemTitle="Placeholder 1", question="Will option 1 win?"),
+            market_option(25, title=" — ", question="  "),
+            market_option(26, question="Will Placeholder 2 win?"),
+            market_option(27, groupItemTitle="Closed", closed=True),
+            market_option(28, groupItemTitle="Person A", question="Will Person A win?"),
+            market_option(29, question="Will Person B win?"),
+        ],
+    )
+    assert normalize(payload) == []
+    assert normalize(payload, include_independent=True) == []
+    tokens = normalize(payload, include_augmented=True)
+    assert [t.market_id for t in tokens] == ["21", "21", "22", "22"]
+    assert all(t.augmented_neg_risk and t.neg_risk and t.result_count == 9 for t in tokens)
+    payload["enableNegRisk"] = True
+    del payload["negRisk"]
+    assert normalize(payload, include_augmented=True) == tokens
+    payload["negRisk"] = False
+    assert normalize(payload, include_independent=True, include_augmented=True) == []
+
+
+def test_shared_discovery_market_scopes_are_independent_and_reuse_pages(tmp_path):
+    independent = event(10) | {"markets": [market_option(11), market_option(12)]}
+    augmented = event(20) | {
+        "negRisk": True,
+        "negRiskAugmented": True,
+        "markets": [
+            market_option(21, question="Will the named candidate win?"),
+            market_option(22, negRiskOther=True),
+        ],
+    }
+    page_count = 0
+
+    def handler(req):
+        nonlocal page_count
+        category = category_response(req)
+        if category is not None:
+            return category
+        assert req.url.path == "/events/keyset"
+        page_count += 1
+        return httpx.Response(
+            200, json={"events": [event(), independent, augmented], "next_cursor": None}
+        )
+
+    def open_markets(runtime):
+        return {t.market_id for t in runtime.tokens.values() if t.open}
+
+    async def run():
+        first, _, _ = setup(tmp_path / "a")
+        second, _, _ = setup(tmp_path / "b")
+        hub = PublicMarketHub(httpx.MockTransport(handler))
+        hub.sync_subscriptions = lambda: asyncio.sleep(0)
+        one, two = MarketService(first, hub=hub), MarketService(second, hub=hub)
+        try:
+            await asyncio.gather(one.scan(), two.scan())
+            assert page_count == 1
+            assert open_markets(first) == open_markets(second) == {"1"}
+            first.update_preferences({"includeIndependentMultiMarkets": True})
+            second.update_preferences({"includeAugmentedNegRisk": True})
+            await asyncio.gather(one.scan(), two.scan())
+            assert page_count == 2
+            assert open_markets(first) == {"1", "11", "12"}
+            assert open_markets(second) == {"1", "21"}
+            first.update_preferences({"includeIndependentMultiMarkets": False})
+            await one.scan()
+            assert page_count == 2
+            assert open_markets(first) == {"1"}
+            assert open_markets(second) == {"1", "21"}
+        finally:
+            await one.close()
+            await two.close()
+            await hub.close()
+            first.close()
+            second.close()
+
+    asyncio.run(run())
 
 
 def test_metadata_complete_n_and_final_resolution():

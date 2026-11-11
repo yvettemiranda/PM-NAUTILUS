@@ -166,25 +166,60 @@ def test_old_two_cent_buy_is_unsent_and_full_strategy_reconsiders_promptly(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("asks", [[(10_000, 100_000_000)], [(20_000, 1_000_000)]])
-def test_better_quote_or_useful_partial_depth_keeps_original_signed_fak(tmp_path, asks):
+@pytest.mark.parametrize("stage", ["account", "pool"])
+@pytest.mark.parametrize(
+    ("best_level_only", "asks", "keep_signed_order"),
+    [
+        (False, [(10_000, 100_000_000)], True),
+        (False, [(10_000, 5_000_000), (20_000, 100_000_000)], True),
+        (True, [(10_000, 5_000_000), (20_000, 100_000_000)], False),
+        (False, [(20_000, 1_000_000)], True),
+        (True, [(20_000, 1_000_000)], True),
+    ],
+)
+def test_signed_fak_respects_best_level_only_after_book_change(
+    tmp_path, stage, best_level_only, asks, keep_signed_order
+):
     async def run():
         async with controlled_runtime(tmp_path / "useful.sqlite") as runtime:
+            runtime.preferences.buyBestLevelOnly = best_level_only
             oid, order, retry = await two_cent_order(runtime)
             client = runtime.client
 
-            async def account(_token):
-                change_book(runtime, asks)
-                return True
+            if stage == "account":
 
-            client._check_buy_account.side_effect = account
+                async def account(_token):
+                    change_book(runtime, asks)
+                    return True
+
+                client._check_buy_account.side_effect = account
+            else:
+
+                async def acquire():
+                    change_book(runtime, asks)
+                    return retry
+
+                client._retry_manager_pool.inner.acquire.side_effect = acquire
+
             await client._submit_order(
                 SimpleNamespace(order=order, instrument_id=order.instrument_id)
             )
             await flush()
-            retry.run.assert_awaited_once()
+            if keep_signed_order:
+                retry.run.assert_awaited_once()
+            else:
+                retry.run.assert_not_awaited()
+                await asyncio.gather(*list(client._stale_buy_refresh_tasks.values()))
+                await flush()
+                assert runtime.store.intent(oid)["terminal"]
+                assert runtime.status == "RUNNING"
+                client._followup_submit.assert_awaited_once()
+                active = runtime.store.intents(active_only=True)
+                assert len(active) == 1 and oid not in active
+                assert next(iter(active.values()))["execution_limit"] == 10_000
             client._prepare_buy_signature.assert_awaited_once()
             assert runtime.store.intent(oid)["outbound_terms"]["limit"] == 20_000
+            client._http_client.post_order.assert_not_called()
             assert not runtime._test_queue_errors
 
     asyncio.run(run())

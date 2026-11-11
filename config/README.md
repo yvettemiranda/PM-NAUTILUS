@@ -14,4 +14,4 @@
 uv run --frozen python scripts/export_preferences.py --db runtime/server/TEST/state.sqlite --mode TEST
 ```
 
-先核对输出只有 `Preferences` 的 15 项，再替换本文件旁的 JSON、运行测试并提交推送 GitHub。如要导出 2—10 号，应明确提供该账户自己的数据库路径；不要把某个账户的导出当作全部十组参数。也可以选择 LIVE 模式导出，但应先确认所选模式正是要留给未来的规则。不要把整个数据库、网页完整面板或凭据文件提交到仓库。
+当前导出包含 `Preferences` 的 19 项设置。历史 15 项文件仍可导入，缺少的四个开关取默认值 `false`。核对输出后再替换本文件旁的 JSON、运行测试并提交推送 GitHub。导出 2—10 号时，明确提供该账户自己的数据库路径。导出 LIVE 时，先确认所选模式正是要留给未来的规则。见 [可选策略与账本分析](../docs/STRATEGY_PREFERENCES.md)。

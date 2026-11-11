@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import Preferences
+from .config import OPTIONAL_PROFILE_FIELDS, Preferences
 from .store import Store
 
 
@@ -81,8 +81,11 @@ class TestAccounts:
         # An interrupted first creation contains only defaults. Any financial
         # evidence or customized configuration is existing account data, even if
         # an external copy omitted intents or our initialization marker.
+        saved = store.get("preferences")
+        defaults = Preferences().model_dump(mode="json")
         if (
-            store.get("preferences") != Preferences().model_dump(mode="json")
+            not isinstance(saved, dict)
+            or (dict.fromkeys(OPTIONAL_PROFILE_FIELDS, False) | saved) != defaults
             or store.get("initial_capital") != 100_000_000
             or store.get("business") != Store.empty_business()
         ):

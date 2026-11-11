@@ -75,6 +75,9 @@ def _canonical_token_data(data):
     if type(token.open) is not bool:
         raise ValueError("代币开放状态无效")
     result = asdict(token)
+    for key in ("independent_market", "augmented_neg_risk"):
+        if type(result[key]) is not bool:
+            raise ValueError("代币市场范围标记无效")
     for key in ("category_ids", "category_labels"):
         result[key] = list(result[key])
     return result
@@ -146,7 +149,7 @@ class Store:
                 with self.transaction():
                     self.put("mode", mode)
                     self.put("generation", str(uuid4()))
-                    self.put("preferences", Preferences().model_dump(mode="json"))
+                    self.put("preferences", Preferences().storage())
                     self.put("initial_capital", 100_000_000 if mode == "TEST" else None)
                     self.put("business", self.empty_business())
             self.mode = mode
@@ -465,6 +468,9 @@ class Store:
     def encode_token_payload(data):
         """Preserve every Token field, with a queryable open flag outside zlib."""
         data = _canonical_token_data(data)
+        for key in ("independent_market", "augmented_neg_risk"):
+            if not data[key]:
+                del data[key]
         raw = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(raw) > _TOKEN_JSON_MAX_BYTES:
             raise ValueError("代币元数据JSON过大")
@@ -643,7 +649,7 @@ class Store:
             for table in ("native_events", "intents", "tokens", "books"):
                 self.db.execute(f"DELETE FROM {table}")
             self.put("generation", str(uuid4()))
-            self.put("preferences", Preferences().model_dump(mode="json"))
+            self.put("preferences", Preferences().storage())
             self.put("initial_capital", 100_000_000)
             self.put("business", self.empty_business())
 

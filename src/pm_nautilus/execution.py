@@ -82,14 +82,22 @@ class TestExecution(ExecutionClient):
         elif not b.ready:
             fills = []
         elif o.side == OrderSide.BUY:
+            preferences = self.owner.preferences
+            limit = intent.get("execution_limit", intent["limit"])
+            if preferences.buyBestLevelOnly:
+                asks = b.available_best_ask()
+                if asks and asks[0][0] != limit:
+                    asks = []
+            else:
+                asks = b.ask.available()
             fills = plan_buy(
-                b.ask.available(),
+                asks,
                 intent["cash"],
-                intent.get("execution_limit", intent["limit"]),
+                limit,
                 t.min_size,
                 t.fees,
                 t.tick,
-                self.owner.preferences,
+                preferences,
             )
         else:
             try:

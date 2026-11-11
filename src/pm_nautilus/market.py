@@ -6,6 +6,7 @@ No credential import, private endpoint or signed client exists in this module.
 import asyncio
 import json
 import random
+import re
 from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -51,19 +52,47 @@ def array(value):
     return result if isinstance(result, list) else []
 
 
-def normalize(event):
+def _named_augmented_market(market):
+    if market.get("negRiskOther") is True:
+        return False
+    for key in ("groupItemTitle", "title", "question"):
+        label = market.get(key)
+        if not isinstance(label, str) or not any(c.isalnum() for c in label):
+            continue
+        label = label.strip().casefold()
+        return label not in {"other", "tbd", "tba", "unnamed"} and not re.search(
+            r"\bplaceholder\b|^unnamed\b|\bperson\s+[a-z]\b", label
+        )
+    return False
+
+
+def normalize(event, *, include_independent=False, include_augmented=False):
     if any(
         event.get(k) is not v for k, v in (("active", True), ("closed", False), ("archived", False))
     ):
         return []
     markets = event.get("markets", [])
-    if event.get("negRiskAugmented") is True or not markets:
+    augmented = event.get("negRiskAugmented") is True
+    if not markets or (augmented and not include_augmented):
         return []
-    n = 2 if len(markets) == 1 else len(markets) if event.get("negRisk") is True else 0
-    if n < 2:
+    neg_risk = event.get("negRisk") is True
+    if augmented and not neg_risk:
+        if event.get("negRisk") is False or event.get("enableNegRisk") is not True:
+            return []
+        neg_risk = True
+    independent = len(markets) > 1 and not neg_risk
+    if independent and (not include_independent or event.get("enableNegRisk") is True):
         return []
+    n = len(markets) if neg_risk and len(markets) > 1 else 2
     out = []
     for m in markets:
+        if independent and (type(m.get("id")) not in (str, int) or not str(m["id"]).strip()):
+            continue
+        if augmented and not _named_augmented_market(m):
+            continue
+        if (independent or augmented) and type(m.get("negRisk")) is bool:
+            if m["negRisk"] != neg_risk:
+                continue
         # CTF outcomes use clobTokenIds and the CTF redemption path. V2 uses
         # positionIds and a different exchange/settlement path.
         if m.get("version", event.get("version")) not in {None, "v1"} or m.get("positionIds"):
@@ -117,7 +146,7 @@ def normalize(event):
                         condition,
                         str(outcome),
                         n,
-                        event.get("negRisk") is True,
+                        neg_risk,
                         opened,
                         ends,
                         fees,
@@ -129,6 +158,8 @@ def normalize(event):
                         tuple(tags),
                         tuple(tags.values()),
                         timestamp(m.get("gameStartTime") or event.get("startTime")),
+                        independent_market=independent,
+                        augmented_neg_risk=augmented,
                     )
                 )
         except (KeyError, ValueError, TypeError):
@@ -326,6 +357,13 @@ class MarketService:
         if self.storage_available:
             self.runtime.store.put("categories", self.categories)
 
+    def market_scope(self):
+        preferences = getattr(self.runtime, "preferences", None)
+        return (
+            getattr(preferences, "includeIndependentMultiMarkets", False),
+            getattr(preferences, "includeAugmentedNegRisk", False),
+        )
+
     async def scan(self):
         if self.closed:
             return
@@ -344,6 +382,7 @@ class MarketService:
                     self.runtime.store.put("scan", self.scan_status)
             return
         r = self.runtime
+        include_independent, include_augmented = self.market_scope()
         generation = getattr(r.store, "generation", None)
         started_at = datetime.now(timezone.utc).isoformat()
         status = self.discovery_status
@@ -394,7 +433,11 @@ class MarketService:
                     raise ValueError("公开 Event 分页没有前进")
                 seen.update(new)
                 for event in page:
-                    for t in normalize(event):
+                    for t in normalize(
+                        event,
+                        include_independent=include_independent,
+                        include_augmented=include_augmented,
+                    ):
                         if t.token_id not in self.unsupported_ticks:
                             tokens[t.token_id] = t
                     checked_markets.update(
@@ -536,7 +579,7 @@ class MarketService:
                     self._availability_subscribe_pending.add(tid)
                     self._availability_fresh_requested_at[tid] = requested_at
                     unavailable.pop(tid, None)
-                self.runtime.dirty.add(token.event_id)
+                self.runtime.dirty.add(self.runtime.cycle_id(token))
                 await self.sync_subscriptions()
             return
         try:
@@ -585,7 +628,7 @@ class MarketService:
         for tid in ids:
             self._availability_fresh_requested_at.pop(tid, None)
             self._availability_timestamp_floor.pop(tid, None)
-        self.runtime.dirty.add(token.event_id)
+        self.runtime.dirty.add(self.runtime.cycle_id(token))
         await self.sync_subscriptions()
 
     def refresh_stream_readiness(self, group):
@@ -712,7 +755,7 @@ class MarketService:
                 if side and b.delta(side, levels, ts):
                     r.checkpoint_shadow(tid, shadow)
                     r.native.feed_delta(r.tokens[tid], b, side, levels)
-                    r.dirty.add(r.tokens[tid].event_id)
+                    r.dirty.add(r.cycle_id(r.tokens[tid]))
             r.drain()
         elif kind == "book":
             tid = msg.get("asset_id")
@@ -735,7 +778,7 @@ class MarketService:
                     self._availability_timestamp_floor.pop(tid, None)
                     self.recovering_ids().discard(tid)
                     if was_recovering:
-                        r.dirty.add(r.tokens[tid].event_id)
+                        r.dirty.add(r.cycle_id(r.tokens[tid]))
                         r.drain()
         elif kind == "tick_size_change":
             tid = msg.get("asset_id")
@@ -1120,6 +1163,8 @@ class PublicMarketHub(MarketService):
         self.discovered_at = None
         self.discovery_version = 0
         self.consumer_versions = {}
+        self.consumer_market_scopes = {}
+        self._published_market_scope = (False, False)
         self._tick_versions = {}
         self._scan_tick_versions = None
         self._next_group = 0
@@ -1145,12 +1190,21 @@ class PublicMarketHub(MarketService):
         # Discovery is shared, but each consumer commits only to its own ledger.
         return any(not s.closed and s.storage_available for s in self.services)
 
+    def market_scope(self):
+        scopes = [s.market_scope() for s in self.services if not s.closed and s.storage_available]
+        return any(scope[0] for scope in scopes), any(scope[1] for scope in scopes)
+
     async def discover(self, requester):
         async with self.discovery_lock:
             if self.closed or requester.closed or not requester.storage_available:
                 return
             now = asyncio.get_running_loop().time()
-            if self.discovered_at is None or now - self.discovered_at >= 300:
+            scope = self.market_scope()
+            needs_expansion = any(
+                requested and not published
+                for requested, published in zip(scope, self._published_market_scope, strict=True)
+            )
+            if self.discovered_at is None or now - self.discovered_at >= 300 or needs_expansion:
                 self._scan_tick_versions = dict(self._tick_versions)
                 try:
                     await super().scan()
@@ -1161,6 +1215,7 @@ class PublicMarketHub(MarketService):
                 ):
                     self.discovery_version += 1
                     self.discovered_at = asyncio.get_running_loop().time()
+                    self._published_market_scope = scope
                 for service in tuple(self.services):
                     self.apply_discovery(service)
             else:
@@ -1191,15 +1246,23 @@ class PublicMarketHub(MarketService):
             if self.scan_status.get("categoryError") is None:
                 service.scan_status.pop("categoryError", None)
             version = self.consumer_versions.get(service)
+            scope = service.market_scope()
             if (
                 self.discovery_version
-                and version != self.discovery_version
+                and (
+                    version != self.discovery_version
+                    or scope != self.consumer_market_scopes.get(service, (False, False))
+                )
                 and self.scan_status.get("lastError") is None
             ):
+                include_independent, include_augmented = scope
                 tokens = {
                     tid: token
                     for tid, token in self.runtime.tokens.items()
-                    if token.open and tid not in service.unsupported_ticks
+                    if token.open
+                    and tid not in service.unsupported_ticks
+                    and (include_independent or not token.independent_market)
+                    and (include_augmented or not token.augmented_neg_risk)
                 }
                 closed = [
                     replace(t, open=False)
@@ -1212,6 +1275,7 @@ class PublicMarketHub(MarketService):
                 service.runtime.store.put("categories", service.categories)
                 service.runtime.drain()
                 self.consumer_versions[service] = self.discovery_version
+                self.consumer_market_scopes[service] = scope
             service.runtime.store.put("scan", service.scan_status)
         except Exception as exc:
             self.consumer_error(service, exc)
@@ -1483,6 +1547,7 @@ class PublicMarketHub(MarketService):
                 self.consumer_error(service, exc)
         for service in self.consumer_versions.keys() - self.services:
             del self.consumer_versions[service]
+            self.consumer_market_scopes.pop(service, None)
         self._subscription_monitored = consumer_ids
 
     def diagnostics_for(self, service):

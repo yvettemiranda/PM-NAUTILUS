@@ -42,6 +42,8 @@ def token_view(r, t):
     ready = b.ready and t.token_id not in getattr(r, "market_recovering", set())
     bids = b.bid.available() if r.mode == "TEST" else list(b.bid.external.items())
     asks = b.ask.available() if r.mode == "TEST" else list(b.ask.external.items())
+    if r.mode == "TEST" and r.preferences.buyBestLevelOnly and not b.available_best_ask():
+        asks = []
     bid = max((p for p, q in bids if q), default=None) if ready and not unavailable else None
     ask = min((p for p, q in asks if q), default=None) if ready and not unavailable else None
     return {
@@ -234,7 +236,8 @@ def dashboard(r, service=None, limit=20, live_enabled=False, position_limit=None
         missing = sorted(x for x in ids if not r.books[x].ready)
         summaries.append(
             {
-                "eventId": eid,
+                "eventId": r.tokens[tid].event_id,
+                "cycleId": eid,
                 "status": status,
                 "winner": winner,
                 "tokenId": tid,
@@ -249,14 +252,14 @@ def dashboard(r, service=None, limit=20, live_enabled=False, position_limit=None
     direction = 1 if r.preferences.candidateSortDirection == "ASC" else -1
     if limit:
         summaries.sort(
-            key=lambda e: (e["status"] != "READY", e["progressPercent"] * direction, e["eventId"])
+            key=lambda e: (e["status"] != "READY", e["progressPercent"] * direction, e["cycleId"])
         )
     active_events = (
         {i["event_id"] for i in r.store.intents(active_only=True).values()} if limit else set()
     )
     events = []
     for summary in summaries[:limit]:
-        eid, ids = summary["eventId"], summary["ids"]
+        eid, ids = summary["cycleId"], summary["ids"]
         status, winner = summary["status"], summary["winner"]
         tid = summary["tokenId"]
         t = r.tokens[tid]
@@ -268,7 +271,8 @@ def dashboard(r, service=None, limit=20, live_enabled=False, position_limit=None
         ]
         events.append(
             {
-                "eventId": eid,
+                "eventId": t.event_id,
+                **({"cycleId": eid} if eid != t.event_id else {}),
                 "eventTitle": t.event_title,
                 "marketUrl": v["marketUrl"],
                 "progressPercent": v["progressPercent"],
@@ -302,6 +306,7 @@ def dashboard(r, service=None, limit=20, live_enabled=False, position_limit=None
             "streams": service.stream_diagnostics() if service else None,
             "pendingEvents": [
                 {k: e[k] for k in ("eventId", "pendingReason", "missingBookTokenIds")}
+                | ({"cycleId": e["cycleId"]} if e["cycleId"] != e["eventId"] else {})
                 for e in summaries
                 if limit and e["status"] == "INCOMPLETE"
             ],

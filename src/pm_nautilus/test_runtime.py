@@ -52,7 +52,7 @@ class TestRuntime(Runtime):
         token_id = self.instrument_tokens.get(str(deltas.instrument_id))
         token = self.tokens.get(token_id)
         if token is not None:
-            self._test_preview_pending.add(token.event_id)
+            self._test_preview_pending.add(self.cycle_id(token))
 
     def add_tokens(self, tokens, official_tags=None):
         # Shared-feed planning may cache unchanged consumers. Metadata/tick
@@ -181,7 +181,9 @@ class TestRuntime(Runtime):
         token_ids = tuple(token_ids)
         result = super().disconnect(token_ids)
         self._test_preview_pending.update(
-            self.tokens[token_id].event_id for token_id in token_ids if token_id in self.tokens
+            self.cycle_id(self.tokens[token_id])
+            for token_id in token_ids
+            if token_id in self.tokens
         )
         return result
 

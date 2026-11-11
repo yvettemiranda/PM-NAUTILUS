@@ -7,6 +7,7 @@ from pm_nautilus.rules import (
     Target,
     StopLoss,
     plan_buy,
+    preview,
     sell_batches,
     signed_buy_notional,
     target_price,
@@ -86,6 +87,34 @@ def test_buy_fee_is_cash_and_all_in_budget_is_not_exceeded():
         )
         == []
     )
+
+
+@pytest.mark.parametrize("enabled,prices", [(False, [20_000, 30_000]), (True, [20_000])])
+def test_best_level_buy_plan_and_shared_preview(enabled, prices):
+    c = Preferences(buyBestLevelOnly=enabled, maxBuyPriceCents=3, orderAmount=2)
+    t = token(fees=Fees(True, 40_000, 1))
+    asks = [(30_000, 100_000_000), (20_000, 5_000_000)]
+    bids = [(15_000, 100_000_000)]
+    fills = plan_buy(asks, c.budget, c.max_price, t.min_size, t.fees, t.tick, c)
+    candidate = preview(t, c, bids, asks, c.budget, c.budget)
+    assert [fill.price for fill in fills] == prices
+    assert [fill.price for fill in candidate.fills] == prices
+    assert sum(fill.amount for fill in candidate.fills) <= c.budget
+    if enabled:
+        assert candidate.quantity == 5_000_000
+
+
+@pytest.mark.parametrize(
+    "marker,option",
+    [
+        ("independent_market", "includeIndependentMultiMarkets"),
+        ("augmented_neg_risk", "includeAugmentedNegRisk"),
+    ],
+)
+def test_opted_out_markets_cannot_buy_from_previous_discovery(marker, option):
+    t = token(**{marker: True})
+    assert static_reason(t, Preferences(), D, set()) == "CLOSED"
+    assert static_reason(t, Preferences(**{option: True}), D, set()) is None
 
 
 def test_fee_precision_and_price_independent_signed_budget():

@@ -25,6 +25,8 @@
 
 说明、API 和目标卖价步长例子见 [TEST 多账户](docs/TEST_ACCOUNTS.md)；优化与隔离边界见 [通用优化](docs/archive/TEST_OPTIMIZATION_20261029.md)。优化不按服务器型号分支，不减少市场、历史、精度或原交易检查，换服务器可直接沿用。
 
+策略设置提供四个默认关闭的选项，用于纳入独立二元市场、纳入增强负风险的具名选项、按市场分周期和只买最优卖档。TEST 与 LIVE 使用相同的规则，各账户分别保存设置。成交结果和买卖手续费可用账户账本生成分组报告。见 [可选策略与账本分析](docs/STRATEGY_PREFERENCES.md)。
+
 ## TEST 与 LIVE 切换
 
 TEST、LIVE 后台只运行其一。启用 LIVE 前必须先暂停全部 TEST，程序等待 TEST 行情、扫描、结算和采样任务退出，并持久化模式意图，再激活 LIVE 私有客户端。LIVE 启用后仍为 PAUSED，需要另行明确 START。
@@ -75,6 +77,7 @@ Node 24.20.0 用于页面验证，程序运行不需要 Node。部署固定已�
 - [当前交接与最新部署验收](HANDOFF.md)
 - [两个版本的维护规则](docs/VERSIONS.md)
 - [TEST 多账户](docs/TEST_ACCOUNTS.md)
+- [可选策略与账本分析](docs/STRATEGY_PREFERENCES.md)
 - [通用优化与模式互斥](docs/archive/TEST_OPTIMIZATION_20261029.md)
 - [启停、关闭、钱包取消与历史分批修复](docs/archive/EGM_FIXES_20261030.md)
 - [验证结果与未验收范围](docs/VALIDATION.md)

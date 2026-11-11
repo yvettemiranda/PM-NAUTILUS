@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from pm_nautilus.config import Preferences
+from pm_nautilus.config import OPTIONAL_PROFILE_FIELDS, Preferences
 
 script = Path(__file__).resolve().parents[1] / "scripts" / "export_preferences.py"
 spec = spec_from_file_location("export_preferences", script)
@@ -38,10 +38,14 @@ def running_database(tmp_path):
         connection.close()
 
 
-def test_reads_latest_committed_wal_rules_without_history_or_secrets(running_database):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_reads_latest_committed_wal_rules_without_history_or_secrets(running_database, legacy):
     path, connection = running_database
-    prefs = Preferences(orderAmount="3.25", stopLossEnabled=False).model_dump(mode="json")
-    connection.execute("UPDATE meta SET value=? WHERE key='preferences'", (json.dumps(prefs),))
+    prefs = Preferences(
+        orderAmount="3.25", stopLossEnabled=False, cyclePerMarket=not legacy
+    ).model_dump(mode="json")
+    saved = {k: v for k, v in prefs.items() if not legacy or k not in OPTIONAL_PROFILE_FIELDS}
+    connection.execute("UPDATE meta SET value=? WHERE key='preferences'", (json.dumps(saved),))
     connection.commit()
 
     exported = export_preferences(path, "TEST")

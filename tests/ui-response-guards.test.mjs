@@ -128,6 +128,53 @@ test('a valid different account can be opened after rejecting an incompatible vi
 });
 
 for (const mode of ['TEST', 'LIVE']) {
+  test(`${mode} saves opt-in strategy switches and sorting preserves the saved values`, async () => {
+    const page = pageAt();
+    const {ui, context, element} = page;
+    const controls = {
+      'include-independent-multi-markets': 'includeIndependentMultiMarkets',
+      'include-augmented-neg-risk': 'includeAugmentedNegRisk',
+      'cycle-per-market': 'cyclePerMarket',
+      'buy-best-level-only': 'buyBestLevelOnly',
+    };
+    const writeBodies = [];
+    let saved = {...profile};
+    const dashboard = () => ({...snapshot(2), executionMode: mode, preferences: saved});
+    ui.displayMode = mode;
+    context.applyDashboardForTest(dashboard());
+    for (const id of Object.keys(controls)) {
+      assert.equal(element(`#${id}`).getAttribute('type'), 'checkbox');
+      assert.equal(element(`#${id}`).checked, false);
+      element(`#${id}`).checked = true;
+    }
+    assert.equal(element('#order-amount-label').textContent, '每事件本轮预算');
+    element('#cycle-per-market').handlers.change();
+    element('#config-form').handlers.input();
+    assert.equal(element('#order-amount-label').textContent, '每市场本轮预算');
+    context.fetch = async (path, options) => {
+      if (options.method === 'PUT') {
+        assert.equal(path.includes('account_id=2'), mode === 'TEST');
+        const payload = JSON.parse(options.body);
+        writeBodies.push(payload);
+        saved = {...saved, ...payload};
+      }
+      return reply(dashboard());
+    };
+    await element('#config-form').handlers.submit({preventDefault() {}});
+    assert.equal(ui.configDirty, false);
+    assert.equal(element('#order-amount-label').textContent, '每市场本轮预算');
+    for (const [id, field] of Object.entries(controls)) {
+      assert.equal(writeBodies[0][field], true);
+      assert.equal(ui.preferences[field], true);
+      assert.equal(element(`#${id}`).checked, true);
+      element(`#${id}`).checked = false;
+    }
+    element('#config-form').handlers.input();
+    await element('#sort-toggle').handlers.click();
+    for (const field of Object.values(controls)) assert.equal(writeBodies[1][field], true);
+    assert.equal(ui.configDirty, true);
+  });
+
   test(`${mode} save preserves a later draft while recording exactly the submitted settings`, async () => {
     const page = pageAt();
     const {ui, context, element} = page;

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from pm_nautilus.config import Preferences
+from pm_nautilus.config import OPTIONAL_PROFILE_FIELDS, Preferences
 from pm_nautilus.store import Store
 
 script = Path(__file__).resolve().parents[1] / "scripts" / "apply_preferences.py"
@@ -24,7 +24,13 @@ def fresh_pair(tmp_path):
         Store(root / mode / "state.sqlite", mode).close()
     profile = tmp_path / "strategy-profile.json"
     prefs = Preferences(
-        minBuyPriceCents="20.5", orderAmount="3.25", stopLossEnabled=False
+        minBuyPriceCents="20.5",
+        orderAmount="3.25",
+        stopLossEnabled=False,
+        includeIndependentMultiMarkets=True,
+        includeAugmentedNegRisk=True,
+        cyclePerMarket=True,
+        buyBestLevelOnly=True,
     ).model_dump(mode="json")
     profile.write_text(json.dumps(prefs), encoding="utf-8")
     return root, profile, prefs
@@ -128,6 +134,16 @@ def test_rejects_extra_field_and_duplicate_keys_without_changes(fresh_pair, caps
     assert {mode: saved(root, mode) for mode in ("TEST", "LIVE")} == before
 
 
+def test_legacy_compatibility_does_not_allow_incomplete_profiles(fresh_pair):
+    root, profile, prefs = fresh_pair
+    before = {mode: saved(root, mode) for mode in ("TEST", "LIVE")}
+    prefs.pop("orderAmount")
+    profile.write_text(json.dumps(prefs), encoding="utf-8")
+    with pytest.raises(ValueError, match="missing or unexpected Preferences fields"):
+        importer.apply_preferences(root, profile)
+    assert {mode: saved(root, mode) for mode in ("TEST", "LIVE")} == before
+
+
 def test_existing_test_capital_rule_rejects_over_100u_without_clamping(fresh_pair):
     root, profile, _ = fresh_pair
     before = {mode: saved(root, mode) for mode in ("TEST", "LIVE")}
@@ -165,6 +181,8 @@ def test_rejects_partitioned_business_activity_without_native_history(fresh_pair
 
 def test_fresh_legacy_schema_can_still_import_rules(fresh_pair):
     root, profile, prefs = fresh_pair
+    previous = {k: v for k, v in prefs.items() if k not in OPTIONAL_PROFILE_FIELDS}
+    profile.write_text(json.dumps(previous), encoding="utf-8")
     for mode in ("TEST", "LIVE"):
         with sqlite3.connect(root / mode / "state.sqlite") as db:
             db.execute("DROP TABLE business_parts")
@@ -172,8 +190,10 @@ def test_fresh_legacy_schema_can_still_import_rules(fresh_pair):
                 "UPDATE meta SET value=? WHERE key='business'",
                 (json.dumps(importer._EMPTY_BUSINESS),),
             )
+            defaults = Preferences().model_dump(mode="json", exclude=OPTIONAL_PROFILE_FIELDS)
+            db.execute("UPDATE meta SET value=? WHERE key='preferences'", (json.dumps(defaults),))
     importer.apply_preferences(root, profile)
     for mode in ("TEST", "LIVE"):
         meta, _ = saved(root, mode)
-        assert meta["preferences"] == prefs
+        assert meta["preferences"] == previous
         assert meta["business"] == importer._EMPTY_BUSINESS

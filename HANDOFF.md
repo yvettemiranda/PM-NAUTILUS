@@ -9,11 +9,18 @@
 | [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) | 当前十账户最新版及现行文档，默认开发和下载入口。 |
 | [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027) | 十账户改造前的固定源码 `4de107a4dc1a4abaaf08b330eb00803391268e2a`，不继续修改。 |
 
-当前已部署应用为 `181b378579eb1e7558d28120927a63237d0e6497`（2026-11-04，界面改版，见下节）；此前为 `2e07c7dfb03d3acecfa75960658a06632e67aa88`、`a4c5df4a8ee525bd7890de73f3587207fbaddf5c`、`7d47f50cbacba33d603ac1f7ed1370c8171f8337`、`8eafbeb06792accd85a555f99b01ee61be369838`、`8d13d084544b1d94d558c52f03b0bc1931bd0946`、`ff5da9bb6722eb0e5a8925140631a154af7c4c9e`（同日），再前为 `99eada51405358ec82b7b5bc6329c3141c1a8d04`（2026-11-01 第二次部署），同日上一版为 `6ae9fcaadff86db9405d22adf95b5e7677d01cce`，再前为 `8ab1937e84b1f63db3db46a07eca8a4d17876a58`。现行界面见[界面改版说明](docs/archive/UI_LIGHT_20261104.md)（此前为 [Hallmark 界面](docs/archive/UI_HALLMARK_20261030.md)）。此前业务保护保留，见 [修复说明](docs/archive/EGM_FIXES_20261030.md)。后续验收文档提交仅改 Markdown，服务器源码可同步到该文档提交；运行镜像及环境版本仍固定为上述应用 SHA，不为同步文档再次重启。
+当前运行镜像及服务器应用源码固定为 `c96feed9922755faa5dd42fa7e923c2ac2153485`。前一应用版本为 `181b378579eb1e7558d28120927a63237d0e6497`。其他版本和恢复点见下方历史记录。现行界面布局见 [界面改版说明](docs/archive/UI_LIGHT_20261104.md)，新开关和报告见 [可选策略与账本分析](docs/STRATEGY_PREFERENCES.md)。
 
 旧工作分支和重复基准标签已从 GitHub 入口移除，旧 PR #18 已关闭，未将它的原地重签方案合入当前交易逻辑；相关问题已经由后续 PR #19 的终结未提交意图及重新评估机制覆盖。提交历史继续保留。后续操作以 `main` 和完整应用 SHA 为准，旧部署脚本中的历史分支名不再作为拉取入口。规则见 [版本维护](docs/VERSIONS.md)。
 
-## 最近一次部署：2026-11-04 17:26（181b378，浅色界面改版）
+## 2026-11-11 部署 `c96feed`
+
+- 策略设置加入四个默认关闭的选项，覆盖市场范围、周期和最优卖档，并提供只读账本分组报告。AMD64 和 ARM64 宿主及 Docker 各通过 1,372 项 Python 测试，两边各通过 125 项页面测试。 [应用 CI](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/42985818552)
+- 使用原部署脚本，镜像构建前确认该提交的两项 GitHub 检查成功。停机备份为 `/var/lib/pm-nautilus-deploy/20261111T082853Z-c96feed/`，包含全部 11 份账本及环境配置。本次保留了已有恢复点。
+- 北京时间 16:35 完成验收。TEST 1–6 恢复运行，7–10 暂停，各账户 5 组行情和全部订阅盘口就绪。重启初次读取的持仓数与停机前一致。10 份 TEST 的已有订单身份、成交与收益历史前缀、原偏好、初始资金和 generation 核对通过，LIVE 账本逐表一致。所有新开关读回为关闭，LIVE 关闭且钱包未配置。
+- 容器保护配置、模式文件、钱包路径及除修订号外的部署配置核对通过，容器重启计数为 0。服务返回的 HTML、JavaScript、CSS 均与版本文件逐字节相同。服务器本机经 HTTPS 入口读取健康接口成功，Docker 内只读报告命令通过。
+
+## 2026-11-04 17:26 部署 `181b378`（浅色界面改版）
 
 - 内容：只改 `web/index.html`、`web/styles.css`，见[界面改版说明](docs/archive/UI_LIGHT_20261104.md)。浅色朴素风格；宽屏左右两栏（左侧资金与曲线，右侧持仓／记录／市场）；“暂无报价／赎回待核查”提示改为“总资产估算”旁的小标记，点击才显示原文。`app.js`、Python、配置、依赖和测试未改；143 个元素 ID 及 62 个按钮、输入框的属性与改版前一致；交易逻辑不变。
 - [PR #21](https://github.com/yvettemiranda/PM-NAUTILUS/pull/21)，`main` 快进到该提交（SHA 不变）。[CI 41805782216](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/41805782216)（main）及分支、PR 两次运行，双架构各 1,339 项 Python、122 项页面测试通过。第一次运行部署脚本时 main 上的 CI 尚未结束（4/6），脚本在停机前按设计拒绝；CI 全部通过后重跑。

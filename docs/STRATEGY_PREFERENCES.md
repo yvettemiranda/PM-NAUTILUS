@@ -25,6 +25,12 @@
 uv run --frozen python scripts/cohort_report.py runtime/server/TEST/accounts/2/state.sqlite
 ```
 
+在按部署手册安装的 Docker 服务器上，可在运行中的容器内生成同一个账户的报告。
+
+```sh
+sudo sh -c 'cd /opt/pm-nautilus && docker compose exec -T app .venv/bin/python - /data/TEST/accounts/2/state.sqlite < scripts/cohort_report.py'
+```
+
 输出为 JSON，按买入实际成交价所在的整分区间、UTC ISO 周和账本保留的类别组合分组。例如 1¢ 桶包括 1.0¢ 至低于 2.0¢ 的成交。多标签保留为一个组合，各组之间不会重复计量。
 
 - 目标价卖出率按份额计，用能与买入批次核对且达到冻结目标价的卖出份额除以该组买入份额。平均卖出天数按能核对的目标卖出与止损卖出份额加权。

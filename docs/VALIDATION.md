@@ -2,11 +2,17 @@
 
 当前版本入口为 [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main)，唯一固定基准为 [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027)（`4de107a`）。旧分支、标签和旧测试数量不再作为当前版本说明；历史原文可在固定基准及 Git 提交记录中追溯。
 
-## 当前已部署应用：181b378（2026-11-04）
+## 2026-11-11 策略开关和账本报告验收
+
+已部署应用 SHA 为 `c96feed9922755faa5dd42fa7e923c2ac2153485`。AMD64 和 ARM64 各通过 1,372 项 Python 测试、125 项页面测试及 Docker verify。覆盖旧偏好与旧账本、周期切换及重启、两个市场扩展开关、最优档和只读报告。 [应用 CI](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/42985818552)
+
+停机备份的 11 份 SQLite 均通过 `quick_check`。上线后核对十个 TEST 的原设置、账本代次、订单身份、原有成交和收益历史，LIVE 账本逐表一致。账户运行状态恢复为 1–6 运行、7–10 暂停，LIVE 关闭。验证服务器本机 HTTPS、实际网页资源及容器内报告命令。 [部署记录](../HANDOFF.md#2026-11-11-部署-c96feed)
+
+## 2026-11-04 界面部署 `181b378`
 
 完整 SHA `181b378579eb1e7558d28120927a63237d0e6497`，只改界面（`web/index.html`、`web/styles.css`）。[CI 41805782216](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/41805782216)：AMD64／ARM64 各 1,339 项 Python 测试与 Docker verify 通过；页面测试 122 项通过。143 个元素 ID 及 62 个按钮、输入框属性与改版前逐个一致；浏览器检查范围见[界面改版说明](archive/UI_LIGHT_20261104.md)。
 
-## 上一部署应用：2e07c7d（2026-11-02）
+## 2026-11-02 部署 `2e07c7d`
 
 完整 SHA `2e07c7dfb03d3acecfa75960658a06632e67aa88`。[CI 41464436666](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/41464436666)：AMD64／ARM64 各 1,339 项 Python 测试与 Docker verify 通过；页面测试 122 项通过。新旧路径的逐步对照测试同时覆盖 `Runtime` 与线上 TEST 账户使用的 `TestRuntime`（评估路径含运行和暂停两种状态；代币清理比较删除结果、映射顺序和索引，并限制峰值内存分配）。部署脚本核对该 SHA 的全部 CI 检查后才构建。部署过程、备份和上线核对见 [HANDOFF](../HANDOFF.md)。部署脚本测试只在 Linux 运行（脚本使用 GNU 工具），在 macOS 上自动跳过。
 

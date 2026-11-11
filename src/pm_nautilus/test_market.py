@@ -157,9 +157,32 @@ class TestMarketHub(PublicMarketHub):
                 for token_id in _prepared.touched
                 if token_id in allowed and token_id in service.runtime.monitored
             }
+            if not touched and self._idle_delivery(service):
+                return
             service.message(msg, touched, _prepared=_prepared)
+        elif type(service) is TestMarketService and type(service.runtime) is TestRuntime:
+            ids = self._consumer_allowed(service, allowed)
+            if not ids and self._idle_delivery(service):
+                return
+            service.message(msg, ids)
         else:
             super()._deliver_message(service, msg, allowed, _prepared)
+
+    @staticmethod
+    def _idle_delivery(service):
+        """A frame with none of this TEST account's tokens and no pending work.
+
+        The original call would update no book and drain an empty work set
+        (no evaluation, no order); skipping it changes nothing. Any pending
+        dirty Event or waiting candidate batch keeps the original call.
+        """
+        runtime = service.runtime
+        return (
+            type(runtime) is TestRuntime
+            and getattr(service.message, "__func__", None) is MarketService.message
+            and not runtime.dirty
+            and not runtime._candidate_backlog
+        )
 
     async def sync_test_subscriptions(self, requester):
         # Same lock as the original entry point. Never leak a TEST request's

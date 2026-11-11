@@ -479,3 +479,49 @@ def test_start_subscribes_a_previously_idle_paused_account_at_once(tmp_path, mon
             runtime.close()
 
     asyncio.run(run())
+
+
+def test_frames_without_an_idle_accounts_tokens_skip_it_unless_work_is_pending(
+    tmp_path, monkeypatch
+):
+    from pm_nautilus.test_market import TestMarketHub
+
+    from test_market_efficiency import IdleSocket
+
+    reference, clock, token = setup(tmp_path / "reference")
+    reference.close()
+    monkeypatch.setattr("pm_nautilus.market.connect", lambda *a, **k: IdleSocket())
+
+    async def run():
+        hub = TestMarketHub()
+        active = TestRuntime(tmp_path / "a.sqlite", clock=clock)
+        idle = TestRuntime(tmp_path / "i.sqlite", clock=clock)
+        services = [TestMarketService(r, hub=hub) for r in (active, idle)]
+        drains = []
+        try:
+            for r in (active, idle):
+                r.add_tokens([token])
+            active.start()
+            await services[0].sync_subscriptions()
+            monkeypatch.setattr(idle, "drain", lambda: drains.append(True))
+            idle.dirty.clear()
+            change = dict(
+                event_type="price_change",
+                timestamp="2000",
+                market=token.condition_id,
+                price_changes=[dict(asset_id=token.token_id, side="BUY", price="0.015", size="9")],
+            )
+            hub.message(public_book(token), {token.token_id})
+            hub.message(change, {token.token_id})
+            assert drains == [] and active.books[token.token_id].ready
+            idle.dirty.add("pending-event")  # Pending work keeps the original call.
+            hub.message(dict(change, timestamp="2001"), {token.token_id})
+            assert drains == [True]
+        finally:
+            for service in services:
+                await service.close()
+            await hub.close()
+            active.close()
+            idle.close()
+
+    asyncio.run(run())

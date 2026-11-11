@@ -633,7 +633,11 @@ class MarketService:
 
     def refresh_stream_readiness(self, group):
         entry = self.streams.get(group)
-        if entry is not None and entry.get("state") in {"AWAITING_BOOKS", "READY"}:
+        # Runs before every received frame. READY only ever moves to READY
+        # here, so re-checking every member and re-publishing the same state
+        # (which makes the shared hub recompute every consumer's stream
+        # errors) cannot change anything.
+        if entry is not None and entry.get("state") == "AWAITING_BOOKS":
             if all(self.runtime.books[tid].ready for tid in self.subscription_members(group)):
                 self.stream_state(group, "READY")
 
@@ -1027,7 +1031,13 @@ class MarketService:
                 if self._scan_finished_at is not None:
                     # Preserve startup ordering: do not subscribe persisted open
                     # discovery before the first full scan attempt has finished.
-                    await self.sync_subscriptions()
+                    # Marked periodic: a shared TEST hub may serve it from a
+                    # full plan made moments ago for another account.
+                    self._periodic_sync = True
+                    try:
+                        await self.sync_subscriptions()
+                    finally:
+                        self._periodic_sync = False
                 if self.on_resolution and (
                     self.resolution_task is None or self.resolution_task.done()
                 ):
@@ -1075,6 +1085,11 @@ class MarketService:
         else:
             self.hub.services.discard(self)
             await self.hub.sync_subscriptions()
+
+
+# consumer_subscription_ids implementations equal to
+# service.desired_subscription_ids(), apart from error handling.
+ORIGINAL_CONSUMER_ID_RULES = {MarketService.consumer_subscription_ids}
 
 
 class _PublicStore:
@@ -1328,14 +1343,19 @@ class PublicMarketHub(MarketService):
         self.update_consumer_stream_errors()
 
     def update_consumer_stream_errors(self):
+        # Runs on every stream state change. Build each consumer's subscription
+        # set at most once per call, and only when some group has an error:
+        # rebuilding it per (consumer, group) pair made a reconnect storm cost
+        # consumers x groups x subscribed tokens and could stall the event loop.
+        errored = [
+            (group, entry["error"]) for group, entry in self.streams.items() if entry.get("error")
+        ]
         for service in tuple(self.services):
             if service.closed:
                 continue
+            ids = self.consumer_subscription_ids(service) if errored else ()
             errors = [
-                entry["error"]
-                for group, entry in self.streams.items()
-                if entry.get("error")
-                and self.active_groups.get(group, set()) & self.consumer_subscription_ids(service)
+                error for group, error in errored if self.active_groups.get(group, set()) & ids
             ]
             current = errors[-1] if errors else None
             if service.scan_status.get("streamError") != current:
@@ -1575,7 +1595,27 @@ class PublicMarketHub(MarketService):
         return {"groups": groups, "groupCount": len(groups)}
 
     def _deliver_message(self, service, msg, allowed, _prepared):
-        service.message(msg, allowed & self.consumer_subscription_ids(service))
+        service.message(msg, self._consumer_allowed(service, allowed))
+
+    def _consumer_allowed(self, service, allowed):
+        """allowed & consumer_subscription_ids(service), without building the full set.
+
+        Only for the original subscription rule (monitored minus unavailable);
+        anything else keeps the original full intersection.
+        """
+        if (
+            getattr(service.desired_subscription_ids, "__func__", None)
+            is MarketService.desired_subscription_ids
+            and type(self).consumer_subscription_ids in ORIGINAL_CONSUMER_ID_RULES
+        ):
+            try:
+                monitored = service.runtime.monitored
+                unavailable = getattr(service.runtime, "market_availability", {})
+                if type(monitored) is set and type(unavailable) is dict:
+                    return {tid for tid in allowed if tid in monitored and tid not in unavailable}
+            except Exception:
+                pass  # The original path below owns error reporting.
+        return allowed & self.consumer_subscription_ids(service)
 
     def message(self, msg, allowed, *, _prepared=None):
         if self.closed:

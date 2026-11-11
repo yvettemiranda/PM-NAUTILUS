@@ -130,8 +130,15 @@ class Native:
             self.data.process(make_instrument(t))
         self.owner.instrument_tokens[str(iid)] = t.token_id
 
+    def _deferred(self, t):
+        owner = self.owner
+        defer = getattr(owner, "defer_native_quote", None)
+        return defer is not None and defer(t)
+
     def feed(self, t, book):
         """Publish complete public books through Nautilus DataEngine and Strategy."""
+        if self._deferred(t):
+            return
         iid = instrument_id(t)
         self.ensure_instrument(t)
         deltas = [OrderBookDelta.clear(iid, 0, book.timestamp, book.timestamp)]
@@ -153,6 +160,8 @@ class Native:
 
     def feed_delta(self, t, book, side, levels):
         """Publish accepted public changes without rebuilding unchanged levels."""
+        if self._deferred(t):
+            return
         iid = instrument_id(t)
         self.ensure_instrument(t)
         order_side = OrderSide.BUY if side == "BID" else OrderSide.SELL

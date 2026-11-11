@@ -44,6 +44,8 @@ class TestRuntime(Runtime):
         self._test_can_defer = True
         self._test_preview_pending = set()
         self._test_empty_paused_proof = None
+        self._native_deferred = set()
+        self._native_replaying = False
         super().__init__(path, mode, clock, live_factory, storage_guard)
         self.tokens = TestTokenRegistry(self.tokens)
         self.native.bus.subscribe("data.book.deltas.*", self._mark_test_preview_quote)
@@ -53,6 +55,39 @@ class TestRuntime(Runtime):
         token = self.tokens.get(token_id)
         if token is not None:
             self._test_preview_pending.add(self.cycle_id(token))
+
+    def defer_native_quote(self, token):
+        """A PAUSED TEST account keeps every Python quote but not its Nautilus copy.
+
+        Decisions, TEST fills and shadow depth read the Python books only; the
+        Nautilus book copy is a publication path whose only subscribers mark
+        work, which the caller already does. Copying every public quote into
+        each paused account's Nautilus engine cost as much as all the rest of
+        quote handling together. START replays a complete snapshot of every
+        skipped book before the account can trade.
+        """
+        try:
+            if self._native_replaying or self.mode != "TEST" or self.status != "PAUSED":
+                return False
+        except Exception:
+            return False  # Unreadable status: keep the original publication path.
+        self._native_deferred.add(token.token_id)
+        self._test_preview_pending.add(self.cycle_id(token))
+        return True
+
+    def _replay_deferred_native(self):
+        deferred, self._native_deferred = self._native_deferred, set()
+        self._native_replaying = True
+        try:
+            for token_id in sorted(deferred):
+                token = self.tokens.get(token_id)
+                book = self.books.get(token_id)
+                if token is not None and book is not None and book.ready:
+                    # A complete snapshot (CLEAR + every level) supersedes all
+                    # skipped snapshots and changes for this token.
+                    self.native.feed(token, book)
+        finally:
+            self._native_replaying = False
 
     def add_tokens(self, tokens, official_tags=None):
         # Shared-feed planning may cache unchanged consumers. Metadata/tick
@@ -208,6 +243,8 @@ class TestRuntime(Runtime):
     def _finish_start(self, result):
         self._test_empty_paused_proof = None
         if result["ok"]:
+            # Before RUNNING: every Nautilus book is current when trading resumes.
+            self._replay_deferred_native()
             # PAUSE followed by START can happen before the next control tick,
             # leaving the old control cache at RUNNING. Every explicit START
             # must rebuild the complete current candidate ordering regardless

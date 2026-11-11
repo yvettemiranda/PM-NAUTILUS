@@ -1065,6 +1065,14 @@ class Runtime:
         self._check_start_readiness()
         self._finish_start(result)
 
+    def defer_native_quote(self, token):
+        """Whether this public quote may skip the Nautilus book copy for now.
+
+        LIVE never defers. The Python books, TEST shadow depth and scheduling
+        are always updated by the caller regardless.
+        """
+        return False
+
     def pause(self):
         self._start_epoch += 1
         self.store.put("status", "PAUSED")

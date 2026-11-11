@@ -1,10 +1,17 @@
 """Conservative TEST-only reuse of an already complete public subscription plan."""
 
-from .market import MarketService, PublicMarketHub
+import asyncio
+
+from .market import ORIGINAL_CONSUMER_ID_RULES, MarketService, PublicMarketHub
 from .strategy import Runtime, TokenRegistry
 from .test_runtime import TestRuntime, TestTokenRegistry
 from .test_quotes import PreparedTestQuote
 from .test_public_queries import TestPublicQueries
+
+# A periodic (5 s control loop) TEST request may reuse a full plan this recent.
+# Every TEST account's loop asks independently, and one full plan already covers
+# all consumers, so ten accounts produced about two complete plans a second.
+PERIODIC_PLAN_SECONDS = 5
 
 _ORIGINAL_MESSAGE = MarketService.message
 _ORIGINAL_SUBSCRIPTIONS = MarketService.desired_subscription_ids
@@ -65,6 +72,8 @@ class TestMarketHub(PublicMarketHub):
         self.plan_skips = 0
         self._test_sync_requester = None
         self._test_public_queries = TestPublicQueries()
+        self._last_full_plan_at = None
+        self.plan_debounces = 0
 
     async def close(self):
         try:
@@ -153,11 +162,68 @@ class TestMarketHub(PublicMarketHub):
                 and requester in self.services
                 and not requester.closed
             )
+            if (
+                eligible
+                and getattr(requester, "_periodic_sync", False)
+                and self._recent_plan_covers(requester)
+            ):
+                self.plan_debounces += 1
+                return
             self._test_sync_requester = requester if eligible else None
             try:
                 await self._sync_subscriptions()
             finally:
                 self._test_sync_requester = None
+
+    def _recent_plan_covers(self, requester):
+        """A periodic TEST request has nothing a recent full plan did not cover.
+
+        Anything the requester itself changed, a pending recovery, new discovery
+        metadata, a ready shared book it has not received yet, or any LIVE
+        consumer always runs the original planning path. Otherwise the next full
+        plan (at most PERIODIC_PLAN_SECONDS away) serves every consumer.
+        """
+        try:
+            if self._last_full_plan_at is None or self.closed:
+                return False
+            if self._loop_time() - self._last_full_plan_at >= PERIODIC_PLAN_SECONDS:
+                return False
+            runtime = requester.runtime
+            if (
+                type(requester) is not TestMarketService
+                or type(runtime) is not TestRuntime
+                or runtime.mode != "TEST"
+                or runtime.faulted
+                or runtime.market_recovering
+                or self._has_recovery(self)
+                or self._has_recovery(requester)
+                or any(
+                    type(service) not in (MarketService, TestMarketService)
+                    or service.runtime.mode != "TEST"
+                    for service in self.services
+                )
+                or (
+                    self.discovery_version
+                    and self.consumer_versions.get(requester) != self.discovery_version
+                )
+            ):
+                return False
+            ids = requester.desired_subscription_ids()
+            if self._subscription_monitored.get(requester) != ids:
+                return False
+            assigned = set().union(*self.active_groups.values()) if self.active_groups else set()
+            if not ids <= assigned:
+                return False
+            source_books, books = self.runtime.books, runtime.books
+            for tid in ids:
+                source = source_books.get(tid)
+                if source is not None and source.ready:
+                    own = books.get(tid)
+                    if own is None or not own.ready:
+                        return False
+            return True
+        except Exception:
+            return False
 
     @staticmethod
     def _has_recovery(owner):
@@ -299,7 +365,9 @@ class TestMarketHub(PublicMarketHub):
             # or whole-TEST signature needs to be consulted at all.
             self._complete_test_plan = None
             self.plan_runs += 1
-            return await super()._sync_subscriptions()
+            await super()._sync_subscriptions()
+            self._last_full_plan_at = self._loop_time()
+            return
         signature = self._complete_signature()
         test_request = self._test_sync_requester is not None
         mixed = any(service.runtime.mode == "LIVE" for service in self.services)
@@ -309,8 +377,19 @@ class TestMarketHub(PublicMarketHub):
             and signature == self._complete_test_plan
         ):
             self.plan_skips += 1
+            # The previous complete plan is proven current: as good as a new one.
+            self._last_full_plan_at = self._loop_time()
             return
         self._complete_test_plan = None
         self.plan_runs += 1
         await super()._sync_subscriptions()
+        self._last_full_plan_at = self._loop_time()
         self._complete_test_plan = self._complete_signature()
+
+    @staticmethod
+    def _loop_time():
+        return asyncio.get_running_loop().time()
+
+
+# Only adds error isolation around the original rule.
+ORIGINAL_CONSUMER_ID_RULES.add(TestMarketHub.consumer_subscription_ids)

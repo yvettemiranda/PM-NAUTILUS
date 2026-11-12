@@ -2,9 +2,15 @@
 
 当前版本入口为 [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main)，唯一固定基准为 [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027)（`4de107a`）。旧分支、标签和旧测试数量不再作为当前版本说明；历史原文可在固定基准及 Git 提交记录中追溯。
 
+## 2026-11-12 单账户模式与官方市场目录验收
+
+应用 SHA 为 `b0c414244f15a8da1bde548d01c0ac5242803abb`。AMD64 和 ARM64 的 CI 均通过。本地 Python 1,393 项通过、24 项跳过，页面测试 126 项通过。以官方目录实际返回的 100 个事件、910 个市场核对新旧解析结果，四种市场扩展开关组合得到的代币一致。 [应用 CI](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/43162981778)
+
+部署后 TEST 1 恢复运行，2–10 号保留只读账本。通过停机备份核对了十个 TEST 的账本代次、参数、历史事件、收益采样和 LIVE 账本。首次全量目录检查后，59/59 个行情连接组与 11,666/11,666 个盘口就绪。36 秒内对健康、持仓和市场接口采样 43 次，全部成功，最慢 268 毫秒。这些数据记录当次短时验收。 [部署记录](../HANDOFF.md#2026-11-12-1353-部署-b0c4142)
+
 ## 2026-11-11 策略开关和账本报告验收
 
-已部署应用 SHA 为 `c96feed9922755faa5dd42fa7e923c2ac2153485`。AMD64 和 ARM64 各通过 1,372 项 Python 测试、125 项页面测试及 Docker verify。覆盖旧偏好与旧账本、周期切换及重启、两个市场扩展开关、最优档和只读报告。 [应用 CI](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/42985818552)
+当次部署应用 SHA 为 `c96feed9922755faa5dd42fa7e923c2ac2153485`。AMD64 和 ARM64 各通过 1,372 项 Python 测试、125 项页面测试及 Docker verify。覆盖旧偏好与旧账本、周期切换及重启、两个市场扩展开关、最优档和只读报告。 [应用 CI](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/42985818552)
 
 停机备份的 11 份 SQLite 均通过 `quick_check`。上线后核对十个 TEST 的原设置、账本代次、订单身份、原有成交和收益历史，LIVE 账本逐表一致。账户运行状态恢复为 1–6 运行、7–10 暂停，LIVE 关闭。验证服务器本机 HTTPS、实际网页资源及容器内报告命令。 [部署记录](../HANDOFF.md#2026-11-11-部署-c96feed)
 

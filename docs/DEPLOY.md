@@ -15,7 +15,7 @@
 | 服务器外备份 | 未启用（COS 未开通）；可选方案见第 3.2 节 |
 | 手动快照 | 轻量应用服务器实例的「快照」标签可查可用恢复点。部署使用的停机备份及历史快照记录见 [HANDOFF](../HANDOFF.md)。 |
 
-数据目录里有 11 份账本：`TEST/state.sqlite`、`TEST/accounts/2…10/state.sqlite`、`LIVE/state.sqlite`，另有 `execution-mode.json`（运行模式意图）和 `wallet/live.vault`（加密钱包）。不要只复制其中一部分，也不要在程序运行时直接复制单个 `.sqlite` 文件（会漏掉 WAL 中的数据）。
+全量初始化后最多有 11 份账本，路径为 `TEST/state.sqlite`、`TEST/accounts/2…10/state.sqlite` 和 `LIVE/state.sqlite`。单账户模式下，尚未初始化的账户可以没有账本文件。备份整个数据目录以保留所有既有账本、运行模式意图 `execution-mode.json` 和已配置的加密钱包 `wallet/live.vault`。程序运行时直接复制单个 `.sqlite` 文件可能漏掉 WAL 中的数据。
 
 ## 2. 日常更新：一键部署
 
@@ -29,11 +29,11 @@ sudo deploy/deploy.sh <完整的 40 位提交 SHA>
 
 部署期间（约 3—5 分钟）不要在网页上启用 LIVE、解锁钱包或切换模式；脚本会在停机前最后一步再查一次，但不能完全排除这段时间里的网页操作。同一时间只允许一个部署，重复运行会被拒绝。
 
-启用 TEST 单账户模式前，先暂停选定账户以外的 TEST 账户。随后在 `.env` 设置 `PM_TEST_ACTIVE_ACCOUNT=1`（以 1 号为例）并按正常流程发布支持该配置的版本。部署脚本按升级前状态恢复已运行的 TEST 账户。已暂停账户仍按账本情况保留只读历史或维护已有持仓。见 [TEST 多账户](TEST_ACCOUNTS.md)。
+升级应用时如需一并启用 TEST 单账户模式，先暂停选定账户以外的 TEST 账户。保留一份原 `.env` 的受保护副本，再设置 `PM_TEST_ACTIVE_ACCOUNT=1`（以 1 号为例）。部署脚本备份的是部署当时的 `.env`，并按停机前状态恢复已运行的 TEST 账户。仅更改配置时参见[切换 TEST 单账户模式](#切换-test-单账户模式)。
 
 脚本先显示当前账户状态，输入 `yes` 后依次执行：
 
-1. 预检：服务是否响应、磁盘空间是否足够；LIVE 已启用或钱包已解锁（状态不是未配置/锁定）时拒绝执行，停机前最后一步会再查一次；程序目录有未提交或未跟踪文件时拒绝；提交不在 `origin/main` 上，或 GitHub CI 对这个提交没有全部通过（含两种架构）时拒绝。确需部署须加 `--allow-unverified`
+1. 预检要求服务能响应、磁盘空间足够、后端当前运行模式为 TEST、LIVE 未启用且钱包未配置或已锁定。若仍保存 LIVE 运行意图，先核对真实账户和在途事项，再在后端允许时从网页明确选择“恢复TEST后台（保持暂停）”。脚本在停机前再次核对模式、LIVE 状态和钱包。程序目录有未提交或未跟踪文件时拒绝部署。目标提交须在 `origin/main` 上并通过该提交的全部 GitHub CI 检查（含两种架构）。确需绕过提交来源或 CI 校验时须加 `--allow-unverified`
 2. 检出目标提交，并在旧版本继续运行时构建新镜像
 3. 记录停机前每个 TEST 账户的运行状态和持仓数
 4. 正常停机（最多 45 秒），完整复制数据目录和 `.env` 到 `/var/lib/pm-nautilus-deploy/<时间>-<SHA>/`
@@ -45,6 +45,16 @@ sudo deploy/deploy.sh <完整的 40 位提交 SHA>
 任何一步失败都会立即停下，并打印对应的回滚命令。脚本不会启用 LIVE、解锁钱包，也不会启动原本暂停的账户。每次的状态记录（`accounts-before`、`accounts-restarted`、`accounts-after`）保存在对应备份目录里。
 
 可选环境变量：`PM_APP_DIR`、`PM_BACKUP_ROOT`、`PM_KEEP_BACKUPS`（默认 5）、`PM_HEALTH_TIMEOUT`、`PM_MARKET_TIMEOUT`、`PM_COMPOSE_FILES`（默认 `compose.yaml`，以空格分隔多个文件）。
+
+### 切换 TEST 单账户模式
+
+仅更改账户范围时，先确认后端当前为 TEST、LIVE 未启用、钱包未配置或已锁定。记录需要恢复运行的账户。若要限制为单账户，先暂停即将改为只读的账户。保留现有镜像和 `.env` 的 `PM_GIT_REVISION`，只设置或清除 `PM_TEST_ACTIVE_ACCOUNT`。在程序目录用现有镜像重建容器，普通 Compose `restart` 不会读入新配置。
+
+```sh
+sudo docker compose --env-file .env -f compose.yaml up -d --no-build app
+```
+
+待健康检查通过，核对可启动的账户和已加载的引擎。账户重启后保持 PAUSED，只手动 START 本次仍需要运行且允许启动的账户。状态字段和其他账户的维护规则见 [TEST 多账户](TEST_ACCOUNTS.md)。
 
 ## 3. 备份
 
@@ -105,11 +115,11 @@ sudo deploy/deploy.sh <旧版本 SHA>   # 会再做一次停机备份
 
 ## 5. 换服务器迁移
 
-1. 新服务器按第 6 节装好，但**先不要启动**（不要执行 `up -d`）。
+1. 新服务器按第 6 节准备 Docker、源码和数据目录。恢复备份前，先停在构建和首次启动步骤之前。
 2. 旧服务器：确认没有在途订单，执行 `sudo docker compose --env-file .env -f compose.yaml stop`，并确认开机单元不会再把它拉起来。
 3. 旧服务器：完整打包停机状态的 `runtime/server` 和 `.env`，传到新服务器。如需加密，用 `tar -czf - runtime/server .env | age -p > state.tgz.age`；有 LIVE 记录时，还可以用镜像里的 `pm-nautilus-final-export` 导出最终 `.pmnb`。
 4. 新服务器：解压到停止状态的程序目录，执行 `sudo chown -R 10001:10001 runtime/server`，`.env` 权限设为 0600。按新域名或 IP 修改 `PM_ALLOWED_HOSTS`，并确认 HTTPS 反代配置。
-5. 新服务器：`up -d` 后核对健康状态、11 份账本、各账户设置和历史；LIVE 钱包是锁定状态，需在网页解锁并重新检查，再手动启用。
+5. 新服务器按[构建和首次启动](#构建和首次启动)启动，保留 `import_public_profile=0`。对照迁移备份核对健康状态、全部既有账本、账户设置、历史及运行模式。已配置的 LIVE 钱包保持锁定，需在网页解锁并重新检查，再手动启用。
 6. 确认旧服务器不会再运行同一个钱包之后，才在新服务器上启用 LIVE。两台服务器不能同时管理同一个钱包。
 
 ## 6. 首次部署新服务器
@@ -130,19 +140,40 @@ sudo mkdir -p runtime/server && sudo chown 10001:10001 runtime/server
 - `PM_ALLOWED_HOSTS` 填访问用的域名或 IP，并保留 `localhost`，部署脚本靠它访问本机接口。
 - 只有在应用端口只绑定回环地址、并且 Nginx 会覆写 `X-Forwarded-Proto` 的前提下，才把 `PM_TRUST_HTTPS_PROXY` 设为 `true`。
 
-如果要用仓库里的公开策略规则初始化账本（只适用于全新、从未启动过的数据目录），在 `build` 和第一次 `up -d` 之间执行：
+### 构建和首次启动
+
+下面的命令块默认直接构建和启动。只有在数据目录全新、从未启动过，且已核对并确认采用 [公开策略规则](../config/strategy-profile.json) 时，才把 `import_public_profile=0` 改为 `1`。整段一起执行。可选导入会先确认数据目录为空，成功写入 TEST 1 和 LIVE 后才启动应用。
 
 ```sh
-C="sudo docker compose --env-file .env -f compose.yaml"
-$C build
-test ! -e runtime/server/TEST/state.sqlite && test ! -e runtime/server/LIVE/state.sqlite
-$C run --rm --no-deps --entrypoint /app/.venv/bin/python app -c 'from pathlib import Path; from pm_nautilus.store import Store; root=Path("/data"); [Store(root/m/"state.sqlite",m).close() for m in ("TEST","LIVE")]'
-$C run --rm --no-deps --entrypoint /app/.venv/bin/python app /app/scripts/apply_preferences.py --data-dir /data --profile /app/config/strategy-profile.json
-$C up -d && $C ps
+(
+    set -eu
+    import_public_profile=0
+    compose() { sudo docker compose --env-file .env -f compose.yaml "$@"; }
+
+    compose build
+    if [ "$import_public_profile" = 1 ]; then
+        data_entries=$(sudo find runtime/server -mindepth 1 -maxdepth 1 -print -quit)
+        if [ -n "$data_entries" ]; then
+            printf '%s\n' '数据目录非空，请先核对已有数据。未导入规则，未启动应用。' >&2
+            exit 1
+        fi
+        compose run --rm --no-deps --entrypoint /app/.venv/bin/python app -c 'from pathlib import Path; from pm_nautilus.store import Store; root=Path("/data"); [Store(root/m/"state.sqlite",m).close() for m in ("TEST","LIVE")]'
+        compose run --rm --no-deps --entrypoint /app/.venv/bin/python app /app/scripts/apply_preferences.py --data-dir /data --profile /app/config/strategy-profile.json
+    fi
+    compose up -d
+    compose ps
+)
+```
+
+等待容器状态变为 `healthy`，然后检查应用版本、模式和健康状态。以下以默认端口 `8765` 为例：
+
+```sh
 curl -fsS -H 'Host: localhost' http://127.0.0.1:8765/api/health
 ```
 
-HTTPS：参照 `deploy/nginx.conf.example` 配一个独立虚拟主机，反代到 `127.0.0.1:8765`，先执行 `nginx -t` 再重载。不要直接公开容器端口，也不要通过明文 HTTP 传登录密码。钱包的备份和恢复接口需要样例中单独放宽的上传大小和超时设置。样例开启了 JSON／CSS／JS 的 gzip 压缩（实测接口传输量减少约 70%—90%，页面每 0.5 秒刷新一次，远程访问更流畅）；CSRF 令牌只在请求头里，不在响应正文中，所以压缩不会带来 BREACH 类风险。当前服务器以 `/etc/nginx/conf.d/pm-nautilus-gzip.conf` 启用同样设置。
+空白目录首次启动时，已初始化的 TEST 账户均为 PAUSED，LIVE 未启用。默认初始化十个 TEST 账户。设置了 `PM_TEST_ACTIVE_ACCOUNT` 时，仅选定账户可以 START，其他尚未初始化的账户可以保持空白。
+
+HTTPS：参照 `deploy/nginx.conf.example` 配一个独立虚拟主机，反代到 `127.0.0.1:8765`，先执行 `nginx -t` 再重载。不要直接公开容器端口，也不要通过明文 HTTP 传登录密码。钱包的备份和恢复接口需要样例中单独放宽的上传大小和超时设置。样例开启了 JSON／CSS／JS 的 gzip 压缩。以往采样的接口传输量减少约 70%—90%。CSRF 令牌通过请求和响应头传递。当前服务器以 `/etc/nginx/conf.d/pm-nautilus-gzip.conf` 启用同样设置。
 
 可选组件（样例都在 `deploy/` 下）：
 - `pm-nautilus-test-boot.service.example`：开机启动单元；不会自动启用 LIVE 或 START。
@@ -169,7 +200,8 @@ HTTPS：参照 `deploy/nginx.conf.example` 配一个独立虚拟主机，反代�
 | 401 | 用账号 `pm` 和服务器 UI 密码登录；不要关闭认证 |
 | 403 控制来源失败 | 刷新页面，检查反代的 Host 和 Origin 设置；不要去掉 CSRF |
 | 部署脚本提示 LIVE 已启用 | 先在网页处理 LIVE（暂停、核对），脚本不在 LIVE 期间部署 |
-| 部署后行情一直 recovering | 重启后首次扫描约 1 分钟；一直不恢复时，查看健康接口的 `serviceFreshness` 和容器日志 |
+| 部署后行情一直 recovering | 首轮完整目录扫描和盘口恢复耗时随目录规模及网络变化。查看健康接口的 `serviceFreshness` 和行情就绪计数；长时间没有进展时查容器日志 |
+| 市场扫描提示超过 15 分钟未确认成功 | 默认在上一轮结束约 15 分钟后才启动下一轮，正常分页期间也可能短暂显示。查看健康接口 `serviceFreshness.TEST.discovery` 的最近尝试、成功时间、扫描进度和错误，另看 `marketData.TEST` 的实时盘口状态 |
 | 有行情但没有成交 | 检查筛选条件（总时长、进度、买卖盘比例）、手续费元数据、最小份额、市价买单最低 1U、预算 |
 | 业务投影失败 | 保持 PAUSED，检查磁盘和 SQLite 错误，备份后重启重放；不要手改游标（cursor） |
 | LIVE 核对失败 | 保持 PAUSED，核对真实订单、余额和自有份额；恢复后不会自动 START |

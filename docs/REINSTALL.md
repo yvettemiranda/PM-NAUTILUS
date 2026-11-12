@@ -55,7 +55,7 @@ uv run --frozen pm-nautilus --offline --data-dir runtime/environment-check
 
 ```sh
 node --check src/pm_nautilus/web/app.js
-node --test tests/ui-state.test.mjs
+node --test tests/*.test.mjs
 ```
 
 前端测试会执行实际页面控制处理程序，覆盖模式与异步响应隔离、配置与运行操作互斥、未变化分类焦点、全仓摘要、隐藏页返回刷新和超过一万条的历史分页。GitHub Actions 还会验证 Linux x86_64/ARM64 与 Docker 构建。当前代码的测试数量、发布状态和通过证据以 [VALIDATION.md](VALIDATION.md) 最新章节及对应 CI 为准；历史版本的结果不能替代新版本验收。
@@ -64,9 +64,9 @@ node --test tests/ui-state.test.mjs
 
 `.env`、密码、私钥、钱包/API/RPC凭据、加密凭据包、SQLite账本、runtime、日志、参考项目、虚拟机、虚拟环境以及本地 artifacts/backups 均不上传。GitHub 仓库不保存服务器正式 TEST/LIVE 账本；从仓库恢复会创建新的本地开发账本，不会复制服务器或其他电脑的成交历史。
 
-本仓库只保证项目开发材料可恢复。**若用户明确放弃旧 TEST 模拟历史，且本程序尚未产生真实 LIVE 订单、持仓或在途交易，新服务器可以从空白账本开始；旧模拟账本备份不是首次实盘的前提。**已获用户同意公开的 `config/strategy-profile.json` 保存当前交易设置，但空白账本不会因 GitHub 克隆而自动采用它；应先确认文件仍是想用的版本，首次启动前应用到空白 TEST 1／LIVE，再在首次建立的 TEST 2—10 及 LIVE 分别读回核对；已有账户不会同步改参数。钱包以前在本程序之外产生的挂单和持仓也不会因新建账本而消失，仍须在接入时核对。
+本仓库只保证项目开发材料可恢复。**若用户本次明确选择放弃旧 TEST 模拟历史，且本程序尚未产生真实 LIVE 订单、持仓或在途交易，新服务器可以从空白账本开始。**仓库中的 `config/strategy-profile.json` 是公开规则快照。要使用该快照，先确认它仍是想用的版本，再按[首次启动说明](DEPLOY.md#构建和首次启动)导入空白 TEST 1 和 LIVE，启动后分别核对已初始化账户的设置。首次创建的 TEST 2—10 会以 1 号当时的设置初始化。钱包在本程序之外已有的挂单和持仓仍须在接入时核对。
 
-若要保留旧 TEST 历史，或本程序后来已经有真实 LIVE 交易，应按 [部署指南](DEPLOY.md)保存最新一致性账本及与之配套的加密钱包。网页 LIVE 页可下载、上传单个加密迁移包；新服务器仍须由管理员先配置 Docker、HTTPS 与登录。服务器完整运维备份还应包含整个 `runtime/server`（全部 11 份账本、`execution-mode.json`、钱包及持久状态）、`.env` 和本地 `compose.override.yaml`，解锁密码与备份文件分开保管。旧式 `compose.live.yaml`、`/etc/pm-nautilus/live.json.age` 和 `/run/pm-nautilus/live.json` 仅适用于旧部署，不是网页钱包流程。换电脑后克隆 GitHub 可继续开发或远程管理原服务器，不必把签名私钥复制到新电脑。
+若要保留旧 TEST 历史，或本程序后来已经有真实 LIVE 交易，应按 [部署指南](DEPLOY.md)保存最新一致性账本及与之配套的加密钱包。网页 LIVE 页可下载、上传单个加密迁移包；新服务器仍须由管理员先配置 Docker、HTTPS 与登录。服务器完整运维备份应包含整个 `runtime/server`（所有既有账本、`execution-mode.json`、钱包及持久状态）、`.env` 和实际使用的 Compose 覆盖文件（如有），解锁密码与备份文件分开保管。旧式 `compose.live.yaml`、`/etc/pm-nautilus/live.json.age` 和 `/run/pm-nautilus/live.json` 仅适用于旧部署，不是网页钱包流程。换电脑后克隆 GitHub 可继续开发或远程管理原服务器，不必把签名私钥复制到新电脑。
 
 若决定恢复旧账本，且快照使用 age 接收公钥加密，还须另行安全迁移对应的 identity 私钥；GitHub 无法恢复它。旧 recipient 快照的 identity 与备份位置须在持有人的私有运维记录中确认；不要仅凭当前 HANDOFF 推断旧解密材料仍可用。选择空白账本开始时，不需要该旧账本的解密 identity。
 
@@ -87,7 +87,7 @@ git bundle create artifacts/PM-NAUTILUS.bundle main
 
 在 Codex 中打开克隆目录，将以下文字作为接手请求：
 
-> 请完整阅读根目录 README.md、HANDOFF.md、PM-SMALL_Nautilus_Codex_Instructions.md，以及 docs/REINSTALL.md、MIGRATION.md、VALIDATION.md、DEPLOY.md。先核对 git status、版本、当前运行状态和验证记录，恢复锁定的开发环境并执行必要测试。迁移、UI、服务器部署和正式 TEST 已有实现与历史记录，不要从骨架重做或假定需要重新部署。全新目录默认十个 TEST 均 PAUSED；恢复旧目录须保留运行模式意图，LIVE 意图重启时 TEST 后台保持停止，明确恢复 TEST 后台也仍保持 PAUSED。除非我另行明确要求，不启用 LIVE、不读取真实钱包、不真实下单或进行链上写入。维护 HANDOFF.md，区分当前事实、历史记录和未验收部分。
+> 请先阅读 `README.md`、`HANDOFF.md`、`docs/REINSTALL.md`、`docs/MIGRATION.md`、`docs/VALIDATION.md` 和 `docs/DEPLOY.md`。如需核对原始需求，参考 `docs/archive/PM-SMALL_Nautilus_Codex_Instructions.md`。先核对 Git 状态、版本和验证记录，恢复锁定的开发环境并执行必要测试。如果接手涉及现有服务器或换服，先保全账本和配置，由我在本次对话明确选择是否保留旧 TEST 历史。恢复旧数据目录时须保留运行模式意图。保存 LIVE 意图后重启，TEST 后台保持停止，明确恢复 TEST 后台后账户仍是 PAUSED。涉及启用 LIVE、读取真实钱包、真实下单或链上写入时，以我在本次对话的明确授权为准。维护 `HANDOFF.md`，区分当前事实、历史记录和未验收部分。
 
 当前状态的权威入口是 HANDOFF.md；历史 `.reference/` 日志不随克隆恢复，已验证结论与复验方法在 VALIDATION.md。可选的本地辅助模板或技能不是应用依赖，缺失时不能阻塞源码恢复。
 

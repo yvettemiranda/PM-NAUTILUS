@@ -2,17 +2,17 @@
 
 本文说明 `main` 当前实现的接入与保护边界，固定基准和应用版本见 [版本维护](VERSIONS.md)。最近一次应用验证见 [VALIDATION](VALIDATION.md)，服务器状态以 [HANDOFF](../HANDOFF.md)记录的验收时点和当次只读核查为准。历史钱包、地区或余额结果不能复用为新服务器准入证明。
 
-## 上线前清单（2026-11-01 按官方文档核对）
+## 上线前清单
 
 以下外部规则会变化，启用 LIVE 当天须重新核对官方页面。本节不是法律意见；是否允许交易以 Polymarket 条款及你所在地法规为准。
 
-1. **服务器地区。** Polymarket 按服务器出口 IP 限制下单，见 [官方地区限制](https://docs.polymarket.com/api-reference/geoblock)。美国（含当前硅谷服务器）、新加坡、德国、英国、泰国、台湾等为“仅可平仓”，不能开新仓；日本、韩国、荷兰、爱尔兰仅限制网页、API 不受限，但条款仍可能限制；香港和中国大陆当前不在列表中。程序在“检查账户”时调用官方 `geoblock` 接口，地区不允许则不放行 LIVE，因此**当前服务器不能启用 LIVE**，需换到允许地区的服务器。
-2. **市价买单最低 1U。** CLOB 拒绝签名金额低于 1 美元的可成交 BUY，与各市场最小份额要求无关。程序在 TEST 与 LIVE 共用的买入决策点执行同一规则：扣除手续费后签名金额不足 1U（例如收费市场里 1U 预算只签 0.96U，或一轮剩余预算不足 1U）时不下单。
+1. **服务器地区。** Polymarket 按服务器出口 IP 限制下单。此前硅谷服务器的检查结果为不允许开新仓。启用前从实际交易服务器执行网页“检查账户”，程序会调用官方 `geoblock` 接口，地区不允许则不放行 LIVE。换服务器后应重新核对。 [官方地区限制](https://docs.polymarket.com/api-reference/geoblock)
+2. **市价买单的签名金额至少 1U。** TEST 和 LIVE 都预留手续费，再检查可签名金额是否达到 1U，另行检查市场最小订单份额。LIVE 使用 FAK 即时撮合并取消剩余量，实际成交本金可以低于 1U。 [部分成交示例](STRATEGY_PREFERENCES.md#买入下限与部分成交) · [Polymarket 市价订单](https://docs.polymarket.com/trading/place-orders#place-a-market-order)
 3. **手续费。** 只有吃单方付费，公式为 `份额 × 费率 × p × (1−p)`，按市场类别取费率，精确到 5 位小数，见 [官方费用说明](https://docs.polymarket.com/trading/fees)。买入手续费以 pUSD 在买入金额之外另付（官方 SDK 的计算方式），已计入本轮预算；卖出手续费从所得中扣除。程序读取市场的 `feeSchedule`，LIVE 签名前再用 CLOB 的 `fd` 核对，不一致则不下单。
-4. **可交易市场范围。** Polymarket Protocol V2 市场（Gamma `version: "v2"` 或带 `positionIds`）使用新的合约、签名和赎回路径，本程序不支持，TEST 与 LIVE 都会跳过；0.005、0.0025 价格档位的市场因锁定的 SDK 1.0.1 不支持，也都会跳过。以后新市场越多采用 V2，可交易范围会越小。
-5. **SDK。** 官方已于 2026-10-15 标注 `py-clob-client-v2` 弃用，推荐迁移到统一 SDK。目前锁定版本仍按 CLOB V2 工作，订单响应只依赖 `success` 和 `orderID`，不受 7 月交易哈希改为 trade ID 的影响；官方若再做破坏性变更，需要先迁移再启用 LIVE。
+4. **可交易市场范围。** TEST 与 LIVE 都会跳过采用本程序尚未支持的合约、签名和赎回路径的 Polymarket Protocol V2 市场（Gamma `version: "v2"` 或带 `positionIds`），以及当前锁定 SDK 1.0.1 不支持的 0.005、0.0025 价格档位。
+5. **SDK。** 官方已标注 `py-clob-client-v2` 弃用，建议迁移到统一 SDK。程序当前仍使用锁定的客户端，启用 LIVE 前应核对当时的接口兼容性。 [官方 SDK 仓库](https://github.com/Polymarket/py-clob-client-v2)
 6. **钱包。** 专用于本程序，不在 Polymarket 网页或其他工具手动交易；在 Polymarket 设置 → Trading 中**关闭 “Auto redeem your wins”**，否则官方自动赎回会与本程序赎回冲突，程序会因份额不符而停下等待人工核对。资金地址需持有 pUSD（USDC.e 需先通过官方 Onramp 或网页换成 pUSD），签名地址需持有少量 POL 支付链上手续费。
-7. **TEST 仍偏乐观的地方。** TEST 按当下盘口立即成交；LIVE 下单前还要签名、查链上和账户（通常约 0.5–2 秒），加密市场另有官方吃单延迟（2026-09 起为 150 ms），期间盘口可能被别人吃掉，实际成交可能更少。TEST 结算后立即到账，LIVE 需要链上赎回并支付少量 POL。程序不允许 TEST 与 LIVE 后台同时运行，所以对比要分先后：先用参数相同的 TEST 账户跑出成交率和收益作为基准，再用小预算 LIVE 运行同样时长，对比后再决定是否加大。
+7. **TEST 与 LIVE 的成交差异。** TEST 按模拟时看到的盘口成交。LIVE 下单前还要签名、核对链上状态和账户，交易所也可能按市场配置延迟撮合。期间盘口会变化，实盘可能少成交或零成交。TEST 在确认结算后记账，LIVE 需要链上赎回并支付 POL 手续费。两种后台互斥，先跑 TEST，再在通过实盘准备检查后按相同参数核对小额 LIVE 成交和回款。 [Polymarket 下单与撮合](https://docs.polymarket.com/trading/place-orders#place-a-market-order)
 
 ## 钱包和账户核对
 
@@ -34,7 +34,7 @@ pUSD 用于交易，POL 用于相关链上手续费；余额和授权必须按�
 
 LIVE 启用成功仍为 PAUSED，需要另行明确 START。后来的 PAUSE 会使仍在钱包锁、就绪检查或磁盘/账本核验中等待的旧 START 失效；重新启动需再次明确 START。`LIVE + PAUSED` 不等于只读：已有仓位仍可能卖出、止损或赎回；`auto_approve_redemption=false` 不会禁止已经获授权的赎回。只读核对应使用独立预检，不以启用 LIVE 再暂停代替。
 
-重启后钱包保持锁定、LIVE 不自动启用；若有持久化 LIVE 意图，TEST 后台也保持停止。后端确认没有 LIVE 活动且允许恢复后，可明确选择“恢复TEST后台（保持暂停）”；全部账户仍需各自 START。私有清理或模式保存未确认时后台保持停止，不自动恢复交易。
+重启后钱包保持锁定，LIVE 不自动启用。若有持久化 LIVE 意图，TEST 后台也保持停止。后端确认没有 LIVE 活动且允许恢复后，可明确选择“恢复TEST后台（保持暂停）”，随后再启动需要运行的账户。单账户模式只允许启动选定账户。私有清理或模式保存未确认时，TEST 后台保持停止。 [TEST 单账户说明](TEST_ACCOUNTS.md#启停资金与重置)
 
 ## 已有 LIVE 数据与备份
 

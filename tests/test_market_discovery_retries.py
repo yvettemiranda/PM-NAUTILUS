@@ -1,6 +1,7 @@
 """Bounded public-page retries preserve the atomic discovery owner."""
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
@@ -38,6 +39,26 @@ async def service_for(tmp_path, handler):
     finally:
         await service.close()
         runtime.close()
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16"])
+def test_official_page_keeps_original_json_and_market_metadata(tmp_path, encoding):
+    event = discovered_event()
+    event["title"] = "选举 🌐"
+    event["markets"][0]["feesEnabled"] = True
+    event["markets"][0]["feeSchedule"] = {"rate": 0.025, "exponent": 2}
+    page = {"events": [event], "next_cursor": "opaque-cursor"}
+    body = json.dumps(page, ensure_ascii=False).encode(encoding)
+
+    def handler(request):
+        assert request.url.path == "/events/keyset"
+        return httpx.Response(200, content=body)
+
+    async def run():
+        async with service_for(tmp_path, handler) as (_, service):
+            assert await service.discovery_page() == json.loads(body)
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("failure", [429, 502, 503, 504, "timeout"])

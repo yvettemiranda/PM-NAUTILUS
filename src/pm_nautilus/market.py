@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
 import httpx
+import msgspec
 from websockets.asyncio.client import connect, process_exception
 from websockets.exceptions import ConnectionClosed
 
@@ -23,6 +24,7 @@ from .market_availability import market_state, missing_orderbook
 from .store import observed_book_reader
 
 GAMMA = "https://gamma-api.polymarket.com"
+EVENTS_KEYSET = f"{GAMMA}/events/keyset"
 WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 TAGS = f"{GAMMA}/tags/102982/related-tags/tags"
 HEARTBEAT_SECONDS = 10
@@ -37,6 +39,8 @@ DISCOVERY_PAGE_ATTEMPTS = 3
 DISCOVERY_PAGE_SECONDS = 60
 DISCOVERY_RETRY_AFTER_CAP_SECONDS = 5
 DISCOVERY_RETRY_STATUSES = {429, 502, 503, 504}
+# Use the same numeric conversion as Python's original JSON decoder.
+_EVENTS_JSON = msgspec.json.Decoder(float_hook=float)
 
 
 def _book_ready_reader(runtime):
@@ -293,6 +297,14 @@ class MarketService:
     async def get(self, url, **params):
         response = await self.http.get(url, params=params)
         response.raise_for_status()
+        if url == EVENTS_KEYSET:
+            # Discovery pages can be several MiB after decompression. Decode
+            # ordinary UTF-8 JSON directly from bytes and retain the original
+            # decoder for encodings and values it accepts more broadly.
+            try:
+                return _EVENTS_JSON.decode(response.content)
+            except (msgspec.DecodeError, UnicodeDecodeError):
+                pass
         return response.json()
 
     async def discovery_page(self, **params):
@@ -309,7 +321,7 @@ class MarketService:
                 # The client's usual timeout still applies to each attempt. This
                 # extra deadline also bounds the sum of requests and backoffs.
                 async with asyncio.timeout(remaining):
-                    return await self.get(f"{GAMMA}/events/keyset", **params)
+                    return await self.get(EVENTS_KEYSET, **params)
             except TimeoutError as exc:
                 raise httpx.ReadTimeout("公开 Event 分页重试时间用尽") from exc
             except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:

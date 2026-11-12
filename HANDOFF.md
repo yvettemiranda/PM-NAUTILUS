@@ -1,6 +1,6 @@
 # PM-NAUTILUS 当前交接
 
-## 版本与仓库入口（2026-10-30 更新）
+## 版本与仓库入口（2026-11-12 更新）
 
 只维护两个入口：
 
@@ -9,9 +9,16 @@
 | [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) | 当前十账户最新版及现行文档，默认开发和下载入口。 |
 | [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027) | 十账户改造前的固定源码 `4de107a4dc1a4abaaf08b330eb00803391268e2a`，不继续修改。 |
 
-当前运行镜像及服务器源码固定为 `afa5516f59f3581b9cfaee331db295714300a81b`。之前依次为 `0e35c58`、`4e607f6`、`60fe38c`（均为 11-11 当晚部署）。服务器已于 2026-11-11 重装系统，旧账本只在云端快照 `pre-deploy-a4c5df4` 中，见下方记录。
+当前运行镜像及服务器源码固定为 `b0c414244f15a8da1bde548d01c0ac5242803abb`，上一运行版本为 `afa5516f59f3581b9cfaee331db295714300a81b`。服务器已于 2026-11-11 重装系统，旧账本只在云端快照 `pre-deploy-a4c5df4` 中，见下方记录。
 
 旧工作分支和重复基准标签已从 GitHub 入口移除，旧 PR #18 已关闭，未将它的原地重签方案合入当前交易逻辑；相关问题已经由后续 PR #19 的终结未提交意图及重新评估机制覆盖。提交历史继续保留。后续操作以 `main` 和完整应用 SHA 为准，旧部署脚本中的历史分支名不再作为拉取入口。规则见 [版本维护](docs/VERSIONS.md)。
+
+## 2026-11-12 13:53 部署 `b0c4142`
+
+- 目录继续从 Polymarket Gamma 官方接口分页读取，盘口继续从官方 CLOB WebSocket 订阅。官方目录每页上限为 100。实际官方样本的 100 个事件、910 个市场在新旧解码器下逐值一致，四种扩展开关组合得到的代币一致。本地单页解码耗时中位数从 10.36 ms 降到 4.22 ms。[官方分页文档](https://docs.polymarket.com/api-reference/events/list-events-keyset-pagination)
+- 服务器已保存 `PM_TEST_ACTIVE_ACCOUNT=1`。TEST 1 恢复运行，2–10 号保留只读账本。用停机备份核对了十个账户的账本代次、参数、历史事件与收益采样，以及 LIVE 账本和服务器配置。停机备份为 `/var/lib/pm-nautilus-deploy/20261112T055228Z-b0c4142`。
+- 首轮全量目录核对 372,905 个市场，耗时约 112 秒。行情 59/59 组、11,666/11,666 个盘口就绪，健康接口状态正常。36 秒内采样健康、持仓和市场接口共 43 次，均成功，最慢 268 ms。该窗口的容器内存采样约 922 MiB，系统交换空间写入约 0.2 MiB。
+- 本地 Python 1,393 项通过、24 项跳过，网页 126 项通过。[x86 与 ARM CI](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/43162981778)
 
 ## 2026-11-12 00:20 部署 `4e607f6`、`0e35c58`、`afa5516`（暂停账户空闲、候选合并评估）
 

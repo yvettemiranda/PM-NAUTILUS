@@ -321,8 +321,12 @@ function testExecutionSuspended() {
   return ui.displayMode === "TEST" && responseForView(ui.dashboard) && ui.dashboard?.testExecutionSuspended === true;
 }
 
+function testAccountReadOnly() {
+  return ui.displayMode === "TEST" && responseForView(ui.dashboard) && ui.dashboard?.testAccountReadOnly === true;
+}
+
 function testBackgroundRestorable() {
-  return testExecutionSuspended() && ui.strategyStatus === "PAUSED" && ui.dashboard.liveExecutionEnabled === false && ui.dashboard.modeSwitchInProgress === false && ui.dashboard.canRestoreTestBackground === true;
+  return testExecutionSuspended() && !testAccountReadOnly() && ui.strategyStatus === "PAUSED" && ui.dashboard.liveExecutionEnabled === false && ui.dashboard.modeSwitchInProgress === false && ui.dashboard.canRestoreTestBackground === true;
 }
 
 function testSuspendedNotice() {
@@ -769,17 +773,19 @@ function renderRunControls() {
   const paused = ui.strategyStatus === "PAUSED";
   const liveView = ui.displayMode === "LIVE";
   const suspended = testExecutionSuspended();
+  const readOnly = testAccountReadOnly();
+  const readOnlyNotice = readOnly ? `单账户模式仅开放 TEST ${ui.dashboard.activeTestAccountId}；此账户只读` : "";
   const restorable = testBackgroundRestorable();
   const runToggle = $("#run-toggle");
   if (!runToggle.classList.contains("is-pending")) {
     runToggle.textContent = restorable ? "↺" : running ? "Ⅱ" : "▶";
   }
   const storageBlocked = ui.dashboard?.storage?.canOpen === false;
-  runToggle.disabled = suspended && !restorable || !ui.dashboard || !ui.dashboardAt || Boolean(ui.dashboardError) || Boolean(ui.viewResponseError) || ui.controlPending || (!running && storageBlocked) || (liveView && !running && (!liveStartAvailable() || ui.walletPending));
-  runToggle.title = restorable ? "恢复TEST后台（保持暂停）" : suspended ? testSuspendedNotice() : !running && storageBlocked ? "存储保护中，暂不能开始新增买入" : runToggle.disabled && liveView ? "请先在下方连接、检查并启用实盘钱包" : "";
+  runToggle.disabled = readOnly || suspended && !restorable || !ui.dashboard || !ui.dashboardAt || Boolean(ui.dashboardError) || Boolean(ui.viewResponseError) || ui.controlPending || (!running && storageBlocked) || (liveView && !running && (!liveStartAvailable() || ui.walletPending));
+  runToggle.title = readOnlyNotice || (restorable ? "恢复TEST后台（保持暂停）" : suspended ? testSuspendedNotice() : !running && storageBlocked ? "存储保护中，暂不能开始新增买入" : runToggle.disabled && liveView ? "请先在下方连接、检查并启用实盘钱包" : "");
   runToggle.setAttribute(
     "aria-label",
-    restorable ? "恢复TEST后台（保持暂停）" : suspended ? `${accountLabel()}后台已停用，仅供查看` : liveView && !running && !liveStartAvailable()
+    readOnly ? readOnlyNotice : restorable ? "恢复TEST后台（保持暂停）" : suspended ? `${accountLabel()}后台已停用，仅供查看` : liveView && !running && !liveStartAvailable()
       ? "请先连接、检查并启用实盘钱包"
       : running
         ? `暂停 ${accountLabel()} 自动买入`
@@ -788,8 +794,8 @@ function renderRunControls() {
 
   const capital = $("#initial-capital");
   const capitalEditable = ui.dashboard?.capitalEditable === true;
-  capital.disabled = suspended || !capitalEditable;
-  capital.title = suspended ? "TEST后台已停用，资金与设置仅供查看" : capitalEditable
+  capital.disabled = readOnly || suspended || !capitalEditable;
+  capital.title = readOnly ? readOnlyNotice : suspended ? "TEST后台已停用，资金与设置仅供查看" : capitalEditable
     ? ""
     : liveView
       ? "实际余额由服务器账户查询更新，不能在页面修改"
@@ -797,14 +803,15 @@ function renderRunControls() {
       ? "修改总模拟资金前请先暂停TEST"
       : "总模拟资金仅能在暂停且没有交易记录时修改；如已有记录请先重置TEST";
   const reset = $("#reset-test");
-  reset.disabled = suspended || !paused || ui.controlPending || liveView || Boolean(ui.viewResponseError);
+  reset.disabled = readOnly || suspended || !paused || ui.controlPending || liveView || Boolean(ui.viewResponseError);
   $("#capital-label").textContent = liveView ? "实际账户余额（只读）" : "总模拟资金";
-  $("#settings-mode").textContent = `${accountLabel()} 设置`;
+  $("#settings-mode").textContent = `${accountLabel()} 设置${readOnly ? "（只读）" : ""}`;
   if (!reset.classList.contains("is-pending")) reset.textContent = ui.displayMode === "TEST" ? `重置账户 ${ui.testAccountId}` : "重置TEST";
-  reset.title = suspended ? testSuspendedNotice() : paused ? "" : "重置前必须先暂停TEST";
+  reset.title = readOnlyNotice || (suspended ? testSuspendedNotice() : paused ? "" : "重置前必须先暂停TEST");
   $("#config-toggle").disabled = !ui.dashboard || Boolean(ui.viewResponseError);
-  $("#save-config").disabled = suspended || !ui.dashboard || !ui.preferences || ui.controlPending || Boolean(ui.viewResponseError);
-  $("#sort-toggle").disabled = suspended || !ui.dashboard || !ui.preferences || ui.controlPending || Boolean(ui.viewResponseError);
+  $("#save-config").disabled = readOnly || suspended || !ui.dashboard || !ui.preferences || ui.controlPending || Boolean(ui.viewResponseError);
+  $("#sort-toggle").disabled = readOnly || suspended || !ui.dashboard || !ui.preferences || ui.controlPending || Boolean(ui.viewResponseError);
+  for (const fieldset of document.querySelectorAll("#config-form fieldset")) fieldset.disabled = readOnly;
 }
 
 function renderPositions(positions = []) {
@@ -1165,6 +1172,12 @@ function renderScanStatus(status) {
     element.classList.remove("is-error");
     element.textContent = "TEST后台已停用";
     element.title = testSuspendedNotice();
+    return;
+  }
+  if (testAccountReadOnly() && ui.dashboard?.testAccountCold) {
+    element.classList.remove("is-refreshing", "is-error");
+    element.textContent = "只读历史账户";
+    element.title = "";
     return;
   }
   const diagnostics = status?.diagnostics;
@@ -1589,6 +1602,7 @@ $("#market-progress-filter").addEventListener("input", (event) => {
 
 $("#config-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (testAccountReadOnly()) return;
   if (testExecutionSuspended()) { showMessage("TEST后台已停用，设置仅供查看。", true); return; }
   if (ui.controlPending || !ui.preferences || !ui.dashboard) return;
   const target = viewContext(), request = ++ui.controlRequest;
@@ -1824,6 +1838,7 @@ function renderStatus() {
   $("#live-run-indicator").dataset.tone = live.tone;
   const currentDashboard = responseForView(ui.dashboard) && ui.dashboard?.executionMode === ui.displayMode ? ui.dashboard : null;
   const suspended = testExecutionSuspended();
+  const readOnly = testAccountReadOnly();
   const state = suspended && ui.dashboardAt && !ui.dashboardError && Date.now() - ui.dashboardAt <= 10000
     ? {run:"off",feed:"off",scan:"off",positions:"off",warning:testSuspendedNotice(),serviceWarning:""}
     : displayStatus(currentDashboard, { lastSuccess: ui.dashboardAt, error: ui.dashboardError });
@@ -1846,10 +1861,11 @@ function renderStatus() {
   $("#storage-warning").hidden = !storageWarning;
   $(".equity-panel").classList.toggle("is-stale", Boolean(ui.dashboardAt && (ui.dashboardError || Date.now() - ui.dashboardAt > 10000)));
   const s = ui.dashboard?.marketScan || {}, groups = s.diagnostics?.streams?.groups || [];
-  const runText = state.run === "error" ? state.warning : suspended ? testSuspendedNotice() : !ui.dashboardAt ? "运行状态未确认" : ui.displayMode === "LIVE" && !ui.wallet?.configured ? "实盘钱包未连接" : ui.displayMode === "LIVE" && !ui.wallet?.unlocked ? "实盘钱包已锁定" : ui.displayMode === "LIVE" && !ui.wallet?.enabled ? "实盘尚未启用" : ui.strategyStatus === "RUNNING" ? "运行中" : "已暂停新买入；已有仓位仍继续退出和赎回。";
+  const readOnlyStatus = ui.dashboard?.testAccountCold ? "只读历史账户" : "只读账户，已有仓位继续退出和结算。";
+  const runText = state.run === "error" ? state.warning : suspended ? testSuspendedNotice() : readOnly ? readOnlyStatus : !ui.dashboardAt ? "运行状态未确认" : ui.displayMode === "LIVE" && !ui.wallet?.configured ? "实盘钱包未连接" : ui.displayMode === "LIVE" && !ui.wallet?.unlocked ? "实盘钱包已锁定" : ui.displayMode === "LIVE" && !ui.wallet?.enabled ? "实盘尚未启用" : ui.strategyStatus === "RUNNING" ? "运行中" : "已暂停新买入；已有仓位仍继续退出和赎回。";
   $("#runtime-status").textContent = runText;
   $("#status-toggle").setAttribute("aria-label", `查看运行状态：${runText}`);
-  $("#run-state-label").textContent = state.run === "error" ? "需关注" : suspended ? "后台已停用" : !ui.dashboardAt ? "未确认" : ui.strategyStatus === "RUNNING" ? "运行中" : "已暂停";
+  $("#run-state-label").textContent = state.run === "error" ? "需关注" : suspended ? "后台已停用" : readOnly ? "只读" : !ui.dashboardAt ? "未确认" : ui.strategyStatus === "RUNNING" ? "运行中" : "已暂停";
   const liveFeedSummary = groups.length ? `${groups.filter(g=>g.state === "READY").length}/${groups.length} 组就绪 · ${groups.reduce((n,g)=>n+g.readyBookCount,0)}/${groups.reduce((n,g)=>n+g.tokenCount,0)} 盘口完整` : state.feed === "unavailable" ? "当前没有可接收报价的订阅；停用持仓仍保留并低频核查。" : "当前没有已确认就绪的行情订阅。";
   const unavailableSummary = state.unavailableCount ? `另有 ${formatCount(state.unavailableCount)} 笔持仓的市场已停用或归档，报价不可用，处置安排待核查。` : "";
   const info = ui.activeTab === "positions" ? ["行情", liveFeedSummary, ...(unavailableSummary ? [unavailableSummary] : []), ...groups.map((g,i)=>`组${i+1}：${g.state}，心跳 ${formatClock(g.lastPongAt)}${g.error ? `，${g.error}` : ""}`)] : ui.activeTab === "market" ? ["扫描", `最近完成 ${formatDate(s.lastScanAt)} · ${s.scanning ? "扫描中" : "等待下一轮"}`, s.lastError || s.categoryError || `监控 ${formatCount(ui.displayCandidateCount)} 个事件，当前可交易 ${formatCount(ui.candidateCount)} 个`] : ["记录", `最近成功 ${formatClock(ui.tradeRecordsLoadedAt || null)}`, ui.tradeRecordsError || (ui.tradeRecordsLoaded ? "记录已同步；无新成交也属于正常。" : "打开记录后读取")];

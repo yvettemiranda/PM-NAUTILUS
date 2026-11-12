@@ -107,6 +107,15 @@ class BookCache(dict):
         return book
 
 
+def observed_book_reader(runtime):
+    books = runtime.books
+    # Persisted TEST shadow depth alone cannot make a book ready. Reads that
+    # only expose readiness or prices can wait for the first real quote.
+    if getattr(runtime, "mode", None) == "TEST" and type(books) is BookCache:
+        return books.get
+    return books.__getitem__
+
+
 class Store:
     def __init__(self, path: str | Path, mode="TEST"):
         self.path = Path(path)

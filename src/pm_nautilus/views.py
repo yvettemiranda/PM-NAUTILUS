@@ -9,6 +9,7 @@ from itertools import chain, islice
 from nautilus_trader.model.enums import OrderSide
 from .config import SCALE, units, micros
 from .rules import StopLoss, cost
+from .store import observed_book_reader
 
 RECORD_CACHE_ORDERS = 10_000  # The API's largest history page.
 PROJECTION_BATCH_ROWS = 128
@@ -37,15 +38,17 @@ def market_availability(r, token_id):
 
 
 def token_view(r, t):
-    b = r.books[t.token_id]
+    b = observed_book_reader(r)(t.token_id)
     unavailable = market_availability(r, t.token_id)
-    ready = b.ready and t.token_id not in getattr(r, "market_recovering", set())
-    bids = b.bid.available() if r.mode == "TEST" else list(b.bid.external.items())
-    asks = b.ask.available() if r.mode == "TEST" else list(b.ask.external.items())
-    if r.mode == "TEST" and r.preferences.buyBestLevelOnly and not b.available_best_ask():
-        asks = []
-    bid = max((p for p, q in bids if q), default=None) if ready and not unavailable else None
-    ask = min((p for p, q in asks if q), default=None) if ready and not unavailable else None
+    ready = b is not None and b.ready and t.token_id not in getattr(r, "market_recovering", set())
+    bid = ask = None
+    if ready and not unavailable:
+        bids = b.bid.available() if r.mode == "TEST" else list(b.bid.external.items())
+        asks = b.ask.available() if r.mode == "TEST" else list(b.ask.external.items())
+        if r.mode == "TEST" and r.preferences.buyBestLevelOnly and not b.available_best_ask():
+            asks = []
+        bid = max((p for p, q in bids if q), default=None)
+        ask = min((p for p, q in asks if q), default=None)
     return {
         "tokenId": t.token_id,
         "eventId": t.event_id,
@@ -218,6 +221,8 @@ def dashboard(r, service=None, limit=20, live_enabled=False, position_limit=None
     summaries = []
     test_summary = r.mode == "TEST" and not limit
     event_count = display_event_count = pending_event_count = 0
+    if not test_summary:
+        observed_book = observed_book_reader(r)
     for eid, ids in r.events.items():
         if not ids:
             continue
@@ -233,7 +238,7 @@ def dashboard(r, service=None, limit=20, live_enabled=False, position_limit=None
             pending_event_count += status == "INCOMPLETE"
             continue
         tid = winner.token.token_id if winner else min(ids)
-        missing = sorted(x for x in ids if not r.books[x].ready)
+        missing = sorted(x for x in ids if (book := observed_book(x)) is None or not book.ready)
         summaries.append(
             {
                 "eventId": r.tokens[tid].event_id,

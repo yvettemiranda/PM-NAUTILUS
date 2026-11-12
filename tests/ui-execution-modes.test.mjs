@@ -63,6 +63,23 @@ test('ordinary PAUSED TEST keeps the existing controls and exit/settlement expla
   assert.equal(page.element('#run-state-label').textContent,'已暂停');
 });
 
+test('a cold TEST account keeps its history view while disabling trading and settings writes',async()=>{
+  const page=pageAt(2);
+  page.context.applyDashboardForTest(snapshot(2,{
+    testExecutionSuspended:false, activeExecutionMode:'TEST', activeTestAccountId:1,
+    testAccountReadOnly:true, testAccountCold:true,
+  }));
+  for(const id of controls)assert.equal(page.element(`#${id}`).disabled,true,id);
+  assert.equal(page.element('#config-toggle').disabled,false);
+  assert.equal(page.element('#test-account-select').disabled,false);
+  assert.equal(page.element('#run-state-label').textContent,'只读');
+  assert.equal(page.element('#scan-refresh-state').textContent,'只读历史账户');
+  const writes=[];page.context.fetch=async(path,options)=>{writes.push({path,options});return reply({});};
+  for(const id of ['run-toggle','reset-test','sort-toggle'])await page.element(`#${id}`).handlers.click();
+  await page.element('#config-form').handlers.submit({preventDefault(){}});
+  assert.deepEqual(writes,[]);
+});
+
 test('a successful backend rollback re-enables TEST controls without initiating START',()=>{
   const page=pageAt();page.context.applyDashboardForTest(snapshot());
   const requests=[];page.context.fetch=async(path,options)=>{requests.push({path,options});return reply({});};

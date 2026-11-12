@@ -20,6 +20,7 @@ from .config import micros
 from .books import Book
 from .rules import Token, Fees, SUPPORTED_CLOB_TICKS
 from .market_availability import market_state, missing_orderbook
+from .store import observed_book_reader
 
 GAMMA = "https://gamma-api.polymarket.com"
 WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
@@ -36,6 +37,16 @@ DISCOVERY_PAGE_ATTEMPTS = 3
 DISCOVERY_PAGE_SECONDS = 60
 DISCOVERY_RETRY_AFTER_CAP_SECONDS = 5
 DISCOVERY_RETRY_STATUSES = {429, 502, 503, 504}
+
+
+def _book_ready_reader(runtime):
+    observed_book = observed_book_reader(runtime)
+
+    def ready(token_id):
+        book = observed_book(token_id)
+        return book is not None and book.ready
+
+    return ready
 
 
 def timestamp(value):
@@ -238,11 +249,12 @@ class MarketService:
         if self.hub is not None:
             return self.hub.diagnostics_for(self)
         groups = []
+        book_ready = _book_ready_reader(self.runtime)
         for group in sorted(self.streams):
             entry = self.streams[group]
             task = self.tasks.get(group)
             ids = self.subscription_ids(group)
-            missing = [tid for tid in ids if not self.runtime.books[tid].ready]
+            missing = [tid for tid in ids if not book_ready(tid)]
             groups.append(
                 dict(
                     entry,
@@ -1406,11 +1418,12 @@ class PublicMarketHub(MarketService):
         # A consumer can arrive with a previously connected book. Until the
         # shared source has a complete baseline, that old book cannot accept
         # deltas from the new connection as if it were still continuous.
+        book_ready = _book_ready_reader(service.runtime)
         missing = {
             tid
             for tid in ids
             if (tid not in self.runtime.books or not self.runtime.books[tid].ready)
-            and service.runtime.books[tid].ready
+            and book_ready(tid)
         }
         if missing:
             try:
@@ -1554,12 +1567,13 @@ class PublicMarketHub(MarketService):
         self.update_consumer_stream_errors()
         for service in services:
             try:
+                book_ready = _book_ready_reader(service.runtime)
                 for tid in consumer_ids[service]:
                     source = self.runtime.books.get(tid)
                     if (
                         source is not None
                         and source.ready
-                        and not service.runtime.books[tid].ready
+                        and not book_ready(tid)
                         and tid not in service._availability_fresh_pending
                     ):
                         # Copy values, including the original venue timestamp;
@@ -1580,11 +1594,15 @@ class PublicMarketHub(MarketService):
 
     def diagnostics_for(self, service):
         groups = []
+        if not self.streams:
+            return {"groups": groups, "groupCount": 0}
+        subscribed = self.consumer_subscription_ids(service)
+        book_ready = _book_ready_reader(service.runtime)
         for group in sorted(self.streams):
-            ids = self.active_groups.get(group, set()) & self.consumer_subscription_ids(service)
+            ids = self.active_groups.get(group, set()) & subscribed
             if not ids:
                 continue
-            missing = [tid for tid in sorted(ids) if not service.runtime.books[tid].ready]
+            missing = [tid for tid in sorted(ids) if not book_ready(tid)]
             task = self.tasks.get(group)
             entry = dict(self.streams[group])
             if not missing and entry.get("state") == "AWAITING_BOOKS":

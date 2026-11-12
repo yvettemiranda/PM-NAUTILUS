@@ -15,10 +15,12 @@ import pytest
 from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.enums import BookAction, BookType
 
+from pm_nautilus.books import Book
 from pm_nautilus.market import MarketService, PublicMarketHub
 from pm_nautilus.native import instrument_id
 from pm_nautilus.test_market import TestMarketService
 from pm_nautilus.test_runtime import TestRuntime
+from pm_nautilus.views import dashboard
 
 from test_market_efficiency import native_levels, public_book
 from test_runtime import setup
@@ -85,6 +87,78 @@ def test_stream_errors_build_each_consumer_set_once_and_match_original():
         assert a.scan_status["streamError"] is None and b.scan_status["streamError"] is None
     finally:
         asyncio.run(hub.close())
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_stream_diagnostics_do_not_load_cold_test_books(tmp_path, shared):
+    async def run():
+        runtime, _, token = setup(tmp_path)
+        hub = PublicMarketHub() if shared else None
+        service = MarketService(runtime, hub=hub)
+        owner = hub or service
+        missing_group, ready_group = ("missing",), ("ready",)
+        cold = Book()
+        cold.snapshot([(15_000, 10_000_000)], [(20_000, 10_000_000)], 1_000_000)
+        cold.ask.consume(20_000, 3_000_000)
+        runtime.store.save_book(token.token_id, cold)
+        runtime.monitored.add("2")
+        runtime.books["2"] = Book(ready=True)
+        owner.active_groups = {missing_group: {token.token_id}, ready_group: {"2"}}
+        owner.streams = {
+            missing_group: {"state": "AWAITING_BOOKS"},
+            ready_group: {"state": "READY"},
+        }
+        subscription_calls = []
+        try:
+            if hub is not None:
+                original_ids = hub.consumer_subscription_ids
+
+                def subscription_ids(consumer):
+                    subscription_calls.append(consumer)
+                    return original_ids(consumer)
+
+                hub.consumer_subscription_ids = subscription_ids
+                assert hub._prepare_subscription_consumer(service, {token.token_id})
+                assert token.token_id not in runtime.books
+
+            assert service.stream_diagnostics() == {
+                "groups": [
+                    {
+                        "state": "AWAITING_BOOKS",
+                        "tokenCount": 1,
+                        "readyBookCount": 0,
+                        "missingTokenIds": [token.token_id],
+                        "taskRunning": False,
+                    },
+                    {
+                        "state": "READY",
+                        "tokenCount": 1,
+                        "readyBookCount": 1,
+                        "missingTokenIds": [],
+                        "taskRunning": False,
+                    },
+                ],
+                "groupCount": 2,
+            }
+            if hub is not None:
+                assert subscription_calls == [service]
+            assert token.token_id not in runtime.books
+
+            view = dashboard(runtime, service, limit=1)["marketScan"]
+            assert view["events"][0]["missingBookTokenIds"] == [token.token_id]
+            assert view["events"][0]["representative"]["executableBuyPrice"] is None
+            assert token.token_id not in runtime.books
+
+            service.message(public_book(token, timestamp=2, quantity="10"), {token.token_id})
+            assert runtime.books[token.token_id].ask.consumed == {20_000: 3_000_000}
+            assert service.stream_diagnostics()["groups"][0]["readyBookCount"] == 1
+        finally:
+            if hub is not None:
+                await hub.close()
+            await service.close()
+            runtime.close()
+
+    asyncio.run(run())
 
 
 def test_ready_stream_is_not_republished_on_every_frame():

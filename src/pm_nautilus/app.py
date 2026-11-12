@@ -6,9 +6,10 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 import tempfile
 import time
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from pathlib import Path
 
 import asyncio
@@ -30,6 +31,7 @@ from .live_readiness import run_readiness
 from .storage_guard import StorageGuard
 from .metadata_retention import prune_cold_metadata
 from .service_freshness import freshness_view
+from .test_account_view import ColdTestView
 from .test_accounts import TestAccounts
 from .execution_mode import ExecutionModeStore
 from .live_wallet_records import (
@@ -112,6 +114,12 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
     cold = {}
     samplers = {}
     test_accounts = TestAccounts(root)
+    configured_test_account = os.getenv("PM_TEST_ACTIVE_ACCOUNT")
+    active_test_account = (
+        test_accounts.account_id(configured_test_account) if configured_test_account else None
+    )
+    cold_test_views = {}
+    cold_test_stores = ExitStack()
     market_hub = None
     shutting_down = False
     legacy_live_enabled = os.getenv("PM_LIVE_ENABLED") == "true"
@@ -343,6 +351,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 raise ValueError("服务正在关闭，不能启动交易")
             if mode == "TEST":
                 require_test_execution()
+                require_selected_test_account(account_id)
             check_start()
 
         if check_start is not None:
@@ -380,6 +389,34 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             or "LIVE" in runtimes
         ):
             raise ValueError("LIVE启用或切换期间TEST后台已停止；不能同时运行TEST和LIVE")
+
+    def test_account_read_only(number):
+        return active_test_account is not None and number != active_test_account
+
+    def require_selected_test_account(number):
+        if test_account_read_only(number):
+            raise HTTPException(409, f"单账户模式仅允许操作 TEST {active_test_account}；此账户只读")
+
+    def keep_test_cold(number):
+        context = test_accounts.contexts[number]
+        if active_test_account is not None:
+            test_accounts.check_ledger_path(number)
+        context.cold = test_account_read_only(number) and test_accounts.cold_eligible(number)
+        return context.cold
+
+    def cold_test_view(context):
+        number = context.account_id
+        if number not in cold_test_views:
+            try:
+                with ExitStack() as opening:
+                    store = opening.enter_context(test_accounts.open_cold(number))
+                    reader = ColdTestView(store, number)
+                    cold_test_stores.enter_context(opening.pop_all())
+                    cold_test_views[number] = reader
+            except (OSError, ValueError, sqlite3.Error) as exc:
+                context.error = type(exc).__name__
+                raise HTTPException(503, "该TEST账户的只读账本无法打开") from None
+        return cold_test_views[number]
 
     def active_execution_mode():
         if "LIVE" in runtimes:
@@ -522,14 +559,15 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 market_hub = PublicMarketHub()
                 app.state.market_hub = market_hub
             try:
-                await attach(
-                    "TEST",
-                    Runtime(
-                        root / "TEST" / "state.sqlite",
-                        clock=test_clock,
-                        storage_guard=storage_guard,
-                    ),
-                )
+                if not keep_test_cold(1):
+                    await attach(
+                        "TEST",
+                        Runtime(
+                            root / "TEST" / "state.sqlite",
+                            clock=test_clock,
+                            storage_guard=storage_guard,
+                        ),
+                    )
             except Exception as error:
                 await quarantine_test_account(test_accounts.contexts[1], error)
             if legacy_live_enabled:
@@ -565,12 +603,16 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 cold["LIVE"] = Store(root / "LIVE" / "state.sqlite", "LIVE")
             for account_id in range(2, test_accounts.count + 1):
                 try:
+                    if keep_test_cold(account_id):
+                        continue
                     primary = test_accounts.contexts[1]
                     source = (
                         primary.runtime.store
                         if primary.runtime is not None and not primary.error
                         else None
                     )
+                    if primary.cold:
+                        source = cold_test_view(primary).store
                     path = test_accounts.prepare(account_id, source)
                     await attach(
                         "TEST",
@@ -623,9 +665,13 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                         await finish_test_shutdown(failures, paused, live_service)
                 finally:
                     try:
-                        await storage_guard.close()
+                        cold_test_stores.close()
+                        cold_test_views.clear()
                     finally:
-                        lock.close()
+                        try:
+                            await storage_guard.close()
+                        finally:
+                            lock.close()
 
             async def finish_test_shutdown(failures, paused, live_service):
                 async with test_accounts.quiesce():
@@ -721,7 +767,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             return None
         return test_accounts.account_id(account_id)
 
-    def test_context(account_id):
+    def test_context(account_id, *, allow_cold=False):
         context = test_accounts.contexts[test_accounts.account_id(account_id)]
         if shutting_down:
             raise HTTPException(503, "服务正在关闭")
@@ -729,11 +775,13 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             raise HTTPException(503, "该TEST账户需重新启动程序后恢复")
         if context.resetting:
             raise HTTPException(503, "该TEST账户正在重置，请稍后重试")
+        if allow_cold and context.cold:
+            return context
         if context.runtime is None or getattr(context.runtime.store, "_closed", False):
             raise HTTPException(503, "该TEST账户暂不可用")
         return context
 
-    async def test_operation(account_id, operation):
+    async def test_operation(account_id, operation, *, read_only=False):
         context = test_accounts.contexts[test_accounts.account_id(account_id)]
         # The context/lock survives reset. Every TEST request resolves its runtime
         # after acquiring this account's lock, never from a global selection.
@@ -741,10 +789,26 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         # they remain responsive during an integrity reader, and PAUSE invalidates
         # the epoch of an in-flight START. A reset gates these through its phase.
         async with context.lock:
-            test_context(account_id)
+            if not read_only:
+                require_selected_test_account(account_id)
+            test_context(account_id, allow_cold=read_only)
             # A canceled HTTP request must not release ownership while its native,
             # integrity worker or reset finalizer can still access the old store.
             return await _finish_before_cancel(operation(context))
+
+    async def prepare_test_dashboard(number):
+        context = test_context(number, allow_cold=True)
+        if not context.cold or cold_test_view(context).cash() is not None:
+            return
+
+        async def prepare(context):
+            try:
+                await cold_test_view(context).prepare_cash()
+            except (OSError, ValueError, sqlite3.Error) as exc:
+                context.error = type(exc).__name__
+                raise HTTPException(503, "该TEST账户的只读余额无法核对") from None
+
+        await test_operation(number, prepare, read_only=True)
 
     def test_identity(context, result):
         return result | {"accountId": context.account_id}
@@ -951,7 +1015,10 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             suspended = context is not None and execution_state["testSuspended"]
             if suspended:
                 service, limit = None, 0
-            data = dashboard(runtime, service, limit, "LIVE" in runtimes, position_limit)
+            if context is not None and context.cold:
+                data = cold_test_view(context).dashboard("LIVE" in runtimes)
+            else:
+                data = dashboard(runtime, service, limit, "LIVE" in runtimes, position_limit)
             data["activeExecutionMode"] = active_execution_mode()
             data["testExecutionSuspended"] = execution_state["testSuspended"]
             data["modeSwitchInProgress"] = execution_state["transitioning"]
@@ -968,6 +1035,14 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                     "settlement": freshness_view(getattr(service, "resolution_status", {})),
                 }
                 data.update(accountId=number, accountCount=test_accounts.count)
+                if active_test_account is not None:
+                    data.update(
+                        activeTestAccountId=active_test_account,
+                        testAccountReadOnly=test_account_read_only(number),
+                        testAccountCold=context.cold,
+                    )
+                    if data["testAccountReadOnly"]:
+                        data["capitalEditable"] = False
             else:
                 data["serviceFreshness"] = service_freshness_view()[mode]
             if mode == "LIVE":
@@ -1085,8 +1160,13 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 available = (
                     not context.error
                     and test_accounts.key(number) not in account_errors
-                    and context.runtime is not None
-                    and not getattr(context.runtime.store, "_closed", False)
+                    and (
+                        context.cold
+                        or (
+                            context.runtime is not None
+                            and not getattr(context.runtime.store, "_closed", False)
+                        )
+                    )
                 )
             except Exception:
                 account_errors.setdefault(test_accounts.key(number), "account_diagnostic_error")
@@ -1100,6 +1180,10 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             and not execution_state["testSuspended"]
         ):
             failures["testAccounts"] = "no_available_test_account"
+        elif active_test_account is not None and not execution_state["testSuspended"]:
+            selected = test_accounts.contexts[active_test_account]
+            if selected.error or selected.runtime is None or selected.runtime.store._closed:
+                failures["testAccounts"] = "selected_test_account_unavailable"
         if execution_state["cleanupUnconfirmed"] or execution_state["persistenceUnconfirmed"]:
             failures["executionMode"] = "state_unconfirmed"
         attention = any(
@@ -1129,6 +1213,17 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             "marketData": market_data,
             "serviceFreshness": freshness,
         }
+        if active_test_account is not None:
+            body.update(
+                activeTestAccountId=active_test_account,
+                coldTestAccountIds=[
+                    n for n, context in test_accounts.contexts.items() if context.cold
+                ],
+                loadedTestAccountCount=sum(
+                    context.runtime is not None and not context.error
+                    for context in test_accounts.contexts.values()
+                ),
+            )
         return JSONResponse(body, status_code=503 if failures else 200)
 
     @app.get("/api/dashboard")
@@ -1159,7 +1254,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             return data
 
         if number is not None:
-            test_context(number)
+            await prepare_test_dashboard(number)
         return read()
 
     @app.get("/api/live/wallet")
@@ -1490,6 +1585,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         if mode_name(mode) != "TEST":
             raise ValueError("此操作仅用于恢复TEST后台，不能启动LIVE")
         number = account_number("TEST", account_id)
+        require_selected_test_account(number)
         test_context(number)
         payload = await request.json()
         if payload != {"confirmation": "RESTORE TEST"}:
@@ -1589,8 +1685,8 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         mode = mode_name(mode)
         number = account_number(mode, account_id)
         if number is not None:
-            context = test_context(number)
-            return view(mode, account_id=context.account_id)
+            await prepare_test_dashboard(number)
+            return view(mode, account_id=number)
         return view(mode)
 
     @app.put("/api/{mode}/preferences")
@@ -1637,6 +1733,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         number = account_number(mode, account_id)
         if number is not None:
             require_test_execution()
+            require_selected_test_account(number)
             requested = test_context(number).runtime
             requested_generation = requested.store.generation
             requested_epoch = requested._start_epoch
@@ -1688,6 +1785,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         mode = mode_name(mode)
         number = account_number(mode, account_id)
         if number is not None:
+            require_selected_test_account(number)
             context = test_context(number)
             if not execution_state["testSuspended"]:
                 context.runtime.pause()
@@ -1752,6 +1850,11 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         if number is not None:
 
             async def read_test(context):
+                if context.cold:
+                    data = await cold_test_view(context).records(
+                        limit, paged, cursor, since, changes_cursor, changes_paged
+                    )
+                    return test_identity(context, data)
                 data = (
                     await records_page_async(
                         context.runtime, limit, cursor, since, changes_cursor, changes_paged
@@ -1761,7 +1864,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 )
                 return test_identity(context, data)
 
-            return await test_operation(number, read_test)
+            return await test_operation(number, read_test, read_only=True)
         return (
             (
                 await records_page_async(
@@ -1781,13 +1884,17 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         if number is not None:
 
             async def validate_test(context):
+                if context.cold:
+                    return test_identity(
+                        context, {"ok": False, "errors": ["该TEST账户只读，未加载运行账本"]}
+                    )
                 require_test_execution()
                 result = await context.runtime.validate_async()
                 # Preserve the legacy validation shape when no account was
                 # selected. New clients explicitly identify even account one.
                 return test_identity(context, result) if account_id is not None else result
 
-            return await test_operation(number, validate_test)
+            return await test_operation(number, validate_test, read_only=True)
         if mode not in runtimes:
             return {"ok": False, "errors": ["LIVE未连接"]}
         if mode == "LIVE":
@@ -1801,9 +1908,14 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         if number is not None:
 
             async def read_test(context):
-                return test_identity(context, await context.sampler.view_async())
+                data = (
+                    await cold_test_view(context).performance()
+                    if context.cold
+                    else await context.sampler.view_async()
+                )
+                return test_identity(context, data)
 
-            return await test_operation(number, read_test)
+            return await test_operation(number, read_test, read_only=True)
         return (
             await samplers[mode].view_async()
             if mode in samplers

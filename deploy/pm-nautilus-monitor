@@ -92,8 +92,10 @@ def get_json(path, authenticated=False, timeout=20):
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.load(response)
 
+cold_ids = set()
 try:
     health = get_json("/api/health")
+    cold_ids = set(health.get("coldTestAccountIds") or [])
     print("health=" + json.dumps(health, ensure_ascii=False, sort_keys=True))
 except Exception as exc:
     print(f"health_error={type(exc).__name__}: {exc}")
@@ -135,10 +137,13 @@ try:
     # A full integrity scan is deliberately more expensive than a health read.
     # Keep fresh full validation, with a separate budget rather than substituting
     # a cached result or treating a short client timeout as ledger corruption.
-    started = time.monotonic()
-    validation = get_json("/api/TEST/validation", authenticated=True, timeout=180)
-    print("validation=" + json.dumps(validation, ensure_ascii=False, sort_keys=True))
-    print(f"validation_seconds={time.monotonic() - started:.3f}")
+    if 1 in cold_ids:
+        print("validation_skipped=read-only account")
+    else:
+        started = time.monotonic()
+        validation = get_json("/api/TEST/validation", authenticated=True, timeout=180)
+        print("validation=" + json.dumps(validation, ensure_ascii=False, sort_keys=True))
+        print(f"validation_seconds={time.monotonic() - started:.3f}")
 except TimeoutError:
     print("validation_unavailable=client timeout after 180s; full result unknown")
 except Exception as exc:
@@ -177,6 +182,8 @@ if database.exists():
             )
     except Exception as exc:
         print(f"sqlite_error={type(exc).__name__}: {exc}")
+elif 1 in cold_ids:
+    print("sqlite_status=uninitialized")
 else:
     print("sqlite_error=database not found")
 
@@ -190,16 +197,18 @@ for account_id in range(1, 11):
             authenticated=True,
         )
         scan = data.get("marketScan") or {}
+        is_cold = data.get("testAccountCold") is True
         summary.update(
             returnedAccountId=data.get("accountId"),
             status=(data.get("strategy") or {}).get("status"),
+            cold=is_cold,
             accountError=data.get("accountError"),
             scanning=scan.get("scanning"),
             backgroundErrors={key: scan[key] for key in (
                 "serviceError", "streamError", "lastError", "categoryError"
             ) if scan.get(key)},
         )
-        if account_id != 1:
+        if account_id != 1 and not is_cold:
             started = time.monotonic()
             result = get_json(
                 f"/api/TEST/validation?account_id={account_id}",
@@ -217,6 +226,10 @@ for account_id in range(1, 11):
         else account_root / "accounts" / str(account_id) / "state.sqlite"
     )
     try:
+        if summary.get("cold") and not account_database.exists():
+            summary["sqliteQuickCheck"] = "uninitialized"
+            print("test_account_health=" + json.dumps(summary, ensure_ascii=False, sort_keys=True))
+            continue
         # mode=ro includes committed WAL changes without creating missing files.
         with closing(sqlite3.connect(
             account_database.resolve().as_uri() + "?mode=ro", uri=True, timeout=10

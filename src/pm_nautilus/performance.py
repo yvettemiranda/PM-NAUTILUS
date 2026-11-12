@@ -14,18 +14,19 @@ CURVE_BATCH_ROWS = 500
 
 
 class PerformanceSampler:
-    def __init__(self, runtime):
+    def __init__(self, runtime, *, read_only=False):
         self.runtime = runtime
         self.session = str(uuid4())
         self.error = None
         self.task = None
-        runtime.store.db.execute("""CREATE TABLE IF NOT EXISTS equity_samples(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            generation TEXT NOT NULL, session TEXT NOT NULL,
-            at_ms INTEGER NOT NULL, pnl INTEGER, total INTEGER)""")
-        runtime.store.db.execute(
-            "CREATE INDEX IF NOT EXISTS equity_generation ON equity_samples(generation,id)"
-        )
+        if not read_only:
+            runtime.store.db.execute("""CREATE TABLE IF NOT EXISTS equity_samples(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                generation TEXT NOT NULL, session TEXT NOT NULL,
+                at_ms INTEGER NOT NULL, pnl INTEGER, total INTEGER)""")
+            runtime.store.db.execute(
+                "CREATE INDEX IF NOT EXISTS equity_generation ON equity_samples(generation,id)"
+            )
         self._curve_generation = None
         self._curve_last_id = 0
         self._curve_last_raw = None

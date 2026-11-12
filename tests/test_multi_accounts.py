@@ -505,3 +505,124 @@ def test_account_one_startup_failure_does_not_disable_existing_siblings(
         assert started.json()["strategy"]["status"] == "RUNNING"
         assert client.get("/api/dashboard?account_id=3").json()["strategy"]["status"] == "PAUSED"
         assert client.get("/api/dashboard?mode=LIVE").status_code == 200
+
+
+def test_single_account_maintains_owned_work_then_reads_unchanged_history(tmp_path, monkeypatch):
+    from pm_nautilus.test_accounts import TestAccounts
+    from pm_nautilus.views import records
+
+    monkeypatch.setenv("PM_TEST_ACTIVE_ACCOUNT", "1")
+    source, clock, token = setup(tmp_path / "seed")
+    accounts = TestAccounts(tmp_path)
+    path = accounts.prepare(2, source.store)
+    source.close()
+    prior = Runtime(path, clock=clock)
+    prior.add_tokens([token])
+    prior.book("1", [(15_000, 100_000_000)], [(20_000, 50_000_000)])
+    prior.start()
+    prior.pause()
+    assert prior.business["cycles"]
+    generation = prior.store.generation
+    prior.close()
+
+    async def exercise():
+        async with account_app(tmp_path, clock) as (app, client):
+            assert set(app.state.test_runtimes) == {1, 2}
+            health = (await client.get("/api/health")).json()
+            assert health["loadedTestAccountCount"] == 2
+            assert health["availableTestAccountCount"] == 10
+            assert health["coldTestAccountIds"] == list(range(3, 11))
+            maintenance = (await client.get("/api/dashboard?account_id=2")).json()
+            assert maintenance["testAccountReadOnly"] and not maintenance["testAccountCold"]
+            assert maintenance["strategy"]["status"] == "PAUSED"
+            assert maintenance["positionCount"] == 1
+            for account in (2, 3):
+                for method, action, payload in (
+                    ("POST", "start", None),
+                    ("POST", "pause", None),
+                    ("PUT", "preferences", {"orderAmount": "9"}),
+                    ("POST", "reset", RESET),
+                    ("POST", "restore-background", {"confirmation": "RESTORE TEST"}),
+                ):
+                    response = await client.request(
+                        method, f"/api/TEST/{action}?account_id={account}", json=payload
+                    )
+                    assert response.status_code == 409
+            assert (await client.post("/api/TEST/start")).json()["strategy"]["status"] == "RUNNING"
+
+            second = app.state.test_runtimes[2]
+            second.book("1", [(40_000, 100_000_000)], [(20_000, 50_000_000)])
+            assert not second.business["cycles"] and second.status == "PAUSED"
+            assert [r["type"] for r in records(second, 2)["records"]] == ["CLOSE", "OPEN"]
+            app.state.test_samplers[2].sample(at_ms=3_600_000)
+            return second.cash(), records(second, 2)["records"]
+
+    async def inspect(cash, expected):
+        async with account_app(tmp_path, clock) as (app, client):
+            assert set(app.state.test_runtimes) == {1}
+            health = (await client.get("/api/health")).json()
+            assert health["loadedTestAccountCount"] == 1
+            assert health["accountErrors"] == {}
+            dashboard = (await client.get("/api/dashboard?account_id=2")).json()
+            assert dashboard["generation"] == generation and dashboard["testAccountCold"]
+            assert float(dashboard["strategy"]["availableCash"]) == cash / 1_000_000
+            assert dashboard["positionCount"] == 0 and not dashboard["capitalEditable"]
+
+            first = (
+                await client.get("/api/TEST/trade-records?account_id=2&paged=true&limit=1")
+            ).json()
+            second = (
+                await client.get(
+                    "/api/TEST/trade-records",
+                    params={
+                        "account_id": 2,
+                        "paged": "true",
+                        "limit": 1,
+                        "cursor": first["nextCursor"],
+                    },
+                )
+            ).json()
+            assert [
+                {key: val for key, val in row.items() if key != "firstSeq"}
+                for row in first["records"] + second["records"]
+            ] == expected
+            perf = (await client.get("/api/TEST/performance?account_id=2")).json()
+            assert perf["generation"] == generation and perf["points"]
+
+            empty = (await client.get("/api/dashboard?account_id=3")).json()
+            assert empty["testAccountCold"] and empty["positionCount"] == 0
+            assert (await client.get("/api/TEST/trade-records?account_id=3&paged=true")).json()[
+                "records"
+            ] == []
+            assert (await client.get("/api/TEST/performance?account_id=3")).json()["points"] == []
+            assert not accounts.path(3).exists()
+            assert set(app.state.test_runtimes) == {1}
+
+    cash, expected = asyncio.run(exercise())
+    before = path.read_bytes()
+    asyncio.run(inspect(cash, expected))
+    assert path.read_bytes() == before
+
+
+def test_single_account_can_select_uninitialized_alternative_without_creating_other_ledgers(
+    tmp_path, monkeypatch
+):
+    from pm_nautilus.test_accounts import TestAccounts
+
+    monkeypatch.setenv("PM_TEST_ACTIVE_ACCOUNT", "2")
+    accounts = TestAccounts(tmp_path)
+
+    async def run():
+        async with account_app(tmp_path) as (app, client):
+            health = (await client.get("/api/health")).json()
+            assert health["activeTestAccountId"] == 2
+            assert health["availableTestAccountCount"] == 10
+            assert set(app.state.test_runtimes) == {2}
+            assert (await client.post("/api/TEST/start")).status_code == 409
+            assert (await client.post("/api/TEST/start?account_id=2")).status_code == 200
+            assert (await client.get("/api/dashboard?mode=LIVE")).json()["executionMode"] == "LIVE"
+
+    asyncio.run(run())
+    assert not accounts.path(1).exists()
+    assert accounts.path(2).is_file()
+    assert not accounts.path(3).exists()

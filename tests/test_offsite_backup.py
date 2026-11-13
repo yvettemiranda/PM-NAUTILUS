@@ -7,6 +7,7 @@ import os
 import sqlite3
 import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -110,6 +111,26 @@ def test_refuses_to_run_as_a_different_owner(app_dir, tmp_path, monkeypatch):
     monkeypatch.setattr(offsite.os, "geteuid", lambda: other)
     with pytest.raises(RuntimeError, match="ledger owner"):
         offsite.build_archive(app_dir, tmp_path / "staging")
+
+
+def test_mixed_ledger_owners_abort_before_any_copy(app_dir, tmp_path, monkeypatch):
+    foreign_ledger = app_dir / "runtime" / "server" / "LIVE" / "state.sqlite"
+    original_stat = Path.stat
+
+    def mixed_owner(path, *args, **kwargs):
+        result = original_stat(path, *args, **kwargs)
+        if path == foreign_ledger:
+            return SimpleNamespace(st_uid=os.geteuid() + 1, st_mode=result.st_mode)
+        return result
+
+    def unexpected_copy(*args, **kwargs):
+        pytest.fail("mixed ledger owners must be rejected before opening any SQLite copy")
+
+    monkeypatch.setattr(Path, "stat", mixed_owner)
+    monkeypatch.setattr(offsite, "copy_sqlite", unexpected_copy)
+    with pytest.raises(RuntimeError, match="one consistent ledger owner"):
+        offsite.build_archive(app_dir, tmp_path / "staging")
+    assert not (tmp_path / "staging").exists()
 
 
 def test_refuses_an_empty_data_directory_and_bad_destination(tmp_path):

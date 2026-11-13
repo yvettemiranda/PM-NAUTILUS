@@ -83,7 +83,14 @@ def freshness_view(state, *, now=None):
         if stamps["failureSince"] is not None
         else None
     )
-    stale = enabled and age is not None and age >= STALE_SECONDS
+    # Scheduled discovery may wait longer than the default diagnostic deadline.
+    # First startup and sustained errors retain their original timeout.
+    stale_after = (
+        max(STALE_SECONDS, _count(state.get("staleAfterSeconds")))
+        if stamps["lastSuccessAt"] is not None
+        else STALE_SECONDS
+    )
+    stale = enabled and age is not None and age >= stale_after
     sustained = (
         enabled
         and error is not None
@@ -120,5 +127,5 @@ def freshness_view(state, *, now=None):
         "pendingQueryCount": _count(state.get("pendingQueryCount")),
         "secondsSinceSuccess": age,
         "failureDurationSeconds": failure_age,
-        "staleAfterSeconds": STALE_SECONDS,
+        "staleAfterSeconds": stale_after,
     }

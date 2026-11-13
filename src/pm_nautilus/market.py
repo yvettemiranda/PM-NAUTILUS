@@ -22,6 +22,7 @@ from .books import Book
 from .rules import Token, Fees, SUPPORTED_CLOB_TICKS
 from .market_availability import market_state, missing_orderbook
 from .store import observed_book_reader
+from .service_freshness import STALE_SECONDS
 
 GAMMA = "https://gamma-api.polymarket.com"
 EVENTS_KEYSET = f"{GAMMA}/events/keyset"
@@ -33,6 +34,7 @@ AVAILABILITY_RECHECK_SECONDS = 300
 # Full public market discovery interval. Held positions never wait for it:
 # their books stay subscribed and are processed on every quote.
 DISCOVERY_SECONDS = 300
+DISCOVERY_FRESHNESS_GRACE_SECONDS = 300
 CLOB_BOOK = "https://clob.polymarket.com/book"
 FRESH_BASELINE_RECOVERY_SECONDS = 30
 DISCOVERY_PAGE_ATTEMPTS = 3
@@ -1213,6 +1215,12 @@ class PublicMarketHub(MarketService):
         self._next_group = 0
         self._subscription_monitored = {}
         super().__init__(_PublicRuntime(self), transport=transport)
+        # TEST diagnostics allow a bounded round after the scheduled interval.
+        # The app's LIVE projection ignores this hint on the shared source.
+        # Repeated attempts never move the deadline from its last-success base.
+        self.discovery_status["staleAfterSeconds"] = max(
+            STALE_SECONDS, DISCOVERY_SECONDS + DISCOVERY_FRESHNESS_GRACE_SECONDS
+        )
 
     def consumer_error(self, service, exc):
         if service.closed:

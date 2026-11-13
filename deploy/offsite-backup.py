@@ -102,10 +102,11 @@ def require_ledger_owner(data_dir: Path):
         for path in data_dir.rglob("*.sqlite")
         if path.is_file() and not skipped(path.relative_to(data_dir))
     }
-    if owners and os.geteuid() not in owners:
+    if owners and owners != {os.geteuid()}:
         raise RuntimeError(
-            f"run as the ledger owner UID {sorted(owners)} (systemd User=10001), "
-            f"not UID {os.geteuid()}: foreign-owned SQLite side files would block the app"
+            f"all ledgers must have one consistent ledger owner UID matching the backup "
+            f"process UID {os.geteuid()} (systemd User=10001); found {sorted(owners)}: "
+            "foreign-owned SQLite side files would block the app"
         )
 
 

@@ -1,12 +1,17 @@
 """Query freshness is observable without pausing trading or exposing holdings."""
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
+import pytest
 
+from pm_nautilus import market
 from pm_nautilus.app import create_app
 from pm_nautilus.service_freshness import freshness_view
+from test_lifecycle import controlled_factory
 
 
 NOW = datetime(2026, 10, 21, 8, tzinfo=timezone.utc)
@@ -57,6 +62,103 @@ def test_staleness_includes_never_completed_first_check_without_warn_on_normal_a
     )
 
 
+@pytest.mark.parametrize("interval, deadline", [(300, 900), (900, 1200), (3600, 3900)])
+def test_test_discovery_allows_scheduled_round_but_stalled_work_still_warns(
+    monkeypatch, interval, deadline
+):
+    monkeypatch.setattr(market, "DISCOVERY_SECONDS", interval)
+
+    async def run():
+        hub = market.PublicMarketHub()
+        live_runtime = SimpleNamespace(store=SimpleNamespace(get=lambda key, default: default))
+        live = market.MarketService(live_runtime)
+        try:
+            hub.discovery_status.update(query_state(age=deadline - 1))
+            view = freshness_view(hub.discovery_status, now=NOW)
+            assert view["status"] == "ok" and view["staleAfterSeconds"] == deadline
+
+            # Progress and retries cannot extend the deadline indefinitely.
+            hub.discovery_status["lastAttemptAt"] = NOW.isoformat()
+            hub.discovery_status["checkedMarketCount"] = 200_000
+            stalled = freshness_view(hub.discovery_status, now=NOW + timedelta(seconds=1))
+            assert stalled["status"] == "attention" and stalled["reason"] == "stale"
+
+            hub.discovery_status.update(
+                query_state(lastSuccessAt=None, monitoringSince=NOW.isoformat())
+            )
+            starting = freshness_view(hub.discovery_status, now=NOW + timedelta(seconds=900))
+            assert starting["status"] == "attention" and starting["staleAfterSeconds"] == 900
+
+            # The direct LIVE service and ordinary settlement have no TEST deadline.
+            live.discovery_status.update(query_state(age=900))
+            assert freshness_view(live.discovery_status, now=NOW)["status"] == "attention"
+            assert freshness_view(query_state(age=900), now=NOW)["staleAfterSeconds"] == 900
+
+            for failed, failure_age in ((3, 60), (1, 900)):
+                hub.discovery_status.update(
+                    query_state(age=10, failed=failed, failure_age=failure_age)
+                )
+                failure = freshness_view(hub.discovery_status, now=NOW)
+                assert failure["status"] == "attention" and failure["reason"] == "query_failed"
+        finally:
+            await hub.http.aclose()
+            await live.http.aclose()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "mode, expected_status, deadline", [("TEST", "ok", 1200), ("LIVE", "attention", 900)]
+)
+def test_application_shared_discovery_deadline_is_test_only(
+    tmp_path, monkeypatch, mode, expected_status, deadline
+):
+    monkeypatch.setenv("PM_DISCOVERY_SECONDS", "900")
+    monkeypatch.setattr(market, "DISCOVERY_SECONDS", 900)
+    monkeypatch.setenv("PM_TEST_ACTIVE_ACCOUNT", "1")
+    monkeypatch.setenv("PM_UI_PASSWORD", "controlled-local-password")
+    monkeypatch.setenv("PM_LIVE_ENABLED", "true" if mode == "LIVE" else "false")
+
+    async def idle_market(_service):
+        await asyncio.Event().wait()
+
+    def factory(owner):
+        client = controlled_factory(owner)
+        client.activate = AsyncMock()
+        return client
+
+    monkeypatch.setattr(market.MarketService, "run", idle_market)
+    monkeypatch.setattr("pm_nautilus.live.load_settings", lambda: {})
+    monkeypatch.setattr("pm_nautilus.live.live_factory", lambda *_: factory)
+    monkeypatch.setattr(
+        "pm_nautilus.redemption.PolygonWallet",
+        lambda _: SimpleNamespace(preflight=lambda: None),
+    )
+    app = create_app(tmp_path, public_data=True)
+    with TestClient(app) as client:
+        client.auth = ("pm", "controlled-local-password")
+        service = app.state.services[mode]
+        hub = app.state.market_hub
+        assert service.hub is hub
+        now = datetime.now(timezone.utc)
+        hub.discovery_status.update(query_state(now=now, age=1000))
+        service.resolution_status = query_state(now=now, age=1000)
+
+        health = client.get("/api/health").json()["serviceFreshness"][mode]
+        dashboard = client.get(f"/api/dashboard?mode={mode}&details=summary").json()
+        for views in (health, dashboard["serviceFreshness"]):
+            assert views["discovery"]["status"] == expected_status
+            assert views["discovery"]["staleAfterSeconds"] == deadline
+            assert views["settlement"]["status"] == "attention"
+            assert views["settlement"]["staleAfterSeconds"] == 900
+        # Reading LIVE must not rewrite the shared TEST diagnostic setting.
+        assert hub.discovery_status["staleAfterSeconds"] == 1200
+        if mode == "LIVE":
+            runtime = app.state.runtimes["LIVE"]
+            assert runtime.client._submit_order.await_count == 0
+            assert runtime.client._cancel_order.await_count == 0
+
+
 def test_projection_allowlists_fields_errors_counts_and_timestamps():
     private = query_state(
         error="https://rpc.private.example?token=private",
@@ -68,12 +170,14 @@ def test_projection_allowlists_fields_errors_counts_and_timestamps():
         consecutiveFailures=True,
         affectedMarketCount=-1,
         pendingQueryCount="private",
+        staleAfterSeconds="private",
     )
     view = freshness_view(private, now=NOW)
     assert "private" not in str(view)
     assert view["error"] == "query_failed" and view["lastAttemptAt"] is None
     assert view["consecutiveFailures"] == view["affectedMarketCount"] == 0
     assert view["pendingQueryCount"] == 0
+    assert view["staleAfterSeconds"] == 900
     assert (
         freshness_view({"enabled": True, "monitoringSince": "2026-10-21"}, now=NOW)["status"]
         == "starting"

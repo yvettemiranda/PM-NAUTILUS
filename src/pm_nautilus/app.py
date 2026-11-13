@@ -314,21 +314,25 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         # Discovery belongs to the shared source, including its in-flight scan.
         # Settlement checks belong to each isolated runtime. Never replay stored
         # settlement_error as evidence of a currently failing process.
-        def project(service):
+        def project(mode, service):
+            discovery = getattr(getattr(service, "hub", None) or service, "discovery_status", {})
+            # The source also serves LIVE after a mode switch. Its extended
+            # TEST discovery deadline must not alter LIVE diagnostics.
+            if mode == "LIVE" and isinstance(discovery, dict) and "staleAfterSeconds" in discovery:
+                discovery = dict(discovery)
+                discovery.pop("staleAfterSeconds")
             return {
-                "discovery": freshness_view(
-                    getattr(getattr(service, "hub", None) or service, "discovery_status", {})
-                ),
+                "discovery": freshness_view(discovery),
                 "settlement": freshness_view(getattr(service, "resolution_status", {})),
             }
 
         result = {}
         for mode, service in service_items():
             if test_errors is None or mode == "LIVE":
-                result[mode] = project(service)
+                result[mode] = project(mode, service)
                 continue
             try:
-                result[mode] = project(service)
+                result[mode] = project(mode, service)
             except Exception:
                 test_errors.setdefault(mode, "account_diagnostic_error")
                 result[mode] = {

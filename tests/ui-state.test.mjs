@@ -30,6 +30,12 @@ test('query freshness concern is separate from healthy prices and clears on reco
  dashboard.serviceFreshness.discovery={...normal,status:'attention',reason:'stale'};
  assert.equal(displayStatus(dashboard,opts).scan,'warning');
  assert.match(displayStatus(dashboard,opts).serviceWarning,/超过 15 分钟/);
+ dashboard.serviceFreshness.discovery.staleAfterSeconds=1200;
+ assert.match(displayStatus(dashboard,opts).serviceWarning,/超过 20 分钟/);
+ dashboard.serviceFreshness.discovery.staleAfterSeconds=3900;
+ assert.match(displayStatus(dashboard,opts).serviceWarning,/超过 65 分钟/);
+ dashboard.serviceFreshness.discovery.staleAfterSeconds='private';
+ assert.match(displayStatus(dashboard,opts).serviceWarning,/超过 15 分钟/);
  dashboard.serviceFreshness={discovery:{...normal},settlement:{...normal}};
  state=displayStatus(dashboard,opts);assert.equal(state.serviceWarning,'');assert.equal(state.scan,'ready');
 });

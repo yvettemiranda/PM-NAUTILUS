@@ -16,9 +16,12 @@ export function serviceFreshnessNotice(freshness) {
     if (state?.status !== "attention") return [];
     const affected = key === "settlement" && state.affectedMarketCount > 0 ? `，影响 ${state.affectedMarketCount} 个市场` : "";
     const duration = state.failureDurationSeconds > 0 ? `，已持续约 ${Math.max(1, Math.floor(state.failureDurationSeconds / 60))} 分钟` : "";
+    const staleSeconds = Number.isFinite(state.staleAfterSeconds) && state.staleAfterSeconds > 0
+      ? state.staleAfterSeconds : 900;
+    const staleMinutes = Math.max(1, Math.ceil(staleSeconds / 60));
     const reason = state.reason === "query_failed"
       ? `连续失败 ${state.consecutiveFailures || 0} 次${duration}${affected}`
-      : "超过 15 分钟未确认成功";
+      : `超过 ${staleMinutes} 分钟未确认成功`;
     return [`${label}需关注：${reason}；正在继续核查。`];
   }).join(" ");
 }

@@ -1008,7 +1008,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
     def require_secure_wallet_request(request):
         _require_secure_wallet_request(request, password)
 
-    def view(mode, limit=20, position_limit=None, account_id=None):
+    def view(mode, limit=20, position_limit=None, account_id=None, *, compact_diagnostics=False):
         mode = mode_name(mode)
         number = account_number(mode, account_id)
         live_status = runtimes["LIVE"].status if "LIVE" in runtimes else "LOCKED"
@@ -1022,7 +1022,14 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             if context is not None and context.cold:
                 data = cold_test_view(context).dashboard("LIVE" in runtimes)
             else:
-                data = dashboard(runtime, service, limit, "LIVE" in runtimes, position_limit)
+                data = dashboard(
+                    runtime,
+                    service,
+                    limit,
+                    "LIVE" in runtimes,
+                    position_limit,
+                    compact_diagnostics=compact_diagnostics,
+                )
             data["activeExecutionMode"] = active_execution_mode()
             data["testExecutionSuspended"] = execution_state["testSuspended"]
             data["modeSwitchInProgress"] = execution_state["transitioning"]
@@ -1237,6 +1244,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         details: str = "all",
         position_limit: int | None = None,
         account_id: str | None = None,
+        compact_diagnostics: bool = False,
     ):
         if not 1 <= limit <= 10000:
             raise ValueError("limit须为1–10000")
@@ -1253,6 +1261,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                 limit if details in {"all", "market"} else 0,
                 position_limit if details in {"all", "positions"} else 0,
                 account_id=number,
+                compact_diagnostics=compact_diagnostics,
             )
             data["details"] = details
             return data

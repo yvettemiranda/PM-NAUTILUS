@@ -204,7 +204,9 @@ def portfolio_view(r, position_limit=None):
     return positions, portfolio
 
 
-def dashboard(r, service=None, limit=20, live_enabled=False, position_limit=None):
+def dashboard(
+    r, service=None, limit=20, live_enabled=False, position_limit=None, *, compact_diagnostics=False
+):
     test_preview = getattr(r, "refresh_test_market_preview", None) if r.mode == "TEST" else None
     if limit and test_preview is not None:
         test_preview()
@@ -216,8 +218,8 @@ def dashboard(r, service=None, limit=20, live_enabled=False, position_limit=None
         for c in r.business["cycles"].values()
         if c["quantity"] > 0 and r.tokens[c["token_id"]].condition_id not in settled
     ]
-    # Rank and diagnose every monitored event, but only build depth-backed token
-    # projections for the visible page. The page size never changes eligibility.
+    # Rank every monitored event, but only build depth-backed token projections
+    # for the visible page. The page size never changes eligibility.
     summaries = []
     test_summary = r.mode == "TEST" and not limit
     event_count = display_event_count = pending_event_count = 0
@@ -238,22 +240,28 @@ def dashboard(r, service=None, limit=20, live_enabled=False, position_limit=None
             pending_event_count += status == "INCOMPLETE"
             continue
         tid = winner.token.token_id if winner else min(ids)
-        missing = sorted(x for x in ids if (book := observed_book(x)) is None or not book.ready)
-        summaries.append(
-            {
-                "eventId": r.tokens[tid].event_id,
-                "cycleId": eid,
-                "status": status,
-                "winner": winner,
-                "tokenId": tid,
-                "ids": ids,
-                "progressPercent": float(r.tokens[tid].progress(r.now)) if limit else 0,
-                "pendingReason": ("AWAITING_FULL_BOOKS" if missing else "AWAITING_EVALUATION")
+        missing = (
+            sorted(x for x in ids if (book := observed_book(x)) is None or not book.ready)
+            if not compact_diagnostics
+            else None
+        )
+        summary = {
+            "eventId": r.tokens[tid].event_id,
+            "cycleId": eid,
+            "status": status,
+            "winner": winner,
+            "tokenId": tid,
+            "ids": ids,
+            "progressPercent": float(r.tokens[tid].progress(r.now)) if limit else 0,
+        }
+        if not compact_diagnostics:
+            summary.update(
+                pendingReason=("AWAITING_FULL_BOOKS" if missing else "AWAITING_EVALUATION")
                 if status == "INCOMPLETE"
                 else None,
-                "missingBookTokenIds": missing,
-            }
-        )
+                missingBookTokenIds=missing,
+            )
+        summaries.append(summary)
     direction = 1 if r.preferences.candidateSortDirection == "ASC" else -1
     if limit:
         summaries.sort(
@@ -266,6 +274,16 @@ def dashboard(r, service=None, limit=20, live_enabled=False, position_limit=None
     for summary in summaries[:limit]:
         eid, ids = summary["cycleId"], summary["ids"]
         status, winner = summary["status"], summary["winner"]
+        if compact_diagnostics:
+            # The page never uses diagnostics for hidden candidate rows. Keep
+            # every visible row's details exact, without building the full list.
+            missing = sorted(x for x in ids if (book := observed_book(x)) is None or not book.ready)
+            summary.update(
+                pendingReason=("AWAITING_FULL_BOOKS" if missing else "AWAITING_EVALUATION")
+                if status == "INCOMPLETE"
+                else None,
+                missingBookTokenIds=missing,
+            )
         tid = summary["tokenId"]
         t = r.tokens[tid]
         v = token_view(r, t)
@@ -297,6 +315,18 @@ def dashboard(r, service=None, limit=20, live_enabled=False, position_limit=None
             }
         )
     scan = dict(service.scan_status) if service else r.store.get("scan", {})
+    diagnostics = {
+        "availableCategories": service.categories if service else r.store.get("categories", []),
+        "eventCount": scan.get("eventCountScanned", 0),
+        "streams": service.stream_diagnostics() if service else None,
+    }
+    if not compact_diagnostics:
+        diagnostics["pendingEvents"] = [
+            {k: e[k] for k in ("eventId", "pendingReason", "missingBookTokenIds")}
+            | ({"cycleId": e["cycleId"]} if e["cycleId"] != e["eventId"] else {})
+            for e in summaries
+            if limit and e["status"] == "INCOMPLETE"
+        ]
     scan.update(
         events=events,
         eventCount=event_count if test_summary else sum(e["status"] == "READY" for e in summaries),
@@ -305,17 +335,7 @@ def dashboard(r, service=None, limit=20, live_enabled=False, position_limit=None
         if test_summary
         else sum(e["status"] == "INCOMPLETE" for e in summaries),
         tokenCount=len(r.monitored),
-        diagnostics={
-            "availableCategories": service.categories if service else r.store.get("categories", []),
-            "eventCount": scan.get("eventCountScanned", 0),
-            "streams": service.stream_diagnostics() if service else None,
-            "pendingEvents": [
-                {k: e[k] for k in ("eventId", "pendingReason", "missingBookTokenIds")}
-                | ({"cycleId": e["cycleId"]} if e["cycleId"] != e["eventId"] else {})
-                for e in summaries
-                if limit and e["status"] == "INCOMPLETE"
-            ],
-        },
+        diagnostics=diagnostics,
     )
     return {
         "version": "0.1.0",

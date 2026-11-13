@@ -1397,7 +1397,7 @@ async function loadDashboard({ silent = false } = {}) {
   try {
     const details = ui.activeTab === "records" ? "summary" : ui.activeTab;
     const positions = ui.positionsExpanded ? "" : `&position_limit=${POSITION_PREVIEW_LIMIT}`;
-    const dashboard = await api(`/api/dashboard?limit=${ui.visibleCandidateCount}&details=${details}${positions}`, {}, target);
+    const dashboard = await api(`/api/dashboard?limit=${ui.visibleCandidateCount}&details=${details}${positions}&compact_diagnostics=true`, {}, target);
     if (sameView(target) && requestedTab === ui.activeTab && request === ui.dashboardRequest && acceptViewResponse(dashboard, target)) applyDashboard(dashboard);
   } catch (error) {
     if (!sameView(target) || request !== ui.dashboardRequest) return;

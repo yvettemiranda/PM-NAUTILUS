@@ -411,7 +411,9 @@ def test_enable_attaches_paused_and_requires_separate_start(tmp_path, monkeypatc
         monkeypatch.setattr(app_module, "RedemptionService", FakeRedemption)
         monkeypatch.setattr(app_module, "PerformanceSampler", FakeSampler)
         monkeypatch.setattr(
-            app_module, "dashboard", lambda runtime, *_: {"strategy": {"status": runtime.status}}
+            app_module,
+            "dashboard",
+            lambda runtime, *_, **__: {"strategy": {"status": runtime.status}},
         )
         monkeypatch.setattr("pm_nautilus.redemption.PolygonWallet", FakeWallet)
         monkeypatch.setattr("pm_nautilus.live.live_factory", lambda *args: None)

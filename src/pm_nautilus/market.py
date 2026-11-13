@@ -7,6 +7,7 @@ import asyncio
 import json
 import random
 import re
+import ssl
 from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -43,6 +44,24 @@ DISCOVERY_RETRY_AFTER_CAP_SECONDS = 5
 DISCOVERY_RETRY_STATUSES = {429, 502, 503, 504}
 # Use the same numeric conversion as Python's original JSON decoder.
 _EVENTS_JSON = msgspec.json.Decoder(float_hook=float)
+# Ordinary CLOB frames are at most list -> message -> levels -> level and
+# express prices/quantities as strings. Restrict the fast path in C rather than
+# traversing every decoded value in Python. Floats and deeper/extended JSON
+# retain the original decoder, including its rounding and recursion limits.
+_WS_JSON_VALUE = str | int | bool | None
+_WS_JSON_SHAPE = _WS_JSON_VALUE
+for _ in range(4):
+    _WS_JSON_SHAPE = _WS_JSON_VALUE | list[_WS_JSON_SHAPE] | dict[str, _WS_JSON_SHAPE]
+_WS_JSON = msgspec.json.Decoder(_WS_JSON_SHAPE, strict=True)
+
+
+def _decode_market_frame(raw):
+    if type(raw) in (str, bytes, bytearray):
+        try:
+            return _WS_JSON.decode(raw)
+        except (msgspec.DecodeError, UnicodeError, RecursionError):
+            pass
+    return json.loads(raw)
 
 
 def _book_ready_reader(runtime):
@@ -213,6 +232,7 @@ class MarketService:
         self.streams = {}
         self.active_groups = {}
         self.sockets = {}
+        self._ws_ssl_context = None
         self._availability_next_check = {}
         self._availability_fresh_pending = set()
         self._availability_subscribe_pending = set()
@@ -468,7 +488,10 @@ class MarketService:
                         include_augmented=include_augmented,
                     ):
                         if t.token_id not in self.unsupported_ticks:
-                            tokens[t.token_id] = t
+                            # Keep only one immutable metadata graph across
+                            # unchanged pages; publication still waits for all pages.
+                            previous = r.tokens.get(t.token_id)
+                            tokens[t.token_id] = previous if previous == t else t
                     checked_markets.update(
                         str(m["id"])
                         for m in event.get("markets") or []
@@ -983,7 +1006,7 @@ class MarketService:
             if raw == "PING":
                 await ws.send("PONG")
                 continue
-            messages = json.loads(raw)
+            messages = _decode_market_frame(raw)
             for msg in messages if isinstance(messages, list) else [messages]:
                 # Read per message: a subscription change during the yield below
                 # applies to the next message. message() copies this set.
@@ -995,6 +1018,14 @@ class MarketService:
             ):
                 self.stream_state(group, "READY")
 
+    def _websocket_ssl_context(self):
+        # Public connections share the same verified trust configuration for
+        # this service lifetime, just as the public HTTP connection pool does.
+        # Reconnects must not reload and retain a CA store for every socket.
+        if self._ws_ssl_context is None:
+            self._ws_ssl_context = ssl.create_default_context()
+        return self._ws_ssl_context
+
     async def socket(self, group):
         r = self.runtime
         backoff = 1
@@ -1005,7 +1036,11 @@ class MarketService:
                 self.stream_state(group, "CONNECTING", previous_error)
                 try:
                     async with connect(
-                        WS, ping_interval=10, ping_timeout=10, max_size=16 * 1024 * 1024
+                        WS,
+                        ping_interval=10,
+                        ping_timeout=10,
+                        max_size=16 * 1024 * 1024,
+                        ssl=self._websocket_ssl_context(),
                     ) as ws:
                         self.socket_opened(group, ws)
                         await ws.send(
@@ -1157,6 +1192,10 @@ class _PublicRuntime:
                 # A page collected before a WS control event cannot roll that
                 # event back when the complete discovery is finally committed.
                 token = replace(token, tick=previous.tick)
+            # Consumers already retain equal immutable Tokens. Keep the source
+            # on that same object after resolving any in-flight WS tick change.
+            if previous == token:
+                continue
             if previous is not None and previous.tick != token.tick:
                 changed_ticks.add(tid)
             self.tokens[tid] = token

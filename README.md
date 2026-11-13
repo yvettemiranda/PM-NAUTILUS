@@ -35,7 +35,7 @@ PAUSE 沿用原含义：停止新买、取消未完成买单，已有仓位的�
 
 保存过 LIVE 模式意图的程序重启后，钱包保持锁定，LIVE 不自动启用，TEST 后台也保持停止。明确选择“恢复TEST后台（保持暂停）”后，仍需手动启动可运行的账户。
 
-LIVE 钱包、资金、订单和账本独立，TEST 优化不进入真实签名或执行逻辑。当前完整接入路径限程序已支持的钱包类型；地区、资金、手续费和账户准入必须当次核对。TEST、CI、镜像或健康检查通过均不代表真实买卖及正额赎回闭环已验收。详见 [LIVE 准备检查](docs/LIVE_READINESS.md)。
+LIVE 钱包、资金、订单和账本独立。TEST 专用优化不改变真实签名与订单提交流程；共用策略的等价性能改动及验证边界见 [当前交接](HANDOFF.md)。当前完整接入路径限程序已支持的钱包类型；地区、资金、手续费和账户准入必须当次核对。TEST、CI、镜像或健康检查通过均不代表真实买卖及正额赎回闭环已验收。详见 [LIVE 准备检查](docs/LIVE_READINESS.md)。
 
 ## 本地使用
 
@@ -78,6 +78,7 @@ Node 24.20.0 用于页面验证，程序运行不需要 Node。部署固定已�
 - [两个版本的维护规则](docs/VERSIONS.md)
 - [TEST 多账户](docs/TEST_ACCOUNTS.md)
 - [可选策略与账本分析](docs/STRATEGY_PREFERENCES.md)
+- [执行保护、行情诊断与性能优化](docs/EXECUTION_RESILIENCE.md)
 - [通用优化与模式互斥](docs/archive/TEST_OPTIMIZATION_20261029.md)
 - [启停、关闭、钱包取消与历史分批修复](docs/archive/EGM_FIXES_20261030.md)
 - [验证结果与未验收范围](docs/VALIDATION.md)

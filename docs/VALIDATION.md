@@ -2,6 +2,16 @@
 
 当前版本入口为 [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main)，唯一固定基准为 [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027)（`4de107a`）。旧分支、标签和旧测试数量不再作为当前版本说明；历史原文可在固定基准及 Git 提交记录中追溯。
 
+## 2026-11-13 全面复核（代码验证完成，最终服务器验收待续）
+
+应用 SHA 为 `7db287219efc60dc4439f193b0b1b8d3fa9b124f`。本地 Python 1,406 项通过、24 项 Linux 专属部署测试跳过，页面逻辑 126 项通过，Ruff 与 164 个文件格式检查通过。AMD64 和 ARM64 的程序、页面与 Docker verify 均成功。[应用 CI](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/43361551695)
+
+本轮增加 TEST 扫描诊断期限的模式隔离、混杂账本属主的备份拒绝，以及无订阅连接的并发关闭测试。确定性覆盖 64 个连接一起进入关闭、关闭异常、调用者取消及保留连接继续接收完整盘口。交易、资金、钱包、签名、赎回及部署脚本未修改；未新增提前结束市场的筛选。
+
+中间版本 `fb0f474` 的服务器验收已完成：在线 TEST validation、实际页面资源和 11 份账本对照通过，含停机 WAL 的原始历史均纳入核查。最终 `7db2872` 已观察到容器启动，但云终端因 Mac 锁屏暂不可操作，最终健康、受控重启和部署后的账本对照尚未完成。恢复工作应先核对实际进程与日志，不应盲目再次部署。[当前交接及接续步骤](../HANDOFF.md#2026-11-13-全面复核与修复最终服务器验收待续)
+
+代码和 TEST 验证不代表真实 LIVE 成交、网络竞争或正额赎回已实测。
+
 ## 2026-11-12 单账户模式与官方市场目录验收
 
 应用 SHA 为 `b0c414244f15a8da1bde548d01c0ac5242803abb`。AMD64 和 ARM64 的 CI 均通过。本地 Python 1,393 项通过、24 项跳过，页面测试 126 项通过。以官方目录实际返回的 100 个事件、910 个市场核对新旧解析结果，四种市场扩展开关组合得到的代币一致。 [应用 CI](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/43162981778)

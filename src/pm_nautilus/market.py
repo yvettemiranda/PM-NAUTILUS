@@ -1481,6 +1481,24 @@ class PublicMarketHub(MarketService):
         # changes subscriptions in place, so another consumer never reconnects
         # merely because TEST was cleared or closed.
         removed_any = False
+        retiring = {}
+        for group in list(self.tasks):
+            if self.active_groups[group] & monitored:
+                continue
+            removed_any = removed_any or bool(self.active_groups[group])
+            self.active_groups[group] = set()
+            retiring[group] = self.tasks.pop(group)
+            retiring[group].cancel()
+        if retiring:
+            # Closing a socket removes all of its subscriptions. Drain empty
+            # sockets together: serial close handshakes can otherwise exceed
+            # the process shutdown grace period with a large public feed.
+            try:
+                await asyncio.gather(*retiring.values(), return_exceptions=True)
+            finally:
+                for group in retiring:
+                    self.active_groups.pop(group, None)
+                    self.streams.pop(group, None)
         for group in list(self.tasks):
             old = self.active_groups[group]
             current = old & monitored
@@ -1496,12 +1514,6 @@ class PublicMarketHub(MarketService):
                 except Exception:
                     # The socket's own heartbeat/retry loop owns reconnection.
                     pass
-            if not current:
-                task = self.tasks.pop(group)
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-                self.active_groups.pop(group, None)
-                self.streams.pop(group, None)
         # A large filter reduction can leave one token on every old socket.
         # Retain the fullest sockets and move only excess fragments; unaffected
         # subscriptions keep their connection and complete book baseline.

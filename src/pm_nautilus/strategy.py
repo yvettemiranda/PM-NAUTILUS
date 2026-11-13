@@ -476,10 +476,16 @@ class Runtime:
         for tid in self.books.keys() - self.monitored:
             del self.books[tid]
             self._preview_cache.pop(tid, None)
-        for iid, tid in list(self.instrument_tokens.items()):
-            if tid not in self.monitored and tid not in historical:
-                self.native.cache.purge_instrument(instrument_id(self.tokens[tid]))
-                del self.instrument_tokens[iid]
+        # Purge is synchronous and touches only the native cache. Snapshot only
+        # removals, preserving mapping order without copying every live pair.
+        stale_instruments = [
+            (iid, tid)
+            for iid, tid in self.instrument_tokens.items()
+            if tid not in self.monitored and tid not in historical
+        ]
+        for iid, tid in stale_instruments:
+            self.native.cache.purge_instrument(instrument_id(self.tokens[tid]))
+            del self.instrument_tokens[iid]
         # Every full subscription plan calls this for every account, several
         # times a second while a discovery scan is in flight. Collect only the
         # stale IDs from the live mapping: copying all (id, token) pairs first

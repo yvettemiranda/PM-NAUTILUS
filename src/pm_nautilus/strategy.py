@@ -32,6 +32,7 @@ from .store import Store
 
 TERMINAL = {"OrderCanceled", "OrderRejected", "OrderDenied", "OrderExpired"}
 _MISSING = object()
+_EMPTY_REFRESH_STATE = ((), None)
 
 
 class TokenRegistry(dict):
@@ -153,6 +154,8 @@ class Runtime:
         self.official_tags = set(self.store.get("official_tags", []))
         self.monitored = set()
         self.events = {}
+        self._eligibility_group_signature = None
+        self._eligibility_group_events = None
         self._cycle_by_token = {
             cycle["token_id"]: key for key, cycle in self.business["cycles"].items()
         }
@@ -362,6 +365,11 @@ class Runtime:
     def refresh_eligibility(self):
         now = self.now
         previous = self.events
+        previous_signature = self._eligibility_group_signature
+        previous_group_events = self._eligibility_group_events
+        # Failed refreshes must never certify a partly updated grouping cache.
+        self._eligibility_group_signature = None
+        self._eligibility_group_events = None
         settled = set(self.business["settled"])
         eligible = {
             tid
@@ -370,9 +378,24 @@ class Runtime:
             and t.condition_id not in settled
             and not self.market_is_unavailable(tid)
         }
-        self.events = {}
-        for tid in eligible:
-            self.events.setdefault(self.cycle_id(self.tokens[tid]), set()).add(tid)
+        # Recheck every token and its current/persisted cycle scope on every
+        # tick. Exact ordered inputs preserve both dict and member-set order;
+        # set equality alone would not prove the same grouping construction.
+        ordered = tuple(eligible)
+        scopes = tuple(self.cycle_id(self.tokens[tid]) for tid in ordered)
+        signature = ordered, scopes
+        if previous is not previous_group_events or signature != previous_signature:
+            events = {}
+            for tid, eid in zip(ordered, scopes):
+                group = events.get(eid)
+                if group is None:
+                    group = events[eid] = set()
+                group.add(tid)
+            self.events = events
+        else:
+            # Keep the original immutable evidence rather than retaining new
+            # but equal market/condition scope strings on every control tick.
+            signature = previous_signature
         self.monitored = set(eligible)
         for cycle in self.business["cycles"].values():
             self.monitored.add(cycle["token_id"])
@@ -405,8 +428,13 @@ class Runtime:
             key = intent["event_id"]
             active.setdefault(key, []).append(oid)
             self._remember_cycle_scope(self.tokens[intent["token_id"]], key)
-        states = {
-            eid: (
+        states = {}
+        for eid in self.events.keys() | self.business["cycles"].keys() | active.keys():
+            cycle = self.business["cycles"].get(eid)
+            if not cycle and eid not in active:
+                states[eid] = _EMPTY_REFRESH_STATE
+                continue
+            states[eid] = (
                 tuple(sorted(active.get(eid, []))),
                 (
                     cycle["quantity"],
@@ -415,11 +443,9 @@ class Runtime:
                     cycle["sold"],
                     tuple(sorted(cycle["stop"].items())),
                 )
-                if (cycle := self.business["cycles"].get(eid))
+                if cycle
                 else None,
             )
-            for eid in self.events.keys() | self.business["cycles"].keys() | active.keys()
-        }
         for eid in states.keys() | self._refresh_events.keys():
             if states.get(eid) != self._refresh_events.get(eid):
                 self.dirty.add(eid)
@@ -430,6 +456,8 @@ class Runtime:
         self.dirty.update(self._terminal_events)
         self._terminal_events.clear()
         self.dirty.update(self._time_sensitive_events & self.events.keys())
+        self._eligibility_group_signature = signature
+        self._eligibility_group_events = self.events
 
     def _eligibility_candidates(self):
         """Tokens whose markets this account may monitor; every token here."""

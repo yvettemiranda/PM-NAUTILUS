@@ -298,6 +298,35 @@ def test_exhausted_work_budget_is_observable_without_deletion(runtime, monkeypat
     assert "candidate" in runtime.store.tokens()
 
 
+def test_budget_exhausted_after_delete_rolls_back_before_commit(runtime, monkeypatch):
+    cold(runtime, "candidate")
+    db = runtime.store.db
+    before = financial_fingerprint(db)
+    timeout = db.execute("PRAGMA busy_timeout").fetchone()[0]
+    deleted = []
+
+    def trace(query):
+        if query.startswith("DELETE FROM tokens"):
+            deleted.append(query)
+
+    # Advance only after reaching a real DELETE, so the final deadline check
+    # must restore the row through ROLLBACK instead of avoiding the write.
+    monkeypatch.setattr("pm_nautilus.metadata_retention.monotonic", lambda: int(bool(deleted)))
+    db.set_trace_callback(trace)
+    try:
+        result = prune(runtime)
+    finally:
+        db.set_trace_callback(None)
+
+    assert deleted == ["DELETE FROM tokens WHERE token_id='candidate'"]
+    assert result["skipped"] == "time_budget"
+    assert result["removed"] == 0 and result["removed_ids"] == ()
+    assert "candidate" in runtime.store.tokens()
+    assert not db.in_transaction
+    assert db.execute("PRAGMA busy_timeout").fetchone()[0] == timeout
+    assert financial_fingerprint(db) == before
+
+
 def test_existing_transaction_and_faulted_runtime_do_no_work(runtime):
     cold(runtime, "candidate")
     with runtime.store.transaction():

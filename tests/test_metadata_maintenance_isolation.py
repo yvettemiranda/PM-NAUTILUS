@@ -42,6 +42,9 @@ def financial_state(app):
 def test_failed_test_prune_does_not_pause_or_skip_other_accounts_and_retry_clears_health(
     tmp_path, monkeypatch, failed_number
 ):
+    # This test isolates account failures, not the cooperative work budget.
+    # CI scheduling may consume the real 25 ms budget even for a single row.
+    monkeypatch.setattr("pm_nautilus.metadata_retention.monotonic", lambda: 0)
     app = app_module.create_app(tmp_path, public_data=False)
     prune = app_module.prune_cold_metadata
     state = {"fail": True, "called": []}

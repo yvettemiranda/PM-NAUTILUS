@@ -23,7 +23,7 @@ UPLOAD_CHUNK = 768 * 1024  # Below the standard HTTPS reverse-proxy body limit.
 MAX_UPLOAD = 256 * MIB
 MAX_DATASETS = 8
 MAX_JOB_SECONDS = 900
-MAX_WORKER_RSS_KIB = 384 * 1024
+MAX_WORKER_ANONYMOUS_KIB = 384 * 1024
 MAX_HEADER = 16 * 1024
 UPLOAD_TTL = 30 * 60
 ROW_ID = re.compile(r"[0-9a-f]{32}")
@@ -253,12 +253,13 @@ class BacktestService:
 
     @staticmethod
     def worker_memory_kib(pid):
+        """Count resident anonymous memory; the runtime also maps shared libraries."""
         if sys.platform != "linux":
             return 0
         try:
             with Path(f"/proc/{pid}/status").open("rb") as stream:
                 for line in stream:
-                    if line.startswith(b"VmRSS:"):
+                    if line.startswith(b"RssAnon:"):
                         return int(line.split()[1])
         except FileNotFoundError:
             pass  # The worker has just exited.
@@ -270,7 +271,7 @@ class BacktestService:
         try:
             async with asyncio.timeout(MAX_JOB_SECONDS):
                 while not waiter.done():
-                    if self.worker_memory_kib(job.process.pid) > MAX_WORKER_RSS_KIB:
+                    if self.worker_memory_kib(job.process.pid) > MAX_WORKER_ANONYMOUS_KIB:
                         error = "回测达到内存上限，请拆分日期或在独立机器上运行"
                         break
                     await asyncio.wait({waiter}, timeout=0.2)

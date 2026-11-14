@@ -20,6 +20,7 @@ from websockets.exceptions import ConnectionClosed
 
 from .config import micros
 from .books import Book
+from .capture_feed import MarketCapture
 from .rules import Token, Fees, SUPPORTED_CLOB_TICKS
 from .market_availability import market_state, missing_orderbook
 from .store import observed_book_reader
@@ -222,9 +223,16 @@ def resolution(raw, token):
 
 
 class MarketService:
-    def __init__(self, runtime, transport=None, hub=None):
+    def __init__(self, runtime, transport=None, hub=None, *, capture=None):
         self.runtime = runtime
         self.hub = hub
+        self.capture = (
+            MarketCapture(runtime, capture)
+            if capture is not None and getattr(runtime, "mode", None) == "TEST"
+            else None
+        )
+        if self.capture is not None:
+            runtime.capture_observer = self.capture
         self.http = (
             hub.http if hub is not None else httpx.AsyncClient(timeout=30, transport=transport)
         )
@@ -261,6 +269,10 @@ class MarketService:
         self.unsupported_ticks = runtime.store.get("unsupported_ticks", {})
         if hub is not None:
             hub.services.add(self)
+
+    def capture_control(self, *, refresh=False):
+        if self.capture is not None:
+            self.capture.observe("sync", refresh)
 
     def stream_state(self, group, state, error=None):
         entry = self.streams.setdefault(group, {})
@@ -524,6 +536,7 @@ class MarketService:
                 consecutiveFailures=0,
                 failureSince=None,
             )
+            self.capture_control(refresh=True)
             r.drain()
             await self.sync_subscriptions()
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
@@ -631,6 +644,8 @@ class MarketService:
                     self._availability_subscribe_pending.add(tid)
                     self._availability_fresh_requested_at[tid] = requested_at
                     unavailable.pop(tid, None)
+                if self.capture is not None:
+                    self.capture.observe("availability", ids, "recovering")
                 self.runtime.dirty.add(self.runtime.cycle_id(token))
                 await self.sync_subscriptions()
             return
@@ -674,6 +689,8 @@ class MarketService:
                 "lastError": None,
             }
         self.runtime.disconnect(ids)
+        if self.capture is not None:
+            self.capture.observe("availability", ids, "unavailable")
         self.recovering_ids().difference_update(ids)
         self._availability_fresh_pending.difference_update(ids)
         self._availability_subscribe_pending.difference_update(ids)
@@ -790,6 +807,7 @@ class MarketService:
         kind = msg.get("event_type")
         ts = int(msg.get("timestamp", 0)) * 1_000_000
         if kind == "price_change":
+            affected = [] if self.capture is not None and self.capture.recording() else None
             for index, change in enumerate(msg.get("price_changes", [])):
                 tid = change.get("asset_id")
                 if tid not in allowed or msg.get("market") != r.tokens[tid].condition_id:
@@ -812,6 +830,11 @@ class MarketService:
                     r.checkpoint_shadow(tid, shadow)
                     r.native.feed_delta(r.tokens[tid], b, side, levels)
                     r.dirty.add(r.cycle_id(r.tokens[tid]))
+                    if affected is not None:
+                        affected.append((tid, change["side"], levels))
+            if affected is not None:
+                # Capture a whole exchange frame before strategy evaluation.
+                self.capture.observe("deltas", affected, ts // 1_000_000)
             r.drain()
         elif kind == "book":
             tid = msg.get("asset_id")
@@ -834,6 +857,8 @@ class MarketService:
                     self._availability_timestamp_floor.pop(tid, None)
                     self.recovering_ids().discard(tid)
                     if was_recovering:
+                        if self.capture is not None:
+                            self.capture.observe("availability", {tid}, "ready")
                         r.dirty.add(r.cycle_id(r.tokens[tid]))
                         r.drain()
         elif kind == "tick_size_change":
@@ -842,6 +867,8 @@ class MarketService:
                 t = replace(r.tokens[tid], tick=micros(msg["new_tick_size"]))
                 if t.tick <= 0:
                     raise ValueError("无效 tick 变更")
+                if self.capture is not None:
+                    self.capture.observe("tick", tid, t.tick)
                 if t.tick not in SUPPORTED_CLOB_TICKS:
                     self.unsupported_ticks[tid] = t.tick
                     r.store.put("unsupported_ticks", self.unsupported_ticks)
@@ -949,6 +976,8 @@ class MarketService:
                     )
                 service._availability_fresh_pending.update(ids)
                 service.recovering_ids().update(ids)
+                if service.capture is not None:
+                    service.capture.observe("availability", ids, "recovering")
                 for tid in ids:
                     service._availability_fresh_requested_at[tid] = now
                     service._availability_subscribe_pending.discard(tid)
@@ -1092,6 +1121,7 @@ class MarketService:
                     # shortening the interval measured from scan completion.
                     self.scan_task = asyncio.create_task(self.run_scan())
                 self.runtime.refresh_eligibility()
+                self.capture_control(refresh=True)
                 self.runtime.drain()
                 if self._scan_finished_at is not None:
                     # Preserve startup ordering: do not subscribe persisted open
@@ -1135,6 +1165,10 @@ class MarketService:
     async def close(self):
         self.closed = True
         self.discovery_status["enabled"] = False
+        if self.capture is not None:
+            self.capture.observe("stop")
+            if getattr(self.runtime, "capture_observer", None) is self.capture:
+                del self.runtime.capture_observer
         tasks = (
             list(self.tasks.values())
             + ([self.loop_task] if self.loop_task else [])
@@ -1367,6 +1401,7 @@ class PublicMarketHub(MarketService):
                     closed + list(tokens.values()), [t["id"] for t in self.categories]
                 )
                 service.runtime.store.put("categories", service.categories)
+                service.capture_control(refresh=True)
                 service.runtime.drain()
                 self.consumer_versions[service] = self.discovery_version
                 self.consumer_market_scopes[service] = scope

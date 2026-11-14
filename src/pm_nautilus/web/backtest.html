@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
     <title>历史回测 · PM-NAUTILUS</title>
-    <link rel="stylesheet" href="/styles.css?v=20261114-backtest" />
+    <link rel="stylesheet" href="/styles.css?v=20261114-recordings" />
   </head>
   <body>
     <main class="app-shell backtest-shell">
@@ -19,6 +19,23 @@
         <p>用历史盘口重新模拟策略。从空仓开始，每次使用独立资金和账本。</p>
       </section>
 
+      <section class="backtest-card" aria-labelledby="capture-title">
+        <div class="section-heading">
+          <h2 id="capture-title">TEST 1 行情录制</h2>
+          <button id="capture-seal" class="button" type="button" hidden>封存当前分段</button>
+        </div>
+        <p id="capture-state" class="field-note" role="status" aria-live="polite">正在读取录制状态…</p>
+        <p id="capture-space" class="field-note"></p>
+        <div id="capture-export" class="capture-export backtest-actions" hidden>
+          <label class="backtest-field">
+            <span>录制日期（北京时间）</span>
+            <select id="capture-date"></select>
+          </label>
+          <a id="capture-download" class="button backtest-link">下载当天已封存分段</a>
+        </div>
+        <p class="field-note">录制支持最高买价 5¢。多日或长期回测可将分段下载到本地使用。</p>
+      </section>
+
       <section class="backtest-card" aria-labelledby="backtest-source-title">
         <div class="section-heading">
           <h2 id="backtest-source-title">行情数据</h2>
@@ -27,7 +44,7 @@
         <form id="backtest-upload" class="backtest-upload">
           <label class="backtest-field">
             <span>导入历史盘口文件</span>
-            <input id="backtest-file" type="file" accept=".ndjson,.jsonl,application/x-ndjson" required />
+            <input id="backtest-file" type="file" accept=".ndjson,.jsonl,.gz,application/x-ndjson,application/gzip" required />
           </label>
           <button id="backtest-import" class="button" type="submit" disabled>导入</button>
           <button id="backtest-abort-upload" class="button" type="button" hidden>取消导入</button>
@@ -133,6 +150,6 @@
         </details>
       </section>
     </main>
-    <script type="module" src="/backtest.js?v=20261114-backtest"></script>
+    <script type="module" src="/backtest.js?v=20261114-recordings"></script>
   </body>
 </html>

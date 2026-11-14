@@ -58,9 +58,9 @@ class TestMarketService(MarketService):
         return await super().get(url, **params)
 
 
-def create_market_service(runtime, transport=None, hub=None):
+def create_market_service(runtime, transport=None, hub=None, *, capture=None):
     kind = TestMarketService if type(runtime) is TestRuntime else MarketService
-    return kind(runtime, transport=transport, hub=hub)
+    return kind(runtime, transport=transport, hub=hub, capture=capture)
 
 
 class TestMarketHub(PublicMarketHub):

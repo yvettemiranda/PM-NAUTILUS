@@ -1000,6 +1000,7 @@ input[type="checkbox"] { width: 15px; height: 15px; margin: 0; }
 .backtest-field input[type="file"] { height: auto; min-height: 36px; }
 .backtest-source-controls { flex-wrap: nowrap; }
 .backtest-source-controls select { flex: 1; }
+.capture-export { margin-top: 12px; }
 .backtest-card .button { min-height: 36px; }
 .backtest-preferences { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
 .backtest-preferences > summary { color: var(--text); font-weight: 600; }

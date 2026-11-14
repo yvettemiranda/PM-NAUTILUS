@@ -1132,6 +1132,9 @@ class RedemptionService:
                         if check_resolution:
                             payouts = resolution(raw, token)
                             if payouts is not None and r.store.generation == generation:
+                                capture = getattr(r, "capture_observer", None)
+                                if capture is not None:
+                                    capture.observe("settlement", token, payouts)
                                 self.identify(token, payouts)
                                 enqueue_claims()
                             if health is not None and r.store.generation == generation:

@@ -27,8 +27,13 @@ services:
       # in 1 s batches. Positions are processed on every quote regardless.
       PM_DISCOVERY_SECONDS: ${PM_DISCOVERY_SECONDS:-900}
       PM_CANDIDATE_BATCH_SECONDS: ${PM_CANDIDATE_BATCH_SECONDS:-1}
+      PM_TEST_CAPTURE_ENABLED: ${PM_TEST_CAPTURE_ENABLED:-true}
+      PM_TEST_CAPTURE_DIR: /recordings/segments
+      PM_TEST_CAPTURE_MAX_GIB: ${PM_TEST_CAPTURE_MAX_GIB:-4}
+      PM_TEST_CAPTURE_RESERVE_GIB: ${PM_TEST_CAPTURE_RESERVE_GIB:-12}
     volumes:
       - ./runtime/server:/data
+      - test-recordings:/recordings
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777
@@ -36,3 +41,6 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+
+volumes:
+  test-recordings:

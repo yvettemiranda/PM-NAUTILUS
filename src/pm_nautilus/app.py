@@ -3,6 +3,7 @@
 import argparse
 import fcntl
 import json
+import logging
 import os
 import re
 import secrets
@@ -19,6 +20,8 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import Preferences, units
 from .backtest_web import BacktestService, backtest_router
+from .capture import CaptureRecorder
+from .capture_web import capture_router
 from .test_market import TestMarketHub as PublicMarketHub
 from .test_market import create_market_service as MarketService
 from .redemption import RedemptionService
@@ -48,6 +51,20 @@ from .web_security import (
     require_secure_wallet_request as _require_secure_wallet_request,
     secret_matches as _secret_matches,  # noqa: F401 - retained public alias
 )
+
+
+LOG = logging.getLogger(__name__)
+GIB = 1024**3
+
+
+def _test_capture(root, public_data):
+    if not public_data or os.getenv("PM_TEST_CAPTURE_ENABLED", "").lower() != "true":
+        return None
+    return CaptureRecorder(
+        Path(os.getenv("PM_TEST_CAPTURE_DIR") or root / "test-recordings"),
+        max_bytes=int(os.getenv("PM_TEST_CAPTURE_MAX_GIB", "4")) * GIB,
+        min_free_bytes=int(os.getenv("PM_TEST_CAPTURE_RESERVE_GIB", "12")) * GIB,
+    )
 
 
 class _LiveBundleResponse(FileResponse):
@@ -104,6 +121,7 @@ def _apply_pacing(env):
 def create_app(data_dir=None, public_data=True, test_clock=None):
     root = Path(data_dir or os.getenv("PM_DATA_DIR", "runtime"))
     backtests = BacktestService(root)
+    recorder = _test_capture(root, public_data)
     _apply_pacing(os.environ)
     password = os.getenv("PM_UI_PASSWORD", "")
     allowed = set(os.getenv("PM_ALLOWED_HOSTS", "localhost,127.0.0.1,::1,testserver").split(","))
@@ -363,7 +381,10 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         context = test_accounts.attach_runtime(account_id, runtime) if mode == "TEST" else None
         if context is None or account_id == 1:
             runtimes[mode] = runtime
-        service = MarketService(runtime, hub=market_hub)
+        if recorder is not None and mode == "TEST" and account_id == 1:
+            service = MarketService(runtime, hub=market_hub, capture=recorder)
+        else:
+            service = MarketService(runtime, hub=market_hub)
         if context is not None:
             context.service = service
             test_accounts.services[account_id] = service
@@ -556,6 +577,8 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             shutting_down = False
             test_accounts.require_safe_archives()
             await storage_guard.start()
+            if recorder is not None:
+                recorder.start()
             from .live_backup import cleanup_stale_live_scratch
 
             cleanup_stale_live_scratch(root / "LIVE")
@@ -677,9 +700,15 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                         cold_test_views.clear()
                     finally:
                         try:
-                            await storage_guard.close()
+                            if recorder is not None:
+                                await recorder.close()
+                        except Exception:
+                            LOG.exception("Could not close the TEST recorder")
                         finally:
-                            lock.close()
+                            try:
+                                await storage_guard.close()
+                            finally:
+                                lock.close()
 
             async def finish_test_shutdown(failures, paused, live_service):
                 async with test_accounts.quiesce():
@@ -748,6 +777,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
     app.state.test_services = test_accounts.services
     app.state.test_samplers = test_accounts.samplers
     app.state.storage_guard = storage_guard
+    app.state.test_capture = recorder
     app.state.maintain_public_metadata_once = maintain_public_metadata_once
 
     install_security(
@@ -1959,6 +1989,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
         }
 
     app.include_router(backtest_router(backtests, backtest_defaults))
+    app.include_router(capture_router(recorder))
     app.mount("/", StaticFiles(directory=Path(__file__).parent / "web", html=True), name="web")
     return app
 

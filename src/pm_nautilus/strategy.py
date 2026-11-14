@@ -278,6 +278,9 @@ class Runtime:
             self.official_tags = set(official_tags)
             self.store.put("official_tags", sorted(self.official_tags))
         self.refresh_eligibility()
+        capture = getattr(self, "capture_observer", None)
+        if capture is not None:
+            capture.observe("sync", True, True, drain=False)
 
     def condition_token_ids(self, condition_id):
         return self.tokens.condition_token_ids(condition_id)
@@ -500,7 +503,7 @@ class Runtime:
         for tid in stale:
             del self.tokens[tid]
 
-    def book(self, token_id, bids, asks, timestamp=None):
+    def book(self, token_id, bids, asks, timestamp=None, *, drain=True):
         b = self.books[token_id]
         shadow = self.shadow_depth(b)
         previous = (dict(b.bid.external), dict(b.ask.external)) if b.ready else None
@@ -509,7 +512,11 @@ class Runtime:
         self.checkpoint_shadow(token_id, shadow)
         self.native.feed(self.tokens[token_id], b, previous)
         self.dirty.add(self.cycle_id(self.tokens[token_id]))
-        self.drain()
+        capture = getattr(self, "capture_observer", None)
+        if capture is not None:
+            capture.observe("book", token_id, b)
+        if drain:
+            self.drain()
 
     @staticmethod
     def shadow_depth(book):
@@ -530,10 +537,15 @@ class Runtime:
             raise
 
     def disconnect(self, token_ids):
+        capture = getattr(self, "capture_observer", None)
+        if capture is not None:
+            token_ids = tuple(token_ids)
         for tid in token_ids:
             if tid in self.books:
                 self.books[tid].disconnect()
                 self.dirty.add(self.cycle_id(self.tokens[tid]))
+        if capture is not None:
+            capture.observe("gap", token_ids)
 
     def recover_projection(self):
         # Rebuild missing application effects from committed native events.
@@ -887,6 +899,7 @@ class Runtime:
             if (
                 not self.market_can_trade(tid)
                 or not b.ready
+                or getattr(b, "replay_invalid_grid", False)
                 or self.cycle_stopped(t)
                 or static_reason(t, self.preferences, self.now, self.official_tags)
             ):
@@ -1113,6 +1126,9 @@ class Runtime:
         self.store.put("status", "RUNNING")
         self._candidate_flushed_at = None  # START evaluates every candidate at once.
         self.refresh_eligibility()
+        capture = getattr(self, "capture_observer", None)
+        if capture is not None:
+            capture.observe("sync", True)
         self.drain()
 
     def start(self):
@@ -1146,6 +1162,9 @@ class Runtime:
         self._start_epoch += 1
         self.store.put("status", "PAUSED")
         self.cancel_buys()
+        capture = getattr(self, "capture_observer", None)
+        if capture is not None:
+            capture.observe("stop")
 
     def update_preferences(self, changes, capital=None):
         if self.faulted:
@@ -1179,6 +1198,9 @@ class Runtime:
         self.refresh_eligibility()
         if self.mode == "TEST":
             self.client.account()
+        capture = getattr(self, "capture_observer", None)
+        if capture is not None:
+            capture.observe("sync", True)
         self.drain()
         return count
 

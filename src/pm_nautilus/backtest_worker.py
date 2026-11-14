@@ -22,9 +22,10 @@ def main():
         os.environ[name] = "1"
     try:
         from .backtest_engine import run_backtest
+        from .capture_replay import open_replay_input
 
         args = json.loads(request.read_text(encoding="utf-8"))
-        with source.open(encoding="utf-8") as stream:
+        with open_replay_input(source) as stream:
             result = run_backtest(
                 stream,
                 preferences=args["preferences"],
@@ -44,7 +45,7 @@ def main():
                 separators=(",", ":"),
             )
         temporary.replace(root / "result.json")
-    except (ValueError, UnicodeError) as exc:
+    except (ValueError, UnicodeError, EOFError) as exc:
         (root / "error.txt").write_text(str(exc)[:500], encoding="utf-8")
         return 2
     except (ImportError, MemoryError, OSError, RuntimeError) as exc:

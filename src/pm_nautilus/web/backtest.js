@@ -11,6 +11,9 @@ const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000;
 const FILL_PREVIEW = 100;
 const SVG = "http://www.w3.org/2000/svg";
 const SESSION_JOB = "pm-backtest-job";
+const captureDate = $("capture-date");
+const captureSeal = $("capture-seal");
+const captureState = $("capture-state");
 
 const defaults = {
   marketTypes: ["BINARY", "TERNARY"], allCategories: true, selectedCategoryIds: [],
@@ -104,6 +107,62 @@ async function api(path, { method = "GET", body, type, timeout = 15000, signal }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("服务器返回了无法识别的回测响应");
   return value;
 }
+
+const captureStates = {
+  disabled: "录制未启用。",
+  pending: "正在初始化录制。",
+  recording: "正在录制 TEST 1 行情。",
+  idle: "等待 TEST 1 运行或盘口就绪。",
+  paused: "TEST 1 暂停，行情录制也已暂停。",
+  disk_low: "磁盘达到保留空间，录制暂停。",
+  quota_full: "录制空间已满，请先导出并核对文件。",
+  error: "录制暂不可用，请查看服务日志。",
+  closed: "录制服务已关闭。",
+};
+
+function syncCaptureDownload() {
+  if (captureDate.value) {
+    $("capture-download").href = `${API}/capture/days/${encodeURIComponent(captureDate.value)}`;
+  } else {
+    $("capture-download").removeAttribute("href");
+  }
+}
+
+function renderCapture(value) {
+  setMessage(captureState, captureStates[value.status] || "录制状态暂不可用。",
+    ["disk_low", "quota_full", "error"].includes(value.status));
+  const mib = (bytes) => number.format(Math.round((bytes || 0) / 1048576 * 10) / 10);
+  const gaps = value.gapCount ? ` · 本次运行记录 ${count(value.gapCount)} 次录制缺口` : "";
+  $("capture-space").textContent = value.enabled
+    ? `使用 ${mib(value.bytes)} / ${mib(value.maxBytes)} MiB · 已封存 ${count(value.sealedCount)} 段${gaps}` : "";
+  captureSeal.hidden = value.status !== "recording";
+  const previouslySelected = captureDate.value;
+  const options = (value.days || []).map((day) => {
+    const option = document.createElement("option");
+    option.value = day.day;
+    option.textContent = `${day.day} · ${count(day.segments)} 段 · ${mib(day.bytes)} MiB`;
+    return option;
+  });
+  captureDate.replaceChildren(...options);
+  if (options.some((option) => option.value === previouslySelected)) {
+    captureDate.value = previouslySelected;
+  }
+  $("capture-export").hidden = !options.length;
+  syncCaptureDownload();
+}
+
+async function refreshCapture() {
+  try { renderCapture(await api("/capture")); }
+  catch (error) { setMessage(captureState, `读取录制状态失败：${error.message}`, true); }
+}
+
+captureDate.addEventListener("change", syncCaptureDownload);
+captureSeal.addEventListener("click", async () => {
+  captureSeal.disabled = true;
+  try { renderCapture(await api("/capture/seal", { method: "POST", timeout: 30000 })); }
+  catch (error) { setMessage(captureState, `封存录制失败：${error.message}`, true); }
+  finally { captureSeal.disabled = false; }
+});
 
 function remember(id) {
   try {
@@ -565,6 +624,10 @@ async function initialize() {
   if (!running && !result) await readTestDefaults();
   initializing = false;
   syncControls();
+  void refreshCapture();
+  setInterval(() => {
+    if (!document.hidden && !captureSeal.disabled) void refreshCapture();
+  }, 30000);
 }
 
 void initialize();

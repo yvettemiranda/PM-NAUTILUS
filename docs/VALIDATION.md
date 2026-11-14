@@ -2,7 +2,13 @@
 
 当前版本入口为 [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main)，唯一固定基准为 [十账户改造前提交 `4de107a`](https://github.com/yvettemiranda/PM-NAUTILUS/commit/4de107a4dc1a4abaaf08b330eb00803391268e2a)。旧分支、标签和旧测试数量不再作为当前版本说明；历史原文可在固定基准及 Git 提交记录中追溯。
 
-2026-11-14 单账户与回测发布验证见 [HANDOFF](../HANDOFF.md#2026-11-14-单账户与历史盘口回测验收)。下面保留此前版本的验收及性能边界。
+TEST 1 持续录制的当前发布与线上验收见 [HANDOFF](../HANDOFF.md)。以下保留此前版本的验收及性能边界。
+
+## TEST 1 持续录制验证
+
+- [数据录制](../tests/test_capture.py)覆盖压缩分段、重新启动、磁盘与队列上限、记录缺口和校验后释放空间。
+- [行情录制](../tests/test_capture_feed.py)和[回放](../tests/test_capture_replay.py)覆盖低价买入、高价卖出、断流、离开订阅、拼接和超范围拒绝。12,303 个订阅、200 个密集买盘的合成基线测试验证了默认 16 MiB 队列下可写入和封存。这个测试只测一次基线。
+- [网页导出](../tests/test_capture_web.py)和[回测](../tests/test_backtest_web.py)覆盖鉴权、按日压缩包、错误校验值、标准压缩行情和回放账户隔离。实际月度增长、长期策略曲线的相似度及半年参数对照均依赖后续真实录制。
 
 ## 2026-11-13 公开行情与页面优化（a543f06）
 

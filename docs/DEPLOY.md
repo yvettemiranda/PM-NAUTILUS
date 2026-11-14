@@ -9,6 +9,7 @@
 | 程序目录 | `/opt/pm-nautilus`（源码由 root 持有，git 命令需 `sudo git -c safe.directory=/opt/pm-nautilus`） |
 | Compose 文件 | 只有基础 `compose.yaml`，没有 `compose.override.yaml` |
 | 数据目录 | `/opt/pm-nautilus/runtime/server`，容器内为 `/data`，属主 UID 10001 |
+| TEST 录制 | Compose 的独立 `test-recordings` 卷，容器内为 `/recordings/segments` |
 | 版本 | `.env` 中的 `PM_GIT_REVISION`（完整 SHA），镜像标签同名 |
 | 健康接口 | `curl -H 'Host: localhost' http://127.0.0.1:8765/api/health`（无需登录） |
 | 部署备份 | `/var/lib/pm-nautilus-deploy/`（部署脚本自动生成，保留最近 5 份） |
@@ -73,6 +74,8 @@ SCRIPT
 ### 3.1 部署时自动备份
 
 由第 2 节的部署脚本在停机状态下完整复制，是每次升级前的一致性快照，保留最近 5 份。它和账本在同一块盘上，只能防止升级出错，防不了服务器损坏。
+
+TEST 1 录制卷在应用升级及普通 Compose 停机间保留。录制文件由回测页按日导出，写入上限和释放空间流程见 [TEST 1 持续录制](BACKTEST.md#test-1-持续录制)。换服务器前单独转移录制文件。保留该卷时使用普通 `docker compose stop`，并避免带 `--volumes` 的清理命令。
 
 ### 3.2 服务器外备份：每日上传腾讯云 COS（可选，当前未启用）
 

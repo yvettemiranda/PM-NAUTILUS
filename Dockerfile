@@ -9,7 +9,7 @@ COPY config/strategy-profile.json ./config/strategy-profile.json
 COPY scripts/apply_preferences.py scripts/compact_metadata.py ./scripts/
 COPY LICENSES ./LICENSES
 COPY NOTICE.md ./NOTICE.md
-RUN chmod -R a+rX src config scripts LICENSES NOTICE.md && uv sync --frozen --no-dev && useradd --uid 10001 --create-home pm && mkdir /data && chown pm:pm /data
+RUN chmod -R a+rX src config scripts LICENSES NOTICE.md && uv sync --frozen --no-dev && useradd --uid 10001 --create-home pm && mkdir -p /data /recordings/segments && chown pm:pm /data /recordings/segments && chmod 700 /recordings/segments
 ARG GIT_REVISION=local
 ENV PM_GIT_REVISION=${GIT_REVISION}
 USER pm

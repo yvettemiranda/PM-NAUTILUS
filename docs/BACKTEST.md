@@ -4,6 +4,34 @@
 
 网页任务从空仓开始。复制 TEST 设置会读取当前参数，运行及修改回测参数在独立的工作目录和进程内完成。曲线缺估值时留空。回测采用 TEST 的买卖档位、剩余深度、价格档位、手续费、部分成交、持仓退出和模拟结算规则。模拟不包含下单及资金操作。参数比较固定行情包、时段和初始资金，先逐笔核对再比较净值。
 
+## TEST 1 持续录制
+
+Docker Compose 默认启用。TEST 1 运行后自动复用原有公开行情；网页「回测」顶部显示状态、已用空间和可下载的日期。分段每 15 分钟或达到大小阈值自动封存，也可点「封存当前分段」立即封存。意外断电或进程被强制中止时，当时未封存的分段可能丢失。每日下载是包含原始 `.ndjson.gz` 的 tar 包；日期按分段开始时刻归属北京时间。搜集半年时，将各日解包到同一目录，保留原文件名，并留存本地副本。
+
+录制保留候选身份与当时市场信息、就绪和断流、可买的 5¢ 及以下卖档和可能持仓的买盘深度，因此仍能回放 45¢ 之类的高价卖出。录制范围由当时 TEST 实际订阅决定；扩宽市场范围或选择当时未订阅的市场时无法重建行情，历史后续退订、暂停、重启或写入中断会形成数据缺口。模拟持仓如果在这些时段缺少盘口，净值留空。结算使用 TEST 已观测确认的结果。超出 5¢ 或已知录制范围的配置会被回测阻止。无需额外拉一套行情。
+
+在装好项目环境的本地电脑上直接回测录制目录，输出 JSON 包含收益曲线、成交和数据覆盖。用同一个目录和区间更换参数文件即可对比。
+
+```sh
+uv run --frozen python -m pm_nautilus.backtest_cli /path/to/segments /path/to/results.json \
+  --preferences /path/to/parameters.json --cash 100 \
+  --start 2026-11-15T00:00:00+08:00 --end 2026-11-30T00:00:00+08:00
+```
+
+短区间也可把分段合并为标准行情包，按网页限制选择导入 `.ndjson` 或压缩后的 `.ndjson.gz`。长时间跨度直接在本地回放省去解压后的合并文件。
+
+```sh
+uv run --frozen python -m pm_nautilus.capture_replay /path/to/tape.ndjson.gz --directory /path/to/segments
+```
+
+每台服务器默认提供 4 GiB 录制空间，并为账本等服务保留至少 12 GiB 或磁盘总量的 20%，取较高值。到达任一限制后停止写入，空间恢复后重新采集；已封存文件保留。容量取决于实际订阅数和盘口更新频率，按页面几天的实际增长估算。下载并解包后可在本地运行下面的命令释放最早的已导出分段。工具验证本地 gzip 及服务器 SHA-256 一致，缺少本地副本时停止。密码走交互提示。
+
+```sh
+uv run --frozen python -m pm_nautilus.capture_admin /path/to/segments --url https://your-app.example --release
+```
+
+Docker 使用独立 `test-recordings` 卷。应用升级和账本备份沿用原流程；迁移服务器时另行导出录制文件。原生运行可设 `PM_TEST_CAPTURE_ENABLED=true`，默认写到数据目录下的 `test-recordings/`，也可设置 `PM_TEST_CAPTURE_DIR`、`PM_TEST_CAPTURE_MAX_GIB` 和 `PM_TEST_CAPTURE_RESERVE_GIB`。
+
 ## 准备真实历史盘口
 
 当前转换器读取本地 [Pendulum Flow v3.1 盘口档案](https://archive.pendulumflow.com/v3.1/) 的分类 Parquet 和同小时同分类的 provenance Parquet。档案按 UTC 小时和类别分段，可只下载所需范围；两份输入应先同发布清单核对 SHA-256。请遵守档案许可和服务的下载限制。网页接收转换后的 NDJSON。大量数据在有空间的机器处理，程序服务器留给小范围试验。

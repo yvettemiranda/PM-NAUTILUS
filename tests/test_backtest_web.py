@@ -1,8 +1,10 @@
+import gzip
 import json
 import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+import pytest
 
 from pm_nautilus.app import create_app
 from pm_nautilus.backtest_web import UPLOAD_CHUNK
@@ -12,7 +14,10 @@ from pm_nautilus.config import Preferences
 SAMPLE = Path(__file__).parent.parent / "src" / "pm_nautilus" / "web" / "backtest-sample.ndjson"
 
 
-def test_authenticated_replay_runs_in_worker_without_changing_test_account(monkeypatch, tmp_path):
+@pytest.mark.parametrize("compressed", [False, True])
+def test_authenticated_replay_runs_in_worker_without_changing_test_account(
+    monkeypatch, tmp_path, compressed
+):
     monkeypatch.setenv("PM_UI_PASSWORD", "local-integration-only")
     monkeypatch.delenv("PM_TEST_ACTIVE_ACCOUNT", raising=False)
     app = create_app(tmp_path, public_data=False)
@@ -26,6 +31,8 @@ def test_authenticated_replay_runs_in_worker_without_changing_test_account(monke
         assert c.post("/api/backtest/uploads").status_code == 403
 
         tape = SAMPLE.read_bytes()
+        if compressed:
+            tape = gzip.compress(tape)
         upload = c.post("/api/backtest/uploads", headers=headers).json()["id"]
         archive_url = f"/api/backtest/uploads/{upload}"
         too_large = c.put(

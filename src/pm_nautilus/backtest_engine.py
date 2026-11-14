@@ -12,6 +12,7 @@ from nautilus_trader.common.component import TestClock
 from nautilus_trader.model.enums import OrderSide
 
 from .config import SAFE_INTEGER, SCALE, Preferences, micros, units
+from .native import instrument_id
 from .order_terms import SUPPORTED_CLOB_TICKS
 from .redemption import RedemptionService
 from .rules import Fees, Token
@@ -58,8 +59,16 @@ def _invalid_constant(_):
     raise ValueError("回测数据含非法数字")
 
 
+def _lines(source):
+    if not hasattr(source, "readline"):
+        yield from source
+        return
+    while line := source.readline(MAX_LINE_BYTES + 1):
+        yield line
+
+
 def _records(source):
-    for number, line in enumerate(source, 1):
+    for number, line in enumerate(_lines(source), 1):
         try:
             if not isinstance(line, (str, bytes)) or len(line) > MAX_LINE_BYTES:
                 raise ValueError("单行回测数据超长或编码无效")
@@ -88,7 +97,61 @@ def validate_header(data):
     notes = data.get("notes", [])
     if type(notes) is not list or len(notes) > 50:
         raise ValueError("数据说明无效")
+    if "captureScope" in data:
+        validate_capture_scope(data["captureScope"])
     return source, start, end, status, [_string(n, "数据说明", 1000) for n in notes]
+
+
+def validate_capture_scope(value):
+    """Read the limits of the original TEST subscriptions for this capture."""
+    if type(value) is not dict or value.keys() - {
+        "maxBuyPriceMicros",
+        "marketCoverage",
+        "preferences",
+        "candidateBatchNs",
+    }:
+        raise ValueError("录制行情范围无效")
+    _integer(value.get("maxBuyPriceMicros"), "录制买价上限", 50_000, 50_000)
+    if value.get("marketCoverage") != "test-subscribed":
+        raise ValueError("录制行情范围无效")
+    if "preferences" in value:
+        Preferences.model_validate(value["preferences"])
+    if "candidateBatchNs" in value:
+        _integer(value["candidateBatchNs"], "候选执行间隔", 0, 10_000_000_000)
+    return value
+
+
+def _validate_capture_preferences(scope, requested):
+    if requested.max_price > scope["maxBuyPriceMicros"]:
+        raise ValueError("TEST 录制数据只支持最高 5¢ 的买入参数")
+    if "preferences" not in scope:
+        return
+    observed = Preferences.model_validate(scope["preferences"])
+    if (
+        not set(requested.marketTypes) <= set(observed.marketTypes)
+        or requested.minMarketDurationDays < observed.minMarketDurationDays
+        or requested.maxMarketDurationDays > observed.maxMarketDurationDays
+        or requested.maxMarketProgressPercent > observed.maxMarketProgressPercent
+        or (
+            requested.includeIndependentMultiMarkets and not observed.includeIndependentMultiMarkets
+        )
+        or (requested.includeAugmentedNegRisk and not observed.includeAugmentedNegRisk)
+        or (
+            not observed.allCategories
+            and (
+                requested.allCategories
+                or not set(requested.selectedCategoryIds) <= set(observed.selectedCategoryIds)
+            )
+        )
+    ):
+        raise ValueError("回测市场参数超出录制时 TEST 的候选范围")
+
+
+def _optional_flag(row, name, default):
+    result = row.get(name, default)
+    if type(result) is not bool:
+        raise ValueError(f"{name} 必须是布尔值")
+    return result
 
 
 def _levels(rows, name):
@@ -142,7 +205,9 @@ def _token(data):
 
 
 class Replay:
-    def __init__(self, runtime, clock, start, end, coverage, notes, *, checkpoint):
+    def __init__(
+        self, runtime, clock, start, end, coverage, notes, *, checkpoint, capture_scope=None
+    ):
         self.runtime = runtime
         self.clock = clock
         self.start = start
@@ -167,7 +232,7 @@ class Replay:
             condition: claim["payouts"] for condition, claim in runtime.business["claims"].items()
         }
         self.started = False
-        self.next_tick = start + CONTROL_MS
+        self.next_tick = start + CONTROL_MS if capture_scope is None else MAX_TIME_MS + 1
         sample_minutes = max(1, -(-(end - start) // ((MAX_CURVE_POINTS - 2) * MINUTE_MS)))
         self.sample_every = sample_minutes * MINUTE_MS
         self.next_sample = start
@@ -185,13 +250,23 @@ class Replay:
         self.unsupported_ticks = set()
         self.gap_since_sample = False
         self.events = Counter()
+        self.capture_scope = capture_scope
+        self.observed_running = False
+        self.capture_gap = False
+        self.in_capture_baseline = False
+        self.capture_baseline_ids = set()
+        self.capture_bid_missing = set()
 
     def _set_time(self, at):
         self.clock.set_time(at * NS_PER_MS)
 
     def _start(self):
         self._set_time(self.start)
-        self.runtime.start()
+        if self.capture_scope is None or self.observed_running:
+            if self.runtime.status != "RUNNING":
+                self.runtime.start()
+        elif self.runtime.status != "PAUSED":
+            self.runtime.pause()
         self.started = True
 
     def _protect_market(self, token):
@@ -223,6 +298,8 @@ class Replay:
             ):
                 raise ValueError("历史合约身份发生改变")
             self.market_ids.add(token.market_id)
+            if self.in_capture_baseline:
+                self.capture_baseline_ids.add(token.token_id)
             if token.condition_id in self.resolved and token.open:
                 raise ValueError("已确认结算的合约不能重新开放")
             if not token.open:
@@ -235,11 +312,14 @@ class Replay:
                 if old and (
                     not old.open
                     or old.tick != token.tick
-                    or token.token_id in runtime.market_availability
+                    or (
+                        self.capture_scope is None and token.token_id in runtime.market_availability
+                    )
                 ):
                     runtime.disconnect([token.token_id])
                     self.waiting_snapshot.add(token.token_id)
-                runtime.market_availability.pop(token.token_id, None)
+                if self.capture_scope is None or (old and not old.open):
+                    runtime.market_availability.pop(token.token_id, None)
                 self.finalized_tokens.discard(token.token_id)
         tags = row.get("officialTags")
         if tags is not None:
@@ -247,7 +327,8 @@ class Replay:
                 raise ValueError("officialTags 必须是字符串数组")
             tags = [_string(tag, "官方栏目ID") for tag in tags]
         runtime.add_tokens(tokens, tags)
-        runtime.drain()
+        if self.capture_scope is None or _optional_flag(row, "drain", True):
+            runtime.drain()
 
     def _named_token(self, row):
         token_id = _string(row["tokenId"], "tokenId")
@@ -265,29 +346,67 @@ class Replay:
             self.unsupported_ticks.add(token.token_id)
             self._protect_market(updated)
         elif token.open and token.condition_id not in self.resolved:
-            self.runtime.market_availability.pop(token.token_id, None)
+            if self.capture_scope is None or token.tick not in SUPPORTED_CLOB_TICKS:
+                self.runtime.market_availability.pop(token.token_id, None)
         self.runtime.add_tokens([updated])
 
-    def _book(self, row, at, venue):
+    def _capture_book_state(self, token_id, row, snapshot=False):
+        if self.capture_scope is None:
+            return
+        if "bidCovered" in row or snapshot:
+            if _optional_flag(row, "bidCovered", True):
+                self.capture_bid_missing.discard(token_id)
+            else:
+                self.capture_bid_missing.add(token_id)
+        if "invalidGrid" in row or snapshot:
+            self.runtime.books[token_id].replay_invalid_grid = _optional_flag(
+                row, "invalidGrid", False
+            )
+
+    def _validate_capture_levels(self, row, bids, asks):
+        if any(price > self.capture_scope["maxBuyPriceMicros"] for price, _ in asks):
+            raise ValueError("录制盘口含 5¢ 以上卖盘")
+        if not _optional_flag(row, "bidCovered", True) and (bids or asks):
+            raise ValueError("未覆盖买盘的合约含可成交深度")
+        _optional_flag(row, "invalidGrid", False)
+
+    def _book(self, row, at, venue, *, drain=True):
         token = self._named_token(row)
         tid = token.token_id
         bids, asks = _levels(row["bids"], "买盘"), _levels(row["asks"], "卖盘")
+        if self.capture_scope is not None:
+            self._validate_capture_levels(row, bids, asks)
         if self.runtime.market_is_unavailable(tid):
             self.ignored_snapshots += 1
             return
         revision = self.runtime.books[tid].revision
-        self.runtime.book(tid, bids, asks, venue)
+        if self.capture_scope is None:
+            self.runtime.book(tid, bids, asks, venue)
+        else:
+            self.runtime.book(tid, bids, asks, venue, drain=False)
         if self.runtime.books[tid].revision == revision:
             self.ignored_snapshots += 1
             return
+        self._capture_book_state(tid, row, snapshot=True)
+        if self.capture_scope is not None and drain:
+            self.runtime.drain()
         self.book_ids.add(tid)
         self.waiting_snapshot.discard(tid)
         self.first_book = at if self.first_book is None else self.first_book
         self.last_book = at
 
-    def _deltas(self, changes, venue, at):
+    def _book_batch(self, books, at, venue):
+        if type(books) is not list:
+            raise ValueError("books 必须是数组")
+        for row in books:
+            if type(row) is not dict:
+                raise ValueError("盘口快照必须是对象")
+            book_venue = _integer(row.get("venueMs", venue), "盘口时间", maximum=MAX_TIME_MS)
+            self._book(row, at, book_venue * NS_PER_MS, drain=False)
+
+    def _deltas(self, changes, venue, at, allow_empty=False):
         runtime = self.runtime
-        if type(changes) is not list or not changes:
+        if type(changes) is not list or (not changes and not allow_empty):
             raise ValueError("changes 必须是非空数组")
         for change in changes:
             if type(change) is not dict:
@@ -299,6 +418,13 @@ class Replay:
                 raise ValueError("盘口增量方向必须为 BUY 或 SELL")
             side = "BID" if side == "BUY" else "ASK"
             levels = _levels(change["levels"], "盘口增量")
+            if self.capture_scope is not None:
+                bids, asks = (levels, ()) if side == "BID" else ((), levels)
+                self._validate_capture_levels(change, bids, asks)
+                if tid in self.capture_bid_missing and levels:
+                    raise ValueError("录制增量未提供可成交的完整盘口")
+                if "bidCovered" in change:
+                    raise ValueError("录制买盘覆盖状态只可用盘口快照更新")
             if runtime.market_is_unavailable(tid):
                 self.ignored_deltas += 1
                 continue
@@ -307,16 +433,146 @@ class Replay:
             if not book.delta(side, levels, venue):
                 self.ignored_deltas += 1
                 continue
+            self._capture_book_state(tid, change)
             runtime.checkpoint_shadow(tid, previous)
             runtime.native.feed_delta(token, book, side, levels)
             runtime.dirty.add(runtime.cycle_id(token))
             self.last_book = at
-        runtime.drain()
+
+    def _capture_availability(self, row):
+        ids = row["tokenIds"]
+        status = row["status"]
+        if type(ids) is not list or not ids or status not in ("recovering", "unavailable", "ready"):
+            raise ValueError("录制市场可用状态无效")
+        runtime = self.runtime
+        for tid in set(_string(tid, "tokenId") for tid in ids):
+            token = self._named_token({"tokenId": tid})
+            if status == "unavailable":
+                runtime.market_recovering.discard(tid)
+                self._protect_market(token)
+            else:
+                runtime.market_availability.pop(tid, None)
+                if status == "recovering":
+                    runtime.market_recovering.add(tid)
+                    runtime.disconnect([tid])
+                    self.waiting_snapshot.add(tid)
+                else:
+                    runtime.market_recovering.discard(tid)
+                    runtime.dirty.add(runtime.cycle_id(token))
+        if _optional_flag(row, "refresh", False):
+            runtime.refresh_eligibility()
+        if _optional_flag(row, "drain", True):
+            runtime.drain()
+
+    def _capture_control(self, row):
+        status = row["status"]
+        if status not in ("RUNNING", "PAUSED"):
+            raise ValueError("录制策略运行状态无效")
+        self.observed_running = status == "RUNNING"
+        if _optional_flag(row, "baselineEnd", False):
+            if not self.in_capture_baseline:
+                raise ValueError("录制盘口基线缺少起始标记")
+            left_scope = self.runtime.tokens.keys() - self.capture_baseline_ids
+            if left_scope:
+                self._capture_detach(left_scope)
+            self.capture_baseline_ids.clear()
+            self.in_capture_baseline = False
+            self.capture_gap = False
+        if not self.started:
+            return
+        if not self.observed_running and self.runtime.status != "PAUSED":
+            self.runtime.pause()
+            self.runtime.refresh_eligibility()
+        elif self.observed_running and self.runtime.status != "RUNNING":
+            self.runtime.start()
+
+    def _capture_event(self, kind, row, at):
+        if kind == "scope":
+            scope = validate_capture_scope(row["captureScope"])
+            if "preferences" in row:
+                if "preferences" in scope and scope["preferences"] != row["preferences"]:
+                    raise ValueError("录制的策略参数重复且不一致")
+                scope = validate_capture_scope(scope | {"preferences": row["preferences"]})
+            _validate_capture_preferences(scope, self.runtime.preferences)
+            self.capture_scope = scope
+            if "candidateBatchNs" in scope:
+                self.runtime.CANDIDATE_BATCH_NS = scope["candidateBatchNs"]
+            self.in_capture_baseline = _optional_flag(row, "baseline", False)
+            self.capture_baseline_ids.clear()
+        elif kind == "availability":
+            self._capture_availability(row)
+        elif kind == "control":
+            self._capture_control(row)
+        elif kind == "pulse":
+            refresh = _optional_flag(row, "refresh", False)
+            if refresh:
+                self.runtime.refresh_eligibility()
+            self.runtime.drain()
+            if refresh:
+                self._progress_claims()
+        elif kind == "book_batch":
+            venue = _integer(row.get("venueMs", at), "盘口时间", maximum=MAX_TIME_MS)
+            self._book_batch(row["books"], at, venue)
+            if _optional_flag(row, "drain", True):
+                self.runtime.drain()
+        else:
+            raise ValueError("不支持的回测事件类型")
+
+    def _capture_detach(self, ids):
+        runtime = self.runtime
+        present = ids & runtime.tokens.keys()
+        if not present:
+            return
+        owned = {cycle["token_id"] for cycle in runtime.business["cycles"].values()}
+        if present & owned - self.waiting_snapshot:
+            self.gap_since_sample = True
+            self.gap_count += 1
+        runtime.disconnect(present)
+        for tid in present:
+            token = runtime.tokens[tid]
+            runtime.market_availability.pop(tid, None)
+            runtime.market_recovering.discard(tid)
+            runtime.books.pop(tid, None)
+            runtime._preview_cache.pop(tid, None)
+            self.capture_bid_missing.discard(tid)
+            self.capture_baseline_ids.discard(tid)
+            if tid in owned:
+                self.waiting_snapshot.add(tid)
+            else:
+                self.waiting_snapshot.discard(tid)
+            historical = runtime.store.db.execute(
+                "SELECT 1 FROM intents WHERE token_id=? LIMIT 1", (tid,)
+            ).fetchone()
+            if tid in owned or historical:
+                # Preserve native order and settlement identity while keeping
+                # unsubscribed contracts out of candidate arbitration.
+                runtime.tokens[tid] = replace(token, open=False)
+            else:
+                iid = instrument_id(token)
+                if runtime.instrument_tokens.pop(str(iid), None) is not None:
+                    runtime.native.cache.purge_instrument(iid)
+                runtime._native_deferred.discard(tid)
+                del runtime.tokens[tid]
+        runtime.refresh_eligibility()
 
     def _gap(self, row):
         ids = row.get("tokenIds", [])
         if type(ids) is not list:
             raise ValueError("tokenIds 必须是数组，空数组表示全体合约")
+        detached = self.capture_scope is not None and _optional_flag(row, "detached", False)
+        if detached:
+            if not ids:
+                raise ValueError("退出采集范围需指定合约")
+            self._capture_detach({_string(tid, "tokenId") for tid in ids})
+            return
+        if not ids and self.capture_scope is not None:
+            self.capture_gap = True
+            self.in_capture_baseline = False
+            self.capture_baseline_ids.clear()
+            self.observed_running = False
+            self.runtime.pause()
+            self.runtime.market_availability.clear()
+            self.runtime.market_recovering.clear()
         ids = {_string(tid, "tokenId") for tid in ids} or set(self.runtime.tokens)
         if ids - self.runtime.tokens.keys():
             raise ValueError("断流记录引用了未知合约")
@@ -369,13 +625,24 @@ class Replay:
             self._book(row, at, venue * NS_PER_MS)
         elif kind in ("delta", "delta_batch"):
             venue = _integer(row.get("venueMs", at), "盘口时间", maximum=MAX_TIME_MS)
-            self._deltas(row["changes"] if kind == "delta_batch" else [row], venue * NS_PER_MS, at)
+            books = row.get("books", []) if kind == "delta_batch" and self.capture_scope else []
+            if books:
+                self._book_batch(books, at, venue)
+            self._deltas(
+                row["changes"] if kind == "delta_batch" else [row],
+                venue * NS_PER_MS,
+                at,
+                allow_empty=bool(books),
+            )
+            self.runtime.drain()
         elif kind == "gap":
             self._gap(row)
         elif kind == "tick":
             self._tick_size(row)
         elif kind == "settlement":
             self._settle(row)
+        elif self.capture_scope is not None:
+            self._capture_event(kind, row, at)
         else:
             raise ValueError("不支持的回测事件类型")
         self.events[kind] += 1
@@ -386,6 +653,20 @@ class Replay:
         _, portfolio = portfolio_view(self.runtime, position_limit=0)
         total = portfolio["totalFunds"]
         missing = portfolio["unvaluedPositionCount"]
+        if self.capture_scope is not None:
+            runtime = self.runtime
+            for cycle in runtime.business["cycles"].values():
+                tid = cycle["token_id"]
+                if (
+                    tid in self.capture_bid_missing
+                    and cycle["quantity"] > 0
+                    and runtime.tokens[tid].condition_id not in runtime.business["settled"]
+                    and runtime.books[tid].ready
+                    and runtime.market_can_trade(tid)
+                ):
+                    missing += 1
+            if missing or self.capture_gap:
+                total = None
         last = self.equity[-1] if self.equity else None
         self.equity.append(
             {
@@ -400,6 +681,16 @@ class Replay:
             }
         )
         self.gap_since_sample = False
+
+    def _progress_claims(self):
+        for condition in sorted(self.claims_to_progress):
+            claim = self.runtime.business["claims"][condition]
+            if claim["state"] == "IDENTIFIED":
+                self.redemption._save_claim(claim, dict(claim, state="CONFIRMED"))
+            else:
+                self.runtime.settlement_fill(claim)
+            if self.runtime.business["claims"][condition]["state"] == "CREDITED":
+                self.claims_to_progress.remove(condition)
 
     def advance_before(self, at):
         """Run scheduled work strictly before the next observation timestamp."""
@@ -417,14 +708,7 @@ class Replay:
                 else:
                     self.runtime.refresh_eligibility()
                     self.runtime.drain()
-                    for condition in sorted(self.claims_to_progress):
-                        claim = self.runtime.business["claims"][condition]
-                        if claim["state"] == "IDENTIFIED":
-                            self.redemption._save_claim(claim, dict(claim, state="CONFIRMED"))
-                        else:
-                            self.runtime.settlement_fill(claim)
-                        if claim["state"] == "CREDITED":
-                            self.claims_to_progress.remove(condition)
+                    self._progress_claims()
                     self.next_tick += CONTROL_MS
             if boundary == self.next_sample:
                 self._sample(boundary)
@@ -477,6 +761,8 @@ class Replay:
         if self.equity[-1]["atMs"] < self.end:
             self._set_time(self.end)
             self._sample(self.end)
+        if self.in_capture_baseline:
+            raise ValueError("所选时段包含未完成的录制盘口基线")
         validation = self.runtime.validate()
         if not validation["ok"]:
             raise ValueError("回测账本核对失败：" + "、".join(validation["errors"]))
@@ -492,6 +778,7 @@ class Replay:
             or self.unsupported_ticks
             or self.ignored_deltas
             or self.first_book > self.start
+            or self.capture_gap
         )
         status = "partial" if incomplete else self.coverage
         fill_count = sum(counts.values())
@@ -522,6 +809,7 @@ class Replay:
                 "emptyStartingPositions": self.starting_positions == 0,
                 "checkpointAtMs": self.start if self.checkpoint else None,
                 "sampleIntervalMs": self.sample_every,
+                **({"captureScope": self.capture_scope} if self.capture_scope is not None else {}),
             },
             "equity": self.equity,
             "fills": fills,
@@ -612,6 +900,9 @@ def run_backtest(
     _, row = next(records, (0, {}))
     try:
         label, data_start, data_end, coverage, notes = validate_header(row)
+        capture_scope = row.get("captureScope")
+        if capture_scope is not None:
+            _validate_capture_preferences(capture_scope, Preferences.model_validate(preferences))
     except (KeyError, ValueError) as exc:
         raise ValueError(f"回测数据头无效：{exc}") from exc
     start = data_start if start_ms is None else _integer(start_ms, "开始时间", data_start, data_end)
@@ -640,7 +931,16 @@ def run_backtest(
                 runtime.store.db.execute(f"PRAGMA max_page_count={max_pages}")
             if checkpoint is None:
                 runtime.update_preferences(preferences, capital=starting_cash)
-            replay = Replay(runtime, clock, start, end, coverage, notes, checkpoint=checkpoint)
+            replay = Replay(
+                runtime,
+                clock,
+                start,
+                end,
+                coverage,
+                notes,
+                checkpoint=checkpoint,
+                **({"capture_scope": capture_scope} if capture_scope else {}),
+            )
             previous = data_start
             for number, record in records:
                 try:

@@ -1,12 +1,14 @@
 """Authenticated, disk-bounded historical replay jobs outside the strategy process."""
 
 import asyncio
+import gzip
 import json
 import os
 import re
 import shutil
 import sys
 import time
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -31,7 +33,13 @@ ROW_ID = re.compile(r"[0-9a-f]{32}")
 
 def dataset_info(path, source_id):
     with path.open("rb") as stream:
-        line = stream.readline(MAX_HEADER + 1)
+        compressed = stream.read(2) == b"\x1f\x8b"
+        stream.seek(0)
+        if compressed:
+            with gzip.GzipFile(fileobj=stream) as decoded:
+                line = decoded.readline(MAX_HEADER + 1)
+        else:
+            line = stream.readline(MAX_HEADER + 1)
     if not line or len(line) > MAX_HEADER:
         raise ValueError("行情包缺少有效的文件头")
     obj = json.loads(line)
@@ -118,7 +126,7 @@ class BacktestService:
             if ROW_ID.fullmatch(path.stem) and path.is_file() and not path.is_symlink():
                 try:
                     result.append(dataset_info(path, path.stem))
-                except (OSError, ValueError, KeyError, RecursionError):
+                except (OSError, EOFError, ValueError, KeyError, RecursionError, zlib.error):
                     continue
         return result
 
@@ -171,9 +179,9 @@ class BacktestService:
         pending = self.get_upload(key)
         try:
             info = dataset_info(pending.path, key)
-        except (ValueError, KeyError, OSError, RecursionError):
+        except (ValueError, KeyError, OSError, EOFError, RecursionError, zlib.error):
             self.drop_upload(key)
-            raise HTTPException(400, "行情包文件头无效，请按文档生成 NDJSON 行情包") from None
+            raise HTTPException(400, "请按文档准备 NDJSON 或 gzip 压缩的 NDJSON 行情包") from None
         pending.path.replace(self.datasets / f"{key}.ndjson")
         self.upload = None
         return info

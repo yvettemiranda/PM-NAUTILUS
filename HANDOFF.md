@@ -2,7 +2,7 @@
 
 ## 当前源码与版本入口
 
-从 `main` 获取单账户 TEST 和历史盘口回测。TEST 沿用原 1 号账本，2–10 号账本保留原路径。回测的网页任务使用独立账本，可导入历史盘口、修改回测参数和查看净值。本地工具另支持与同期 TEST 1 的期初、期末备份对照。见 [历史回测](docs/BACKTEST.md) 及 [部署](docs/DEPLOY.md)。
+从 `main` 获取单账户 TEST 和历史盘口回测。TEST 沿用原 1 号账本，2–10 号账本保留原路径。Docker Compose 默认录制运行中的 TEST 1 公开行情，支持下载后在本地更换参数并回放最高 5¢ 的买入策略。回测的网页任务使用独立账本。本地工具另支持与同期 TEST 1 的期初、期末备份对照。见 [录制与导出](docs/BACKTEST.md#test-1-持续录制) 及 [部署](docs/DEPLOY.md)。
 
 十账户改造前基准 [`4de107a`](https://github.com/yvettemiranda/PM-NAUTILUS/commit/4de107a4dc1a4abaaf08b330eb00803391268e2a) 可从 `main` 历史追溯。以下按应用版本记录历史验收。
 

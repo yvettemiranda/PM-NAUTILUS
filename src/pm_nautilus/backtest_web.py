@@ -23,6 +23,7 @@ UPLOAD_CHUNK = 768 * 1024  # Below the standard HTTPS reverse-proxy body limit.
 MAX_UPLOAD = 256 * MIB
 MAX_DATASETS = 8
 MAX_JOB_SECONDS = 900
+MAX_WORKER_RSS_KIB = 384 * 1024
 MAX_HEADER = 16 * 1024
 UPLOAD_TTL = 30 * 60
 ROW_ID = re.compile(r"[0-9a-f]{32}")
@@ -223,7 +224,12 @@ class BacktestService:
             encoding="utf-8",
         )
         source = self.datasets / f"{payload.sourceId}.ndjson"
-        env = {"PYTHONHASHSEED": "0", "PYTHONDONTWRITEBYTECODE": "1"}
+        env = {
+            "PYTHONHASHSEED": "0",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "MALLOC_ARENA_MAX": "2",
+            "RAYON_NUM_THREADS": "1",
+        }
         if "PYTHONPATH" in os.environ:
             env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
         try:
@@ -245,27 +251,48 @@ class BacktestService:
         job.task = asyncio.create_task(self.observe(job))
         return job
 
+    @staticmethod
+    def worker_memory_kib(pid):
+        if sys.platform != "linux":
+            return 0
+        try:
+            with Path(f"/proc/{pid}/status").open("rb") as stream:
+                for line in stream:
+                    if line.startswith(b"VmRSS:"):
+                        return int(line.split()[1])
+        except FileNotFoundError:
+            pass  # The worker has just exited.
+        return 0
+
     async def observe(self, job):
+        waiter = asyncio.create_task(job.process.wait())
+        error = None
         try:
             async with asyncio.timeout(MAX_JOB_SECONDS):
-                code = await job.process.wait()
+                while not waiter.done():
+                    if self.worker_memory_kib(job.process.pid) > MAX_WORKER_RSS_KIB:
+                        error = "回测达到内存上限，请拆分日期或在独立机器上运行"
+                        break
+                    await asyncio.wait({waiter}, timeout=0.2)
         except TimeoutError:
+            error = "回测超过运行时间限制，请拆分日期或在独立机器上运行"
+        except (OSError, ValueError):
+            error = "无法核对回测进程的资源用量"
+        if error:
             await self.stop_process(job.process)
-            job.error = "回测超过运行时间限制，请拆分日期或在独立机器上运行"
-            job.status = "failed"
+        code = await waiter
+        if job.cancel_requested:
+            job.status = "cancelled"
+        elif error is None and code == 0 and job.result.is_file():
+            job.status = "completed"
         else:
-            if job.cancel_requested:
-                job.status = "cancelled"
-            elif code == 0 and job.result.is_file():
-                job.status = "completed"
-            else:
-                job.status = "failed"
-                failure = job.directory / "error.txt"
-                job.error = (
-                    failure.read_text(encoding="utf-8")[:500]
-                    if failure.is_file()
-                    else "回测超过资源限制或任务异常，请检查行情包并缩小范围"
-                )
+            job.status = "failed"
+            failure = job.directory / "error.txt"
+            job.error = error or (
+                failure.read_text(encoding="utf-8")[:500]
+                if failure.is_file()
+                else "回测超过资源限制或任务异常，请检查行情包并缩小范围"
+            )
         # SIGTERM can interrupt the engine before it can dispose its private ledger.
         for path in job.directory.glob("pm-backtest-*"):
             if path.is_dir() and not path.is_symlink():

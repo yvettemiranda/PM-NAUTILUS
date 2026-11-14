@@ -12,8 +12,6 @@ def main():
     root = request.parent
     os.nice(15)
     resource.setrlimit(resource.RLIMIT_FSIZE, (512 * 1024**2,) * 2)
-    if sys.platform == "linux":
-        resource.setrlimit(resource.RLIMIT_AS, (640 * 1024**2,) * 2)
     # Numerical libraries imported by Nautilus must not start one thread per core.
     for name in (
         "OPENBLAS_NUM_THREADS",
@@ -49,6 +47,9 @@ def main():
     except (ValueError, UnicodeError) as exc:
         (root / "error.txt").write_text(str(exc)[:500], encoding="utf-8")
         return 2
+    except (ImportError, MemoryError, OSError, RuntimeError) as exc:
+        (root / "error.txt").write_text(f"回测进程异常（{type(exc).__name__}）", encoding="utf-8")
+        return 3
     return 0
 
 

@@ -40,7 +40,7 @@ def financial_state(app):
 
 @pytest.mark.parametrize("failed_number", [1, 5, 10])
 def test_failed_test_prune_does_not_pause_or_skip_other_accounts_and_retry_clears_health(
-    tmp_path, monkeypatch, failed_number
+    tmp_path, monkeypatch, failed_number, legacy_test_accounts
 ):
     # This test isolates account failures, not the cooperative work budget.
     # CI scheduling may consume the real 25 ms budget even for a single row.

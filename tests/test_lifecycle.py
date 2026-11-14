@@ -207,10 +207,13 @@ def test_health_reports_background_service_failure(tmp_path, monkeypatch):
         service = app.state.services["TEST"]
         service.scan_status["serviceError"] = "ValueError"
         response = client.get("/api/health")
-        assert response.status_code == 200
-        assert response.json()["status"] == "attention"
+        assert response.status_code == 503
+        assert response.json()["status"] == "degraded"
         assert response.json()["accountErrors"] == {"TEST": "ValueError"}
-        assert response.json()["backgroundErrors"] == {"TEST": "ValueError"}
+        assert response.json()["backgroundErrors"] == {
+            "TEST": "ValueError",
+            "testAccounts": "no_available_test_account",
+        }
         service.scan_status.pop("serviceError")
         assert client.get("/api/health").status_code == 200
 
@@ -234,7 +237,7 @@ def test_public_hub_closes_when_initial_runtime_cannot_start(tmp_path, monkeypat
                 response = await client.get("/api/health")
                 assert response.status_code == 503
                 assert response.json()["availableTestAccountCount"] == 0
-                assert len(response.json()["accountErrors"]) == 10
+                assert len(response.json()["accountErrors"]) == 1
         hub.close.assert_awaited_once()
         with (tmp_path / "process.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

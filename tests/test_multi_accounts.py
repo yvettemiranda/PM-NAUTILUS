@@ -22,6 +22,7 @@ from test_runtime import setup
 
 
 RESET = {"confirmation": "RESET TEST", "finalConfirmation": "RESET TEST AGAIN"}
+pytestmark = pytest.mark.usefixtures("legacy_test_accounts")
 
 
 @pytest.fixture(autouse=True)

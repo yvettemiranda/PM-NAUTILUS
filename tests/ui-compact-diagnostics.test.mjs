@@ -15,7 +15,7 @@ for (const tab of ['positions', 'market', 'records']) test(`the ${tab} page expl
   page.context.fetch = async path => {
     requests.push(new URL(path, 'https://localhost'));
     return reply({
-      executionMode: 'TEST', accountId: 2, generation: 'compact-page',
+      executionMode: 'TEST', accountId: 1, generation: 'compact-page',
       details: tab === 'records' ? 'summary' : tab,
       preferences: profile, strategy: {status: 'PAUSED'}, capitalEditable: true,
       positions: [], positionCount: 0, portfolio: {},
@@ -25,9 +25,9 @@ for (const tab of ['positions', 'market', 'records']) test(`the ${tab} page expl
   await page.context.loadDashboard();
   const request = requests.find(url => url.pathname === '/api/dashboard');
   assert.equal(request.searchParams.get('compact_diagnostics'), 'true');
-  assert.equal(request.searchParams.get('account_id'), '2');
+  assert.equal(request.searchParams.get('account_id'), '1');
   assert.equal(request.searchParams.get('limit'), '40');
   assert.equal(request.searchParams.get('details'), tab === 'records' ? 'summary' : tab);
-  assert.equal(page.ui.dashboard.accountId, 2);
+  assert.equal(page.ui.dashboard.accountId, 1);
   assert.equal(page.ui.dashboardError, null);
 });

@@ -116,7 +116,9 @@ def test_context_lock_survives_runtime_replacement_and_quiesce(tmp_path):
     asyncio.run(run())
 
 
-def test_reset_account_keeps_its_new_settings_after_restart(tmp_path, monkeypatch):
+def test_reset_account_keeps_its_new_settings_after_restart(
+    tmp_path, monkeypatch, legacy_test_accounts
+):
     monkeypatch.delenv("PM_LIVE_ENABLED", raising=False)
     for boot in range(2):
         with TestClient(create_app(tmp_path, public_data=False)) as client:
@@ -183,7 +185,7 @@ def test_unmarked_existing_financial_data_is_never_seeded(tmp_path, evidence):
 
 @pytest.mark.parametrize("failure", ["corrupt", "runtime", "attach"])
 def test_additional_account_boot_failure_keeps_other_accounts_and_live(
-    tmp_path, monkeypatch, failure
+    tmp_path, monkeypatch, failure, legacy_test_accounts
 ):
     monkeypatch.setenv("PM_LIVE_ENABLED", "true")
     monkeypatch.setenv("PM_UI_PASSWORD", "controlled-local-password")

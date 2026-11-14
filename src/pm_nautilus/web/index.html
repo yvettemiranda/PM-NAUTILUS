@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="light" />
     <title>PM-NAUTILUS</title>
     <meta name="description" content="PM-NAUTILUS TEST and LIVE trading account interface." />
-    <link rel="stylesheet" href="/styles.css?v=20261104-ui4" />
+    <link rel="stylesheet" href="/styles.css?v=20261114-backtest" />
   </head>
   <body>
     <main class="app-shell">
@@ -16,12 +16,10 @@
         <span class="brand">PM / NAUTILUS</span>
         <span id="live-run-indicator" class="live-run-indicator" role="status" aria-live="polite">LIVE 状态未确认</span>
         <div class="topbar-actions">
-          <div class="account-controls" role="group" aria-label="交易模式与模拟账户">
+          <div class="account-controls" role="group" aria-label="交易模式">
           <button id="mode-toggle" class="mode-toggle" type="button">TEST</button>
-          <select id="test-account-select" class="test-account-select" aria-label="TEST 账户 1，选择模拟账户" title="TEST 账户 1">
-            <option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option><option value="9">9</option><option value="10">10</option>
-          </select>
           </div>
+          <a class="button backtest-link" href="/backtest.html">历史回测</a>
           <button id="status-toggle" class="status-button" type="button" aria-label="查看运行状态" aria-expanded="false" aria-controls="runtime-status"><span id="run-dot" class="status-dot" aria-live="off"></span><span id="run-state-label">状态</span></button>
           <button id="run-toggle" class="icon-button" type="button" aria-label="开始自动交易"></button>
           <button id="config-toggle" class="icon-button" type="button" aria-label="交易配置" aria-expanded="false" aria-controls="config-panel"></button>
@@ -431,6 +429,6 @@
 
       <p id="message" role="status" aria-live="polite"></p>
     </main>
-    <script type="module" src="/app.js?v=20261111-strategy-options"></script>
+    <script type="module" src="/app.js?v=20261114-backtest"></script>
   </body>
 </html>

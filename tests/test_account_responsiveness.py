@@ -8,6 +8,8 @@ from fastapi.testclient import TestClient
 
 from pm_nautilus.app import create_app
 
+pytestmark = pytest.mark.usefixtures("legacy_test_accounts")
+
 
 @pytest.fixture(autouse=True)
 def local_test_only(monkeypatch):

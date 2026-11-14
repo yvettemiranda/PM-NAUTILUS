@@ -3,14 +3,6 @@ import { curveTimeBounds, resolveCurveWindow, panCurveWindow, curveWindowPoints 
 
 const $ = (selector) => document.querySelector(selector);
 
-function savedTestAccount() {
-  try {
-    const account = Number(window.sessionStorage?.getItem("pm-test-account"));
-    if (Number.isInteger(account) && account >= 1 && account <= 10) return account;
-  } catch { /* A disabled browser store must not prevent using TEST. */ }
-  return 1;
-}
-
 const ui = {
   dashboard: null,
   activeTab: "positions",
@@ -45,7 +37,7 @@ const ui = {
   preferences: null,
   strategyStatus: "STOPPED",
   displayMode: "TEST",
-  testAccountId: savedTestAccount(),
+  testAccountId: 1,
   events: [],
   candidateCount: 0,
   displayCandidateCount: 0,
@@ -389,17 +381,7 @@ function renderModeControl() {
       : "当前 TEST 模式，点击切换到 LIVE",
   );
   $("#live-wallet-panel").hidden = !liveView;
-  renderTestAccountControl();
   renderLiveWallet();
-}
-
-function renderTestAccountControl() {
-  const control = $("#test-account-select");
-  control.hidden = ui.displayMode !== "TEST";
-  control.value = String(ui.testAccountId);
-  control.disabled = ui.controlPending;
-  control.title = `${accountLabel()}，切换查看和操作的账户`;
-  control.setAttribute("aria-label", `${accountLabel()}，选择模拟账户`);
 }
 
 function liveStartAvailable() {
@@ -768,7 +750,6 @@ $("#wallet-remove-form").addEventListener("submit", (event) => {
 });
 
 function renderRunControls() {
-  renderTestAccountControl();
   const running = ui.strategyStatus === "RUNNING";
   const paused = ui.strategyStatus === "PAUSED";
   const liveView = ui.displayMode === "LIVE";
@@ -1751,24 +1732,6 @@ function clearCurrentView({ responseError = null } = {}) {
   renderModeControl();
   renderRunControls();
 }
-
-$("#test-account-select").addEventListener("change", (event) => {
-  const accountId = Number(event.target.value);
-  if (ui.displayMode !== "TEST" || !Number.isInteger(accountId) || accountId < 1 || accountId > 10 || accountId === ui.testAccountId) {
-    renderTestAccountControl();
-    return;
-  }
-  if (ui.controlPending || ui.configDirty) {
-    renderTestAccountControl();
-    showMessage(ui.controlPending ? "当前操作正在处理，请稍后再切换账户" : "有未保存设置，请先保存；如需放弃草稿，可刷新页面后切换账户", true);
-    return;
-  }
-  ui.testAccountId = accountId;
-  try { window.sessionStorage?.setItem("pm-test-account", String(accountId)); } catch { /* Selection still works without browser storage. */ }
-  clearCurrentView();
-  showMessage(`已切换到${accountLabel()}`);
-  void loadDashboard();
-});
 
 $("#mode-toggle").addEventListener("click", () => {
   if (ui.walletPending) { showMessage("钱包操作正在处理，请稍后切换", true); return; }

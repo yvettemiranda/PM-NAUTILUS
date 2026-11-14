@@ -19,8 +19,10 @@ from test_test_optimization_equivalence import DAY, token_set
 @pytest.mark.parametrize("account_id", [1, 10])
 @pytest.mark.parametrize("read", [None, "summary", "market", "preferences"])
 def test_quick_pause_start_uses_new_quotes_independently_of_page_reads(
-    tmp_path, monkeypatch, account_id, read
+    tmp_path, monkeypatch, account_id, read, request
 ):
+    if account_id == 10:
+        request.getfixturevalue("legacy_test_accounts")
     monkeypatch.delenv("PM_LIVE_ENABLED", raising=False)
     monkeypatch.delenv("PM_UI_PASSWORD", raising=False)
     clock = TestClock()

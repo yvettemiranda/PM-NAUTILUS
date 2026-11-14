@@ -119,7 +119,9 @@ def test_test_summary_revalues_owned_books_on_every_read(tmp_path):
 
 
 @pytest.mark.parametrize("account_id", [1, 10])
-def test_test_dashboard_projects_only_selected_service_freshness(tmp_path, monkeypatch, account_id):
+def test_test_dashboard_projects_only_selected_service_freshness(
+    tmp_path, monkeypatch, account_id, legacy_test_accounts
+):
     monkeypatch.delenv("PM_LIVE_ENABLED", raising=False)
     monkeypatch.delenv("PM_UI_PASSWORD", raising=False)
     app = app_module.create_app(tmp_path, public_data=False)

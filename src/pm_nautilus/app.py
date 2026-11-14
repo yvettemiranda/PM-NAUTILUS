@@ -17,7 +17,8 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .config import Preferences
+from .config import Preferences, units
+from .backtest_web import BacktestService, backtest_router
 from .test_market import TestMarketHub as PublicMarketHub
 from .test_market import create_market_service as MarketService
 from .redemption import RedemptionService
@@ -32,7 +33,7 @@ from .storage_guard import StorageGuard
 from .metadata_retention import prune_cold_metadata
 from .service_freshness import freshness_view
 from .test_account_view import ColdTestView
-from .test_accounts import TestAccounts
+from .test_accounts import PrimaryTestAccount
 from .execution_mode import ExecutionModeStore
 from .live_wallet_records import (
     ledger_has_activity,
@@ -102,6 +103,7 @@ def _apply_pacing(env):
 
 def create_app(data_dir=None, public_data=True, test_clock=None):
     root = Path(data_dir or os.getenv("PM_DATA_DIR", "runtime"))
+    backtests = BacktestService(root)
     _apply_pacing(os.environ)
     password = os.getenv("PM_UI_PASSWORD", "")
     allowed = set(os.getenv("PM_ALLOWED_HOSTS", "localhost,127.0.0.1,::1,testserver").split(","))
@@ -113,11 +115,8 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
     services = {}
     cold = {}
     samplers = {}
-    test_accounts = TestAccounts(root)
-    configured_test_account = os.getenv("PM_TEST_ACTIVE_ACCOUNT")
-    active_test_account = (
-        test_accounts.account_id(configured_test_account) if configured_test_account else None
-    )
+    test_accounts = PrimaryTestAccount(root)
+    active_test_account = test_accounts.selected_account(os.getenv("PM_TEST_ACTIVE_ACCOUNT"))
     cold_test_views = {}
     cold_test_stores = ExitStack()
     market_hub = None
@@ -555,6 +554,7 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             raise RuntimeError("此数据目录已有运行实例") from exc
         try:
             shutting_down = False
+            test_accounts.require_safe_archives()
             await storage_guard.start()
             from .live_backup import cleanup_stale_live_scratch
 
@@ -666,6 +666,10 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
                                 failures.append(exc)
                             finally:
                                 live.store.close()
+                        try:
+                            await backtests.close()
+                        except Exception as exc:
+                            failures.append(exc)
                         await finish_test_shutdown(failures, paused, live_service)
                 finally:
                     try:
@@ -1941,6 +1945,20 @@ def create_app(data_dir=None, public_data=True, test_clock=None):
             }
         )
 
+    def backtest_defaults():
+        context = test_context(1, allow_cold=True)
+        if context.cold:
+            store = cold_test_view(context).store
+            preferences = Preferences.model_validate(store.get("preferences", {}))
+        else:
+            store = context.runtime.store
+            preferences = context.runtime.preferences
+        return {
+            "preferences": preferences.model_dump(mode="json"),
+            "initialCash": units(store.get("initial_capital", 100_000_000)),
+        }
+
+    app.include_router(backtest_router(backtests, backtest_defaults))
     app.mount("/", StaticFiles(directory=Path(__file__).parent / "web", html=True), name="web")
     return app
 

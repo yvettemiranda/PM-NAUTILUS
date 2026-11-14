@@ -1,6 +1,6 @@
 # 从 GitHub 到首次实盘
 
-当前版本统一从 [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) 获取。十账户改造前的固定基准为 [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027)，提交 `4de107a4dc1a4abaaf08b330eb00803391268e2a`，仅供回看和对照，不是默认安装版本。旧开发分支不再作为入口；完整提交历史仍保留。
+从 [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) 获取当前版本。十账户改造前的[历史基准提交 `4de107a`](https://github.com/yvettemiranda/PM-NAUTILUS/commit/4de107a4dc1a4abaaf08b330eb00803391268e2a)供追溯和对照。
 
 当前已部署的应用 SHA 以 [HANDOFF](../HANDOFF.md) 为准，后续纯文档提交可使 `main` 比应用 SHA 更新；须核对差异只涉及文档，不因此重启镜像。当前验证与服务器采样见 [HANDOFF](../HANDOFF.md) 和 [VALIDATION](VALIDATION.md)。
 
@@ -36,7 +36,7 @@
 
 GitHub 有程序、说明和你同意公开的 `config/strategy-profile.json`。它**没有**服务器钱包、解锁密码、真实交易记录或最新账本。公开规则文件也不会随着你在网页改参数而自动更新；以后换服务器前要确认它仍是你想用的规则。
 
-全部十个 TEST 的模拟历史是否保留由你明确决定，不能只迁移 1 号而无意漏掉 2—10 号。**第一次实盘以后，LIVE 账本就不能随便丢。**它记录程序自己的订单、持仓和待结算权利；只下载 GitHub 后从空白 LIVE 启动，程序无法可靠识别这些历史。LIVE 页的 `.pmnb` 是下载时的加密快照，可作日常备份，但当前程序在 PAUSE 后仍可能继续卖出或赎回，所以它不能自动作为最后一份迁移备份。换服务器时由管理员停止旧实例、制作最终一致性加密备份，再在新服务器恢复并核对；不能让两台服务器同时管理同一钱包。已开始的恢复会先完成钱包和账本写入再释放操作锁；取消网页请求不等于停止后台恢复，应重新查看钱包状态。备份和恢复细节见[部署手册](DEPLOY.md)。
+迁移时保留全部现有 TEST 历史，包括旧 TEST 2–10 的归档账本。**第一次实盘以后，LIVE 账本记录程序的订单、持仓和待结算权利。**只重新下载源码并以空白 LIVE 启动，程序无法可靠识别这些历史。LIVE 页的 `.pmnb` 可作日常加密备份。由于 PAUSE 后仍可能卖出或赎回，换服时须先停止旧实例，再制作最终一致性加密备份，在新服务器恢复和核对后才启用另一实例。已开始的恢复会完成钱包和账本写入再释放操作锁。取消网页请求后应重新查看钱包状态。[部署手册](DEPLOY.md)
 
 ## 可以直接发给未来 Codex 的话
 

@@ -34,6 +34,10 @@ async def idle(*_args):
 
 @contextmanager
 def wallet_app(path, monkeypatch, *, legacy=False):
+    # The former account matrix remains useful for cross-owner transition regression.
+    from pm_nautilus.test_accounts import TestAccounts
+
+    monkeypatch.setattr(app_module, "PrimaryTestAccount", TestAccounts)
     state = {"live": [], "activate": None, "shutdown": None, "readiness": None}
     original = app_module.Runtime
 

@@ -174,7 +174,6 @@ details > summary:hover { color: var(--text); }
   min-width: 56px;
   padding: 0 12px;
   border: 0;
-  border-right: 1px solid var(--line);
   background: transparent;
   color: var(--text);
   font-size: 12px; font-weight: 700; letter-spacing: .04em;
@@ -183,19 +182,7 @@ details > summary:hover { color: var(--text); }
 .mode-toggle[data-mode="LIVE"] { background: var(--negative-soft); color: var(--live); }
 .mode-toggle:hover { background: var(--surface-2); }
 .mode-toggle[data-mode="LIVE"]:hover { background: var(--negative-soft); }
-.test-account-select {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 56px; height: 100%;
-  padding: 0 22px 0 14px;
-  border: 0;
-  background: transparent var(--icon-select) no-repeat right 9px center;
-  color: var(--text);
-  font-size: 14px; font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-.test-account-select:hover:not(:disabled) { background-color: var(--surface-2); }
-.test-account-select:disabled { opacity: .5; }
+.backtest-link { height: 36px; white-space: nowrap; text-decoration: none; }
 
 .status-button {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
@@ -953,7 +940,7 @@ input[type="checkbox"] { width: 15px; height: 15px; margin: 0; }
 
 @media (pointer: coarse) {
   .curve-scales button, .curve-navigation button { min-height: 34px; min-width: 34px; }
-  .account-controls, .status-button, .icon-button { height: 40px; }
+  .account-controls, .status-button, .icon-button, .backtest-link { height: 40px; }
   .icon-button { width: 40px; }
 }
 
@@ -962,7 +949,120 @@ input[type="checkbox"] { width: 15px; height: 15px; margin: 0; }
 }
 
 @media (forced-colors: active) {
-  .test-account-select { appearance: auto; padding: 0 4px; background-image: none; }
   .icon-button::before, .position-summary::after, .market-summary::after, details > summary::before { forced-color-adjust: none; background: ButtonText; }
   .account-controls, .icon-button { border: 1px solid ButtonText; }
+}
+
+/* ---------- Historical replay ---------- */
+.backtest-shell { max-width: 1080px; }
+.backtest-topbar { justify-content: space-between; }
+.backtest-topbar > a { text-decoration: none; }
+.backtest-title { margin: 24px 0; }
+.backtest-title h1 { margin: 0 0 4px; font-size: clamp(24px, 4vw, 32px); letter-spacing: -.03em; }
+.backtest-title p { margin: 0; color: var(--muted); }
+.backtest-card {
+  margin: 0 0 14px;
+  padding: 18px 22px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.backtest-card fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.backtest-card .section-heading { margin-bottom: 14px; }
+.backtest-card h2, .backtest-card h3 { margin: 0; }
+.backtest-card .field-note { margin: 9px 0 0; }
+.backtest-card [role="status"]:empty { display: none; }
+.backtest-card [data-tone="negative"] { color: var(--negative); }
+.backtest-help-link { color: var(--accent); font-size: 13px; }
+.backtest-upload, .backtest-source-controls, .backtest-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px;
+}
+.backtest-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 205px), 1fr));
+  gap: 12px 16px;
+}
+.backtest-field { display: grid; min-width: 0; gap: 5px; align-content: start; }
+.backtest-field > span, .backtest-field > label { color: var(--muted); font-size: 12px; }
+.backtest-field input, .backtest-field select {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 5px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+}
+.backtest-field input[type="file"] { height: auto; min-height: 36px; }
+.backtest-source-controls { flex-wrap: nowrap; }
+.backtest-source-controls select { flex: 1; }
+.backtest-card .button { min-height: 36px; }
+.backtest-preferences { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.backtest-preferences > summary { color: var(--text); font-weight: 600; }
+.backtest-preferences > .backtest-fields { margin: 12px 0; }
+.backtest-card .backtest-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 16px;
+  padding: 4px 0;
+  margin-top: 12px;
+}
+.backtest-options legend { color: var(--muted); font-size: 12px; }
+.backtest-options label { display: inline-flex; gap: 5px; align-items: center; }
+.backtest-actions { margin-top: 16px; }
+.backtest-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 126px), 1fr));
+  gap: 12px;
+  margin: 14px 0;
+}
+.backtest-metrics > div { padding: 9px 11px; border-radius: var(--radius); background: var(--surface-2); }
+.backtest-metrics dt { color: var(--muted); font-size: 12px; }
+.backtest-metrics dd { margin: 3px 0 0; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.backtest-figure { min-width: 0; margin: 18px 0; }
+.backtest-figure figcaption { color: var(--text); font-size: 13px; font-weight: 600; }
+.backtest-chart { display: block; width: 100%; height: auto; min-height: 140px; }
+.backtest-chart text { fill: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; }
+.backtest-chart .chart-gridline { stroke: var(--line); vector-effect: non-scaling-stroke; }
+.backtest-chart polyline {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2px;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+.backtest-chart .chart-prior-line { stroke: var(--muted); stroke-dasharray: 4 3; }
+.backtest-chart .chart-current-line.chart-point { fill: var(--accent); }
+.backtest-chart .chart-prior-line.chart-point { fill: var(--muted); }
+.backtest-chart-legend { display: flex; flex-wrap: wrap; gap: 7px 16px; color: var(--muted); font-size: 12px; }
+.backtest-chart-legend span::before {
+  display: inline-block;
+  width: 15px;
+  margin-right: 6px;
+  border-top: 2px solid var(--accent);
+  content: "";
+  vertical-align: middle;
+}
+.backtest-chart-legend .chart-key-prior::before { border-top: 2px dashed var(--muted); }
+.backtest-sample-control { display: flex; align-items: center; gap: 12px; margin-top: 9px; font-size: 12px; }
+.backtest-sample-control input { flex: 1; min-width: 0; max-width: 28rem; }
+.backtest-coverage ul { margin: 5px 0; padding-left: 1.25rem; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.backtest-table-wrap { margin-top: 8px; overflow: auto; }
+.backtest-table { min-width: 530px; width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.backtest-table th, .backtest-table td { padding: 8px; border-bottom: 1px solid var(--line); text-align: left; }
+.backtest-table th { color: var(--muted); white-space: nowrap; }
+.backtest-table td:nth-child(2) { max-width: 18rem; overflow-wrap: anywhere; }
+
+@media (max-width: 720px) {
+  .backtest-card { padding: 14px; }
+  .backtest-title { margin: 16px 0; }
+  .backtest-field input, .backtest-field select { font-size: 16px; }
+  .backtest-upload { align-items: stretch; }
+  .backtest-upload .backtest-field { flex: 1 1 210px; }
+  .backtest-upload .button { align-self: end; }
 }

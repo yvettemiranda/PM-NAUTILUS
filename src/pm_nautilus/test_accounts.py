@@ -1,15 +1,19 @@
 """TEST-only account ownership; each account retains an ordinary isolated runtime."""
 
 import asyncio
+import fcntl
+import os
 import re
 import sqlite3
 import stat
 from contextlib import asynccontextmanager, closing, contextmanager
 from dataclasses import dataclass, field
+from decimal import Decimal
 from functools import cached_property
 from pathlib import Path
 
 import msgspec
+from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.serialization.serializer import MsgSpecSerializer
 
 from .config import OPTIONAL_PROFILE_FIELDS, Preferences
@@ -36,10 +40,12 @@ class ReadOnlyTestStore:
     intent = Store.intent
     has_history = Store.has_history
 
-    def __init__(self, path):
+    def __init__(self, path, *, checkpointed=False):
         self.path = path
-        # Do not use immutable=1: committed WAL data can contain financial work.
-        self.db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, isolation_level=None)
+        # Only a stopped, checkpointed archive may be opened without WAL.
+        # Normal read-only views must see committed WAL data.
+        suffix = "?mode=ro&immutable=1" if checkpointed else "?mode=ro"
+        self.db = sqlite3.connect(path.as_uri() + suffix, uri=True, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self._closed = False
 
@@ -141,6 +147,28 @@ class ReadOnlyTestStore:
             is None
         )
 
+    def no_journal_positions(self):
+        """Check native fill quantities separately from the business projection."""
+        positions = {}
+        for (payload,) in self.db.execute(
+            "SELECT payload FROM native_events WHERE kind='OrderFilled' ORDER BY seq"
+        ):
+            event = self.serializer.deserialize(payload)
+            qty = event.last_qty.as_decimal()
+            instrument = event.instrument_id
+            if qty <= 0 or event.order_side not in (OrderSide.BUY, OrderSide.SELL):
+                return False
+            after = positions.get(instrument, Decimal(0)) + (
+                qty if event.order_side == OrderSide.BUY else -qty
+            )
+            if after < 0:
+                return False
+            if after:
+                positions[instrument] = after
+            else:
+                positions.pop(instrument, None)
+        return not positions
+
 
 @dataclass
 class TestAccountContext:
@@ -241,6 +269,12 @@ class TestAccounts:
             # Broken, unknown or ambiguous data always uses the normal recovery path.
             return False
 
+    def selected_account(self, configured):
+        return self.account_id(configured) if configured else None
+
+    def require_safe_archives(self):
+        """Only the single-account application retires legacy runtime owners."""
+
     def prepare(self, account_id, source):
         """Seed only a new account's settings, atomically and before native recovery."""
         number = self.account_id(account_id)
@@ -316,3 +350,60 @@ class TestAccounts:
         finally:
             for lock in reversed(acquired):
                 lock.release()
+
+
+class PrimaryTestAccount(TestAccounts):
+    """Own TEST 1. The legacy paths remain in place for backup and rollback."""
+
+    count = 1
+
+    @staticmethod
+    def account_id(value=None):
+        if value is not None and str(value) != "1":
+            raise ValueError("当前版本只支持 TEST 1")
+        return 1
+
+    def selected_account(self, configured):
+        return self.account_id(configured or None)
+
+    def require_safe_archives(self):
+        """Run under the app data-directory lock before opening any live store."""
+        legacy = TestAccounts(self.root)
+        for number in range(2, legacy.count + 1):
+            try:
+                path = legacy.check_ledger_path(number)
+                if path is None:
+                    continue
+                wal = path.with_name(path.name + "-wal")
+                journal = path.with_name(path.name + "-journal")
+                if (wal.exists() and wal.stat().st_size) or journal.exists():
+                    raise ValueError("存在未核对的事务日志")
+                with closing(ReadOnlyTestStore(path, checkpointed=True)) as store:
+                    if (
+                        store.db.execute("PRAGMA quick_check").fetchone()[0] != "ok"
+                        or not store.eligible()
+                        or not store.no_journal_positions()
+                    ):
+                        raise ValueError("存在未完成事项或账户尚未暂停")
+            except (AttributeError, OSError, TypeError, ValueError, sqlite3.Error) as exc:
+                raise ValueError(
+                    f"旧 TEST {number} 账本尚不能归档；请先用上一版核对、暂停并正常停机"
+                ) from exc
+
+
+def check_archives():
+    """Deployment preflight after the prior server has stopped and been backed up."""
+    if not (data_dir := os.getenv("PM_DATA_DIR")):
+        raise ValueError("部署核对需要 PM_DATA_DIR")
+    accounts = PrimaryTestAccount(data_dir)
+    accounts.selected_account(os.getenv("PM_TEST_ACTIVE_ACCOUNT"))
+    with (accounts.root / "process.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        accounts.require_safe_archives()
+
+
+if __name__ == "__main__":
+    try:
+        check_archives()
+    except (OSError, ValueError) as error:
+        raise SystemExit(str(error)) from None

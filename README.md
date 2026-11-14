@@ -2,38 +2,19 @@
 
 基于 NautilusTrader 的 Polymarket 交易程序。TEST 使用真实公开行情模拟成交，LIVE 使用同一套策略、风控、目标价、退出与赎回业务，通过独立的真实执行器操作账户。
 
-## 仅保留两个版本入口
+## TEST 与历史回测
 
-| 版本 | GitHub 入口 | 用途 |
-| --- | --- | --- |
-| 当前最新版 | [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) | 十个独立 TEST 账户、通用性能优化、账户故障隔离及 TEST/LIVE 后台互斥；后续开发从这里继续。 |
-| 十账户改造前基准 | [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027) | 固定源码 `4de107a4dc1a4abaaf08b330eb00803391268e2a`，仅供比较和追溯，保持原样。 |
+当前版本从 [main](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) 获取。TEST 使用原 1 号账户和原账本 `TEST/state.sqlite`。升级前须确认旧 2–10 号没有未完成事项，已有账本按原路径归档保留。见 [TEST 账户](docs/TEST_ACCOUNTS.md)。
 
-当前部署的应用版本与回滚记录见 [HANDOFF](HANDOFF.md)，测试及服务器验收证据见 [验证结果](docs/VALIDATION.md)。纯文档提交可以让 GitHub 主分支领先于运行中的应用。实盘启用前的核对项目见 [LIVE 准备检查](docs/LIVE_READINESS.md)。
+「回测」接受按历史观测时间整理的公开盘口数据，在独立模拟账本上应用指定参数和起始资金，生成成交明细和净值曲线。可在同一段行情上重跑、比较参数，也可在本地和已运行的 TEST 1 逐笔对照。见 [历史回测](docs/BACKTEST.md)。
 
-## TEST 十账户
-
-现行界面见[界面改版说明](docs/archive/UI_LIGHT_20261104.md)。
-
-- 页面选择 1—10 号，只切换查看和操作对象，不改变其他账户的运行状态。
-- 账户分别保存初始资金、参数、模拟盘口消耗、订单、持仓、交易记录、收益曲线和启停状态。
-- 1 号保留原 `TEST/state.sqlite`；2—10 号分别使用 `TEST/accounts/N/state.sqlite`。新账户首次复制 1 号的初始设置，不复制交易和资金历史，之后互不跟随。
-- 公共市场发现和行情连接共享，各账户模拟成交独立。去重报价解码、正在进行的相同公开查询及不可变元数据，不共享资金或业务状态。
-- 正常启动后 TEST 均为 PAUSED，需手动启动可运行的账户。账户局部故障只影响该账户，整机、公共网络和共享磁盘故障仍可能影响多个账户。
-
-说明、API 和目标卖价步长例子见 [TEST 多账户](docs/TEST_ACCOUNTS.md)；优化与隔离边界见 [通用优化](docs/archive/TEST_OPTIMIZATION_20261029.md)。优化不按服务器型号分支，不减少市场、历史、精度或原交易检查，换服务器可直接沿用。
-
-公开行情复用字段完全相同的不可变元数据，普通行情帧采用保留原解析回退的快速解码，公共 WebSocket 连接复用保持证书校验的 TLS 上下文；网页只请求当前页面需要的候选诊断，默认 API 仍保留完整诊断。这些改动减少重复工作，不改变行情频率、市场范围或交易规则。实现与边界见 [行情与页面效率](docs/EXECUTION_RESILIENCE.md#公共行情与页面的重复工作)。
-
-旧应用在用户移除另一程序后已观察到扫描恢复成功，但仍出现秒级延迟；这属于资源余量对照，不能归因于当时尚未部署的新代码。本地基准也不代表线上长尾已消除；实际部署及观测以 [HANDOFF](HANDOFF.md) 为准。
-
-只运行一个模拟账户时，可在 `.env` 设置 `PM_TEST_ACTIVE_ACCOUNT=1`，并按 [单账户模式说明](docs/TEST_ACCOUNTS.md#启停资金与重置) 应用配置。其他账户的既有账本仍可查看，有未完成事项的账户继续维护已有仓位和订单。
+当前部署及验证记录见 [HANDOFF](HANDOFF.md)。应用镜像与文档提交分别记录。实盘启用前的核对项目见 [LIVE 准备检查](docs/LIVE_READINESS.md)。
 
 策略设置提供四个默认关闭的选项，用于纳入独立二元市场、纳入增强负风险的具名选项、按市场分周期和只买最优卖档。TEST 与 LIVE 使用相同的规则，各账户分别保存设置。成交结果和买卖手续费可用账户账本生成分组报告。见 [可选策略与账本分析](docs/STRATEGY_PREFERENCES.md)。
 
 ## TEST 与 LIVE 切换
 
-TEST、LIVE 后台只运行其一。启用 LIVE 前必须先暂停全部 TEST，程序等待 TEST 行情、扫描、结算和采样任务退出，并持久化模式意图，再激活 LIVE 私有客户端。LIVE 启用后仍为 PAUSED，需要另行明确 START。
+TEST、LIVE 后台只运行其一。启用 LIVE 前必须先暂停 TEST，程序等待 TEST 行情、扫描、结算和采样任务退出，并持久化模式意图，再激活 LIVE 私有客户端。LIVE 启用后仍为 PAUSED，需要另行明确 START。
 
 PAUSE 沿用原含义：停止新买、取消未完成买单，已有仓位的卖出、止损和结算仍维护；因此 PAUSE 不等于后台完全停止。模式切换由程序完成后台排空，不能用只关闭网页代替。
 
@@ -52,7 +33,7 @@ uv sync --frozen --extra dev
 uv run --frozen pm-nautilus --data-dir runtime/local
 ```
 
-打开 [本地页面](http://127.0.0.1:8765)。全新目录建立十个 PAUSED 模拟账户，默认模拟资金为 100U，检查配置后再决定是否 START。已有目录保留原账户设置，不套用这个初始值。只预览页面、不连接公开行情：
+打开 [本地页面](http://127.0.0.1:8765)。全新目录建立一个 PAUSED 模拟账户，默认模拟资金为 100U，检查配置后再决定是否 START。已有目录保留原账户设置，不套用这个初始值。只预览页面、不连接公开行情：
 
 ```sh
 uv run --frozen pm-nautilus --offline --data-dir runtime/ui-preview
@@ -79,8 +60,9 @@ Node 24.20.0 用于页面验证，程序运行不需要 Node。部署固定已�
 ## 文档入口
 
 - [当前交接与最新部署验收](HANDOFF.md)
-- [两个版本的维护规则](docs/VERSIONS.md)
-- [TEST 多账户](docs/TEST_ACCOUNTS.md)
+- [版本维护规则](docs/VERSIONS.md)
+- [TEST 账户](docs/TEST_ACCOUNTS.md)
+- [历史盘口回测](docs/BACKTEST.md)
 - [可选策略与账本分析](docs/STRATEGY_PREFERENCES.md)
 - [执行保护、行情诊断与性能优化](docs/EXECUTION_RESILIENCE.md)
 - [通用优化与模式互斥](docs/archive/TEST_OPTIMIZATION_20261029.md)

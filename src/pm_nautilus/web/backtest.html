@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>历史回测 · PM-NAUTILUS</title>
+    <link rel="stylesheet" href="/styles.css?v=20261114-backtest" />
+  </head>
+  <body>
+    <main class="app-shell backtest-shell">
+      <header class="topbar backtest-topbar">
+        <a class="brand" href="/">PM / NAUTILUS</a>
+        <a class="button backtest-link" href="/">返回交易台</a>
+      </header>
+
+      <section class="backtest-title">
+        <h1>历史回测</h1>
+        <p>用历史盘口重新模拟策略。从空仓开始，每次使用独立资金和账本。</p>
+      </section>
+
+      <section class="backtest-card" aria-labelledby="backtest-source-title">
+        <div class="section-heading">
+          <h2 id="backtest-source-title">行情数据</h2>
+          <a class="backtest-help-link" href="https://github.com/yvettemiranda/PM-NAUTILUS/blob/main/docs/BACKTEST.md">准备历史行情</a>
+        </div>
+        <form id="backtest-upload" class="backtest-upload">
+          <label class="backtest-field">
+            <span>导入历史盘口文件</span>
+            <input id="backtest-file" type="file" accept=".ndjson,.jsonl,application/x-ndjson" required />
+          </label>
+          <button id="backtest-import" class="button" type="submit" disabled>导入</button>
+          <button id="backtest-abort-upload" class="button" type="button" hidden>取消导入</button>
+        </form>
+        <p class="field-note">正式回测请先按文档转换历史盘口。首次体验可<a class="backtest-help-link" href="/backtest-sample.ndjson" download>下载合成样例行情包</a>再导入。</p>
+        <p id="backtest-upload-limit" class="field-note"></p>
+        <p id="backtest-data-message" class="field-note" role="status" aria-live="polite">正在读取数据集…</p>
+      </section>
+
+      <form id="backtest-form" class="backtest-card">
+        <fieldset id="backtest-inputs" disabled>
+          <legend class="sr-only">回测设置</legend>
+          <div class="section-heading">
+            <h2>回测设置</h2>
+            <button id="backtest-copy-defaults" class="button" type="button">读取当前 TEST 1 参数</button>
+          </div>
+          <div class="backtest-fields">
+            <div class="backtest-field">
+              <label for="backtest-source">数据集</label>
+              <div class="backtest-source-controls">
+                <select id="backtest-source" aria-describedby="backtest-source-scope" required></select>
+                <button id="backtest-delete" class="button danger" type="button">删除</button>
+              </div>
+            </div>
+            <label class="backtest-field"><span>起始资金（U）</span><input id="backtest-cash" name="initialCash" type="number" min="0.000001" max="1000000" step="0.000001" inputmode="decimal" required /></label>
+            <label class="backtest-field"><span>开始时间（北京时间）</span><input id="backtest-start" type="datetime-local" step="0.001" required /></label>
+            <label class="backtest-field"><span>结束时间（北京时间）</span><input id="backtest-end" type="datetime-local" step="0.001" required /></label>
+          </div>
+          <p id="backtest-source-scope" class="field-note"></p>
+          <details class="backtest-preferences">
+            <summary>策略参数</summary>
+            <div class="backtest-fields">
+              <label class="backtest-field"><span>每轮预算（U）</span><input name="orderAmount" type="number" min="0.000001" max="1000000" step="any" inputmode="decimal" required /></label>
+              <label class="backtest-field"><span>候选顺序</span><select name="candidateSortDirection"><option value="ASC">优先生命周期进度小</option><option value="DESC">优先生命周期进度大</option></select></label>
+              <label class="backtest-field"><span>最低买价（¢）</span><input name="minBuyPriceCents" type="number" min="0.1" max="99" step="0.1" inputmode="decimal" required /></label>
+              <label class="backtest-field"><span>最高买价（¢）</span><input name="maxBuyPriceCents" type="number" min="0.1" max="99" step="0.1" inputmode="decimal" required /></label>
+              <label class="backtest-field"><span>目标卖价加价（¢）</span><input name="targetSellPriceIncreaseCents" type="number" min="0" max="99" step="any" inputmode="decimal" required /></label>
+              <label class="backtest-field"><span>目标卖价倍数（×）</span><input name="targetSellPriceMultiplier" type="number" min="0" step="any" inputmode="decimal" required /></label>
+              <label class="backtest-field"><span>最短市场时长（天）</span><input name="minMarketDurationDays" type="number" min="1" max="365" step="1" inputmode="numeric" required /></label>
+              <label class="backtest-field"><span>最长市场时长（天）</span><input name="maxMarketDurationDays" type="number" min="1" max="365" step="1" inputmode="numeric" required /></label>
+              <label class="backtest-field"><span>最低买卖盘比例（%）</span><input name="minBidAskRatioPercent" type="number" min="1" max="100" step="1" inputmode="numeric" required /></label>
+              <label class="backtest-field"><span>允许买入的最大生命周期进度（%）</span><input name="maxMarketProgressPercent" type="number" min="1" max="100" step="1" inputmode="numeric" required /></label>
+              <label class="backtest-field"><span>主动止损的买入均价倍数（×）</span><input name="stopLossMultiplier" type="number" min="0.000001" max="0.999999" step="any" inputmode="decimal" required /></label>
+              <label class="backtest-field"><span>官方栏目 ID（用空格或逗号分隔）</span><input name="selectedCategoryIds" type="text" placeholder="选中全部栏目时忽略" /></label>
+            </div>
+            <fieldset class="backtest-options">
+              <legend>市场范围</legend>
+              <label><input name="marketTypes" type="checkbox" value="BINARY" />二元市场</label>
+              <label><input name="marketTypes" type="checkbox" value="TERNARY" />三元市场</label>
+              <label><input name="marketTypes" type="checkbox" value="MULTI" />多元市场（4+）</label>
+              <label><input name="allCategories" type="checkbox" />全部栏目</label>
+              <label><input name="includeIndependentMultiMarkets" type="checkbox" />纳入独立多市场事件</label>
+              <label><input name="includeAugmentedNegRisk" type="checkbox" />纳入扩展负风险事件</label>
+            </fieldset>
+            <fieldset class="backtest-options">
+              <legend>成交条件</legend>
+              <label><input name="cyclePerMarket" type="checkbox" />按市场单独计算预算</label>
+              <label><input name="buyBestLevelOnly" type="checkbox" />仅买最低卖价一档</label>
+              <label><input name="stopLossEnabled" type="checkbox" />启用主动止损</label>
+            </fieldset>
+            <p class="field-note">对照 TEST 1 时，请选择当时没有持仓的起点，并核对历史参数。</p>
+          </details>
+        </fieldset>
+        <div class="backtest-actions">
+          <button id="backtest-run" class="button primary" type="submit" disabled>开始回测</button>
+          <button id="backtest-cancel" class="button" type="button" hidden>取消回测</button>
+        </div>
+        <p id="backtest-status" class="field-note" role="status" aria-live="polite"></p>
+      </form>
+
+      <section id="backtest-results" class="backtest-card" aria-labelledby="backtest-results-title" hidden>
+        <div class="section-heading">
+          <h2 id="backtest-results-title">回测结果</h2>
+          <button id="backtest-download" class="button" type="button">下载结果 JSON</button>
+        </div>
+        <p id="backtest-result-context" class="field-note"></p>
+        <dl id="backtest-metrics" class="backtest-metrics"></dl>
+        <figure class="backtest-figure">
+          <figcaption>盈亏曲线（U）</figcaption>
+          <svg id="backtest-chart" class="backtest-chart" viewBox="0 0 800 265" role="img" aria-label="历史回测盈亏曲线"></svg>
+          <div id="backtest-chart-legend" class="backtest-chart-legend"></div>
+          <p id="backtest-chart-note" class="field-note"></p>
+          <label id="backtest-sample-control" class="backtest-sample-control" hidden>
+            <span>查看时间点</span>
+            <input id="backtest-sample" type="range" min="0" max="0" step="1" />
+          </label>
+          <p id="backtest-sample-value" class="field-note" aria-live="polite"></p>
+        </figure>
+        <div class="backtest-coverage">
+          <h3>数据覆盖</h3>
+          <p id="backtest-coverage-label" class="field-note"></p>
+          <ul id="backtest-coverage-notes"></ul>
+        </div>
+        <details id="backtest-fills" class="backtest-preferences">
+          <summary>模拟成交</summary>
+          <p id="backtest-fill-note" class="field-note"></p>
+          <div class="backtest-table-wrap" tabindex="0" role="region" aria-label="模拟成交明细">
+            <table class="backtest-table">
+              <thead><tr><th scope="col">时间</th><th scope="col">市场／方向</th><th scope="col">成交价</th><th scope="col">份额</th><th scope="col">手续费</th></tr></thead>
+              <tbody id="backtest-fill-rows"></tbody>
+            </table>
+          </div>
+        </details>
+      </section>
+    </main>
+    <script type="module" src="/backtest.js?v=20261114-backtest"></script>
+  </body>
+</html>

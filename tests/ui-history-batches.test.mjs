@@ -73,7 +73,7 @@ test('a failed continuation is retried without acknowledging or discarding its b
   assert.equal(page.ui.recordChangesCursor,null);
 });
 
-test('switching accounts discards continuation state and an old account response',async()=>{
+test('switching to LIVE discards continuation state and an old TEST response',async()=>{
   const page=setup();await initial(page);network(page,[partial()]);
   await page.context.loadTradeRecordsForTest();
   let resolve;
@@ -81,13 +81,13 @@ test('switching accounts discards continuation state and an old account response
   const pending=page.context.loadTradeRecordsForTest({silent:true});
   // A switch starts a separate dashboard request; keep the earlier resolver.
   const stale=resolve;
-  const select=page.element('#test-account-select');select.value='2';select.handlers.change({target:select});
+  page.element('#mode-toggle').handlers.click();
   assert.equal(page.ui.recordHead,null);
   assert.equal(page.ui.recordChangesCursor,null);
   assert.equal(page.ui.recordChangesFirstSeq,null);
   stale(reply(pageData({head:'g:20',changesHead:'g:20',records:[row(20)]})));
   await pending;
-  assert.equal(page.ui.testAccountId,2);
+  assert.equal(page.ui.displayMode,'LIVE');
   assert.equal(page.ui.recordHead,null);
   assert.equal(page.ui.tradeRecords.length,0);
 });

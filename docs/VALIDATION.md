@@ -1,6 +1,6 @@
 # 验证结果与边界
 
-当前版本入口为 [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main)，唯一固定基准为 [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027)（`4de107a`）。旧分支、标签和旧测试数量不再作为当前版本说明；历史原文可在固定基准及 Git 提交记录中追溯。
+当前版本入口为 [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main)，唯一固定基准为 [十账户改造前提交 `4de107a`](https://github.com/yvettemiranda/PM-NAUTILUS/commit/4de107a4dc1a4abaaf08b330eb00803391268e2a)。旧分支、标签和旧测试数量不再作为当前版本说明；历史原文可在固定基准及 Git 提交记录中追溯。
 
 ## 2026-11-13 公开行情与页面优化（a543f06）
 

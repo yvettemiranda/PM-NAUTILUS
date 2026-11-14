@@ -1,6 +1,14 @@
 import pytest
 
+import pm_nautilus.app as app_module
+from pm_nautilus.test_accounts import TestAccounts
 from pm_nautilus.test_runtime import TestRuntime
+
+
+@pytest.fixture
+def legacy_test_accounts(monkeypatch):
+    """Keep legacy coordination regression coverage without enabling it by configuration."""
+    monkeypatch.setattr(app_module, "PrimaryTestAccount", TestAccounts)
 
 
 @pytest.fixture

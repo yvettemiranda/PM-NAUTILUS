@@ -3,27 +3,25 @@ import assert from 'node:assert/strict';
 import {pageHarness, profile, seedTestDashboard} from './ui-app-harness.mjs';
 
 const reply = body => ({ok:true, headers:{get(){return null;}}, async text(){return JSON.stringify(body);}});
-const tick = async () => { for(let i=0;i<15;i++) await Promise.resolve(); };
 function snapshot(accountId=1, extra={}) {
   return {executionMode:'TEST', accountId, generation:'g', details:'positions', activeExecutionMode:'LIVE', testExecutionSuspended:true,
     preferences:{...profile}, strategy:{status:'PAUSED',initialCapital:'100',availableCash:'100'}, capitalEditable:true,
     portfolio:{totalFunds:'100',availableCash:'100'}, positions:[], positionCount:0,
     marketScan:{events:[],diagnostics:{availableCategories:[]}}, ...extra};
 }
-function pageAt(accountId=1) {
-  const page=pageHarness({savedAccount:accountId});seedTestDashboard(page);
-  page.ui.loading=false;page.ui.performanceAt=Date.now();page.ui.performance={accountId,generation:'g',points:[]};
+function pageAt() {
+  const page=pageHarness();seedTestDashboard(page);
+  page.ui.loading=false;page.ui.performanceAt=Date.now();page.ui.performance={accountId:1,generation:'g',points:[]};
   return page;
 }
 const controls = ['run-toggle','reset-test','save-config','sort-toggle'];
 
-test('a suspended TEST dashboard disables all writes while account switching remains available',async()=>{
-  const page=pageAt(10);page.context.applyDashboardForTest(snapshot(10));
+test('a suspended TEST dashboard disables all writes while settings can still be viewed',async()=>{
+  const page=pageAt();page.context.applyDashboardForTest(snapshot(1));
   for(const id of controls)assert.equal(page.element(`#${id}`).disabled,true,id);
   assert.equal(page.element('#initial-capital').disabled,true);
-  assert.equal(page.element('#test-account-select').disabled,false);
   assert.equal(page.element('#config-toggle').disabled,false);
-  const writes=[];page.context.fetch=async(path,options)=>{writes.push({path,options});return reply(snapshot(10));};
+  const writes=[];page.context.fetch=async(path,options)=>{writes.push({path,options});return reply(snapshot(1));};
   for(const id of ['run-toggle','reset-test','sort-toggle'])await page.element(`#${id}`).handlers.click();
   await page.element('#config-form').handlers.submit({preventDefault(){}});
   assert.deepEqual(writes,[]);
@@ -63,23 +61,6 @@ test('ordinary PAUSED TEST keeps the existing controls and exit/settlement expla
   assert.equal(page.element('#run-state-label').textContent,'已暂停');
 });
 
-test('a cold TEST account keeps its history view while disabling trading and settings writes',async()=>{
-  const page=pageAt(2);
-  page.context.applyDashboardForTest(snapshot(2,{
-    testExecutionSuspended:false, activeExecutionMode:'TEST', activeTestAccountId:1,
-    testAccountReadOnly:true, testAccountCold:true,
-  }));
-  for(const id of controls)assert.equal(page.element(`#${id}`).disabled,true,id);
-  assert.equal(page.element('#config-toggle').disabled,false);
-  assert.equal(page.element('#test-account-select').disabled,false);
-  assert.equal(page.element('#run-state-label').textContent,'只读');
-  assert.equal(page.element('#scan-refresh-state').textContent,'只读历史账户');
-  const writes=[];page.context.fetch=async(path,options)=>{writes.push({path,options});return reply({});};
-  for(const id of ['run-toggle','reset-test','sort-toggle'])await page.element(`#${id}`).handlers.click();
-  await page.element('#config-form').handlers.submit({preventDefault(){}});
-  assert.deepEqual(writes,[]);
-});
-
 test('a successful backend rollback re-enables TEST controls without initiating START',()=>{
   const page=pageAt();page.context.applyDashboardForTest(snapshot());
   const requests=[];page.context.fetch=async(path,options)=>{requests.push({path,options});return reply({});};
@@ -101,19 +82,6 @@ test('TEST suspension metadata never disables LIVE configuration or changes LIVE
   assert.equal(page.element('#save-config').disabled,false);
 });
 
-test('a late suspended reply from another account cannot block the current account',async()=>{
-  const page=pageAt();page.context.applyDashboardForTest(snapshot(1,{testExecutionSuspended:false}));
-  const requests=[];page.context.fetch=(path,options)=>new Promise(resolve=>requests.push({path,options,resolve}));
-  const old=page.context.loadDashboard();
-  const selector=page.element('#test-account-select');selector.value='2';selector.handlers.change({target:selector});
-  page.ui.performanceAt=Date.now();page.ui.performance={accountId:2,generation:'g',points:[]};
-  requests[1].resolve(reply(snapshot(2,{testExecutionSuspended:false})));await tick();
-  requests[0].resolve(reply(snapshot(1)));await old;
-  assert.equal(page.ui.dashboard.accountId,2);
-  for(const id of controls)assert.equal(page.element(`#${id}`).disabled,false,id);
-  assert.doesNotMatch(page.element('#runtime-status').textContent,/TEST后台已停用/);
-});
-
 test('a stale suspended snapshot still exposes a current data refresh failure',()=>{
   const page=pageAt();page.context.applyDashboardForTest(snapshot());
   page.ui.dashboardError='offline';page.context.renderStatus();
@@ -127,7 +95,7 @@ const restorable = (accountId=1) => snapshot(accountId, {
 });
 
 test('stopped TEST with no enabled LIVE reuses the run button only for restoring its background',()=>{
-  const page=pageAt(10);page.context.applyDashboardForTest(restorable(10));
+  const page=pageAt();page.context.applyDashboardForTest(restorable());
   const button=page.element('#run-toggle');
   assert.equal(button.disabled,false);assert.equal(button.textContent,'↺');
   assert.equal(button.title,'恢复TEST后台（保持暂停）');
@@ -136,16 +104,16 @@ test('stopped TEST with no enabled LIVE reuses the run button only for restoring
 });
 
 test('restoring TEST background posts an explicit account-bound confirmation and never STARTs BUY',async()=>{
-  const page=pageAt(10);page.context.applyDashboardForTest(restorable(10));
+  const page=pageAt();page.context.applyDashboardForTest(restorable());
   const requests=[];
-  const restored=snapshot(10,{testExecutionSuspended:false,activeExecutionMode:'TEST',liveExecutionEnabled:false,modeSwitchInProgress:false,canRestoreTestBackground:false});
+  const restored=snapshot(1,{testExecutionSuspended:false,activeExecutionMode:'TEST',liveExecutionEnabled:false,modeSwitchInProgress:false,canRestoreTestBackground:false});
   page.context.fetch=async(path,options)=>{requests.push({path,options});return reply(restored);};
   await page.element('#run-toggle').handlers.click();
   const writes=requests.filter(request=>request.options.method==='POST');
   assert.equal(writes.length,1);
   const url=new URL(writes[0].path,'https://localhost');
   assert.equal(url.pathname,'/api/test/restore-background');
-  assert.equal(url.searchParams.get('account_id'),'10');
+  assert.equal(url.searchParams.get('account_id'),'1');
   assert.deepEqual(JSON.parse(writes[0].options.body),{confirmation:'RESTORE TEST'});
   assert.equal(requests.some(request=>new URL(request.path,'https://localhost').pathname.endsWith('/start')),false);
   assert.equal(page.ui.strategyStatus,'PAUSED');

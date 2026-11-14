@@ -62,7 +62,9 @@ def test_auth_origin_and_host(tmp_path, monkeypatch):
         assert c.get("/", auth=auth, headers={"host": "evil.example"}).status_code == 400
 
 
-def test_legacy_preferences_are_read_only_and_new_flags_are_isolated(tmp_path, monkeypatch):
+def test_legacy_preferences_are_read_only_and_new_flags_are_isolated(
+    tmp_path, monkeypatch, legacy_test_accounts
+):
     monkeypatch.delenv("PM_LIVE_ENABLED", raising=False)
     monkeypatch.delenv("PM_UI_PASSWORD", raising=False)
 

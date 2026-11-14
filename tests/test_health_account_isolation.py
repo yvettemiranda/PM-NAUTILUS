@@ -16,6 +16,9 @@ import pm_nautilus.app as app_module
 from pm_nautilus.service_freshness import freshness_view
 
 
+pytestmark = pytest.mark.usefixtures("legacy_test_accounts")
+
+
 @pytest.fixture(autouse=True)
 def local_only(monkeypatch):
     monkeypatch.delenv("PM_LIVE_ENABLED", raising=False)
@@ -229,8 +232,10 @@ def test_intentionally_closed_test_owners_do_not_break_active_live_health(tmp_pa
         {"status": "attention"},
         {"backgroundErrors": {"TEST:5": "runtime_faulted"}},
         {"accountErrors": {"TEST:5": "runtime_faulted"}},
-        {"availableTestAccountCount": 9},
-        {"testAccountCount": 9},
+        {"availableTestAccountCount": 0},
+        {"testAccountCount": 10},
+        {"loadedTestAccountCount": 0},
+        {"activeTestAccountId": 2},
         {},
     ],
 )
@@ -240,8 +245,10 @@ def test_container_acceptance_checks_all_accounts_even_after_http_200(monkeypatc
         "status": "ok",
         "backgroundErrors": {},
         "accountErrors": {},
-        "testAccountCount": 10,
-        "availableTestAccountCount": 10,
+        "testAccountCount": 1,
+        "availableTestAccountCount": 1,
+        "loadedTestAccountCount": 1,
+        "activeTestAccountId": 1,
         "strategyStatus": "PAUSED",
         "liveExecutionEnabled": False,
     } | changes

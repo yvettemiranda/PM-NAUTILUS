@@ -27,6 +27,8 @@ def save():
 if tool == "id":
     print(0); sys.exit(0)
 if tool == "docker":
+    if "run" in args:
+        sys.exit(1 if s.get("archive_check_fail") else 0)
     if "stop" in args:
         s["up"] = False
         # A graceful SQLite shutdown checkpoints and deletes its WAL files.
@@ -35,7 +37,10 @@ if tool == "docker":
     if "up" in args:
         env = dict(l.strip().split("=", 1) for l in open(".env") if "=" in l)
         s["up"], s["rev"] = True, env["PM_GIT_REVISION"]
-        s["status"] = {k: "PAUSED" for k in s["status"]}
+        n = 1 if s.get("narrow") and s["rev"] == "c" * 40 else 4
+        if s.get("rollback") and s["rev"] == "a" * 40:
+            n = 10
+        s["status"] = {str(k): "PAUSED" for k in range(1, n + 1)}
     save(); sys.exit(0)
 if tool == "git":
     if "merge-base" in args and s.get("non_main"):
@@ -46,6 +51,16 @@ if tool == "git":
         s["head"] = args[-1]; save()
     if "rev-parse" in args:
         print(s.get("head", "b" * 40))
+    if "show" in args and args[-1].endswith(":config/test-account-count"):
+        if s.get("narrow") and args[-1].startswith("c" * 40):
+            print(1)
+        else:
+            sys.exit(1)
+    if "show" in args and args[-1].endswith(":src/pm_nautilus/test_accounts.py"):
+        if s.get("rollback"):
+            print("    count = 10")
+        else:
+            sys.exit(1)
     sys.exit(0)
 if "-K" in args:
     s["auth"] = sys.stdin.read(); save()
@@ -78,8 +93,8 @@ if url.endswith("/api/health"):
     live = s["live"] or (built and s.get("live_after_build", False))
     wallet = s.get("wallet_after_build") if built and s.get("wallet_after_build") else s["wallet"]
     print(json.dumps({
-        "status": "ok", "revision": s["rev"], "testAccountCount": 4,
-        "availableTestAccountCount": 4, "liveExecutionEnabled": live,
+        "status": "ok", "revision": s["rev"], "testAccountCount": len(s["status"]),
+        "availableTestAccountCount": len(s["status"]), "liveExecutionEnabled": live,
         "liveWalletStatus": wallet,
         "activeExecutionMode": "TEST", "backgroundErrors": {},
         "marketData": {"TEST": {"status": "ok", "readyGroupCount": 5, "groupCount": 5,
@@ -91,7 +106,8 @@ if "/start" in url:
     assert "x-pm-csrf: tok" in args
     s["status"][account] = "RUNNING"; save()
 print(json.dumps({"strategy": {"status": s["status"][account]},
-                  "positionCount": {"1": 26, "3": 46}.get(account, 0), "error": None}))
+                  "positionCount": s.get("positions", {"1": 26, "3": 46}).get(account, 0),
+                  "error": None}))
 """
 
 
@@ -193,6 +209,69 @@ def test_deploy_requires_explicit_confirmation(server):
 
 def docker_steps(state):
     return [e[-1] if e[-1] != "-d" else "up" for e in state["log"] if e[0] == "docker"]
+
+
+def test_deploy_shrinks_to_account_one_and_preserves_legacy_ledger(server):
+    app, backups, run = server
+    legacy = app / "runtime" / "server" / "TEST" / "accounts" / "3" / "state.sqlite"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(b"old account bytes")
+    result, state = run(
+        NEW,
+        "--yes",
+        narrow=True,
+        positions={"1": 26},
+        status={"1": "RUNNING", "2": "PAUSED", "3": "PAUSED", "4": "PAUSED"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    docker = [entry for entry in state["log"] if entry[0] == "docker"]
+    assert len(docker) == 4 and "run" in docker[2]
+    assert "pm_nautilus.test_accounts" in docker[2]
+    assert state["status"] == {"1": "RUNNING"}
+    (backup,) = backups.iterdir()
+    assert (
+        (backup / "runtime-server" / "TEST" / "accounts" / "3" / "state.sqlite").read_bytes()
+        == legacy.read_bytes()
+        == b"old account bytes"
+    )
+    assert (backup / "accounts-before").read_text().splitlines()[-1] == "4 PAUSED 0"
+    assert (backup / "accounts-after").read_text() == "1 RUNNING 26\n"
+
+    result, state = run(OLD, "--yes", narrow=True, rollback=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert state["status"] == {"1": "RUNNING"} | {str(n): "PAUSED" for n in range(2, 11)}
+    assert legacy.read_bytes() == b"old account bytes"
+
+
+@pytest.mark.parametrize(
+    "status, positions",
+    [
+        ({"1": "RUNNING", "2": "PAUSED", "3": "RUNNING", "4": "PAUSED"}, {}),
+        ({"1": "RUNNING", "2": "PAUSED", "3": "PAUSED", "4": "PAUSED"}, {"3": 46}),
+    ],
+)
+def test_deploy_refuses_to_retire_account_with_runtime_exposure(server, status, positions):
+    _, backups, run = server
+    result, state = run(NEW, "--yes", narrow=True, status=status, positions=positions)
+    assert result.returncode == 1 and "旧 TEST 3 须暂停且没有持仓" in result.stderr
+    assert not docker_steps(state) and not backups.exists()
+
+
+def test_failed_archive_preflight_restores_previous_image_and_keeps_backup(server):
+    app, backups, run = server
+    result, state = run(
+        NEW,
+        "--yes",
+        narrow=True,
+        positions={},
+        status={"1": "RUNNING", "2": "PAUSED", "3": "PAUSED", "4": "PAUSED"},
+        archive_check_fail=True,
+    )
+    assert result.returncode == 1 and "已重新启动旧版" in result.stderr
+    assert state["up"] and state["rev"] == OLD
+    assert state["status"]["1"] == "RUNNING"
+    assert f"PM_GIT_REVISION={OLD}" in (app / ".env").read_text()
+    assert len(list(backups.glob("*/.complete"))) == 1
 
 
 @pytest.mark.parametrize(

@@ -1,10 +1,10 @@
 # PM-SMALL → NautilusTrader 迁移设计与当前架构
 
-当前版本统一从 [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) 获取。十账户改造前的固定基准为 [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027)，提交 `4de107a4dc1a4abaaf08b330eb00803391268e2a`，仅供回看和对照，不是默认安装版本。旧开发分支不再作为入口；完整提交历史仍保留。
+从 [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) 获取当前版本。十账户改造前的[历史基准提交 `4de107a`](https://github.com/yvettemiranda/PM-NAUTILUS/commit/4de107a4dc1a4abaaf08b330eb00803391268e2a)供追溯和对照。
 
 当前已部署的应用 SHA 以 [HANDOFF](../HANDOFF.md) 为准，后续纯文档提交可使 `main` 比应用 SHA 更新；须核对差异只涉及文档，不因此重启镜像。当前验证与服务器采样见 [HANDOFF](../HANDOFF.md) 和 [VALIDATION](VALIDATION.md)。
 
-当前实现支持十个独立 TEST 账户与一个 LIVE 账本，TEST／LIVE 后台互斥；策略、风控、目标价、退出及赎回业务共用原逻辑。共享公开行情、TEST 请求去重和不可变元数据不会共享账户资金或模拟盘口消耗。数据与模式协调详见 [TEST 多账户](TEST_ACCOUNTS.md)及[通用优化](archive/TEST_OPTIMIZATION_20261029.md)。
+当前实现使用 TEST 1 和独立 LIVE 账本，TEST／LIVE 自动执行后台互斥。策略、风控、目标价、退出及赎回业务沿用原规则。历史回测使用独立临时账本。账户数据与模式协调详见 [TEST 账户与旧账本](TEST_ACCOUNTS.md)及[通用优化](archive/TEST_OPTIMIZATION_20261029.md)。
 
 文末折叠保留旧部署记录，不把历史测试数字或单账户结构当作当前状态。
 
@@ -104,7 +104,7 @@
 
 开发先接通全路径，再集中完整回归；针对性用例验证高风险规则。发布验收包括真实公开行情+无资金模拟、可控订单/账户/赎回响应、重复/迟到/重启、资金数量关系、UI交互、Linux依赖。真实钱包/链上写不运行，另行真实验收清楚标记。
 
-本地合理分段提交并通过普通 Git 工作流同步现有公开仓库；服务器操作只依据 HANDOFF 中当前有效的地址、用户、目录和授权。应用首次使用新目录时十个 TEST 均 PAUSED；重启不恢复 RUNNING，已保存的 LIVE 意图使 TEST 后台继续停止，LIVE 仍须解锁、核对并明确启用。明确恢复 TEST 后台仍保持全部 PAUSED。维护升级可在全部 11 份账本完整核对后，仅显式恢复此前已授权运行的 TEST 账户。LIVE 解锁、启用及 START 是独立控制动作，不由部署或切换页面触发。
+本地合理分段提交并通过普通 Git 工作流同步现有公开仓库。服务器操作依据 [当前交接](../HANDOFF.md) 中有效的地址、目录和授权。新目录的 TEST 1 以 PAUSED 开始，重启后也不会自动恢复 RUNNING。已保存的 LIVE 意图使 TEST 后台保持停止。明确恢复 TEST 后台也会保持暂停。维护升级核对全部现有账本后，只恢复升级前运行的 TEST 1。LIVE 解锁、启用及 START 各需独立控制。
 
 ## 主要官方依据
 

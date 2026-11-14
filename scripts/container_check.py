@@ -31,19 +31,25 @@ with httpx.Client(base_url=base, timeout=5) as public:
     # still require every configured account, rather than accepting HTTP alone.
     assert status["status"] == "ok", status
     assert status["backgroundErrors"] == status["accountErrors"] == {}, status
-    assert status["testAccountCount"] == status["availableTestAccountCount"] == 10, status
+    assert status["testAccountCount"] == status["availableTestAccountCount"] == 1, status
+    assert status["loadedTestAccountCount"] == 1 and status["activeTestAccountId"] == 1, status
     assert status["strategyStatus"] == "PAUSED" and not status["liveExecutionEnabled"]
     assert public.get("/api/dashboard").status_code == 401
+    assert public.get("/backtest.html").status_code == 401
 with httpx.Client(base_url=base, auth=("pm", os.environ["PM_UI_PASSWORD"]), timeout=5) as client:
     response = client.get("/api/dashboard")
     response.raise_for_status()
     data = response.json()
     assert data["executionMode"] == "TEST" and data["strategy"]["status"] == "PAUSED"
+    assert client.get("/api/dashboard?account_id=2").status_code == 400
     assert data["portfolio"]["availableCash"] == "100" and not data["positions"]
     assert data["preferences"]["orderAmount"] == ("1" if args.phase == "first" else "2")
     assert client.get("/api/LIVE/preferences").json()["preferences"]["orderAmount"] == "1"
     assert "PM-NAUTILUS" in client.get("/").text
     assert "loadTradeRecords" in client.get("/app.js").text
+    assert "历史回测" in client.get("/backtest.html").text
+    assert client.get("/backtest.js").status_code == 200
+    assert client.get("/backtest-sample.ndjson").status_code == 200
     assert client.get("/api/TEST/validation").json()["ok"]
     changed = client.put(
         "/api/TEST/preferences",

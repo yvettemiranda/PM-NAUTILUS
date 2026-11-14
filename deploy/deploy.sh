@@ -140,7 +140,47 @@ account_states() {
     local count=$1 number
     for number in $(seq 1 "$count"); do
         curl_auth "$BASE/api/dashboard?details=summary&account_id=$number" |
-            json "print($number, d['strategy']['status'], d['positionCount'])"
+            json "
+status, positions = d['strategy']['status'], d['positionCount']
+assert status in ('PAUSED', 'RUNNING') and type(positions) is int and positions >= 0
+print($number, status, positions)" || return 1
+    done
+}
+
+require_retireable_accounts() {
+    local number status positions
+    while read -r number status positions; do
+        if [ "$number" -gt "$TARGET_ACCOUNT_COUNT" ]; then
+            [ "$status" = "PAUSED" ] && [ "$positions" -eq 0 ] ||
+                die "旧 TEST $number 须暂停且没有持仓才能归档"
+        fi
+    done <<<"$1"
+}
+
+wait_for_revision() {
+    local expected_revision=$1 expected_count=$2 deadline
+    deadline=$((SECONDS + HEALTH_TIMEOUT))
+    until NEW_HEALTH=$(health 2>/dev/null) &&
+        printf '%s' "$NEW_HEALTH" | json "
+ok = (d['revision'] == '$expected_revision' and
+      d['testAccountCount'] == d['availableTestAccountCount'] == $expected_count)
+sys.exit(0 if ok and d['status'] in ('ok', 'attention') else 1)" 2>/dev/null; do
+        [ "$SECONDS" -lt "$deadline" ] ||
+            die "健康检查超时；最后响应: ${NEW_HEALTH:0:300}"
+        sleep 3
+    done
+}
+
+restore_running_accounts() {
+    local csrf number result
+    [ -n "$RUNNING" ] || return 0
+    csrf=$(curl_auth -D - -o /dev/null "$BASE/api/dashboard?details=summary" |
+        awk 'tolower($1) == "x-pm-csrf:" {print $2}' | tr -d '\r')
+    [ -n "$csrf" ] || die "无法取得控制请求令牌"
+    for number in $RUNNING; do
+        result=$(curl_auth -X POST -H "x-pm-csrf: $csrf" "$BASE/api/test/start?account_id=$number" |
+            json "print(d.get('strategy', {}).get('status'), d.get('error'))")
+        info "账户 $number: $result"
     done
 }
 
@@ -156,7 +196,10 @@ trap on_error ERR
 
 log "1/9 预检"
 require_safe_to_stop
-ACCOUNT_COUNT=$(health | json "print(d['testAccountCount'])")
+ACCOUNT_COUNT=$(health | json "
+n = d['testAccountCount']
+assert type(n) is int and 1 <= n <= 10
+print(n)")
 info "当前版本: ${CURRENT:-未知}  目标版本: $TARGET  TEST 账户数: $ACCOUNT_COUNT"
 [ "$CURRENT" != "$TARGET" ] || die "服务器已经是目标版本"
 DATA_KB=$(du -sk runtime/server | cut -f1)
@@ -196,6 +239,25 @@ if [ -n "$UNVERIFIED" ]; then
         die "$TARGET $UNVERIFIED。等 CI 通过后再部署；确需部署请加 --allow-unverified"
     info "注意：$TARGET $UNVERIFIED（已用 --allow-unverified 确认）"
 fi
+# New releases declare the public TEST account count. The legacy multi-account
+# version has no marker; recognize its explicit layout when rolling back.
+TARGET_ACCOUNT_COUNT=$ACCOUNT_COUNT
+if layout=$("${GIT[@]}" show "$TARGET:config/test-account-count" 2>/dev/null); then
+    [ "$layout" = "1" ] || die "无法识别目标版本的 TEST 账户布局"
+    TARGET_ACCOUNT_COUNT=$layout
+elif [ "$ACCOUNT_COUNT" -eq 1 ] &&
+    "${GIT[@]}" show "$TARGET:src/pm_nautilus/test_accounts.py" 2>/dev/null |
+        awk '$0 == "    count = 10" {seen = 1} END {exit !seen}'; then
+    TARGET_ACCOUNT_COUNT=10
+fi
+if [ "$TARGET_ACCOUNT_COUNT" -eq 1 ]; then
+    CONFIGURED_ACCOUNT=$(env_value PM_TEST_ACTIVE_ACCOUNT)
+    case "$CONFIGURED_ACCOUNT" in
+        "" | 1 | \"1\" | \'1\') ;;
+        *) die "目标版本使用 TEST 1，现有 PM_TEST_ACTIVE_ACCOUNT 需先核对" ;;
+    esac
+fi
+require_retireable_accounts "$PREVIEW"
 PREVIOUS_HEAD=$("${GIT[@]}" rev-parse HEAD)
 "${GIT[@]}" checkout -q --detach "$TARGET"
 [ "$("${GIT[@]}" rev-parse HEAD)" = "$TARGET" ] || die "检出后的版本不是 $TARGET"
@@ -209,6 +271,7 @@ STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 BACKUP="$BACKUP_ROOT/$STAMP-${TARGET:0:7}"
 log "5/9 记录停机前账户状态，停机并完整备份到 $BACKUP"
 BEFORE=$(account_states "$ACCOUNT_COUNT")
+require_retireable_accounts "$BEFORE"
 printf '%s\n' "$BEFORE" | sed 's/^/    /'
 RUNNING=$(printf '%s\n' "$BEFORE" | awk '$2 == "RUNNING" {print $1}' | xargs)
 info "部署后将恢复运行的账户: ${RUNNING:-无}"
@@ -240,6 +303,27 @@ info "备份 ${BACKUP_KB} KB / ${BACKUP_FILES} 个文件（停机后数据目录
 touch "$BACKUP/.complete"
 
 log "6/9 切换版本并启动"
+if [ "$TARGET_ACCOUNT_COUNT" -lt "$ACCOUNT_COUNT" ]; then
+    # Check the ledger itself under the same writer lock as the application
+    # before changing .env or starting anything. Dashboard counts alone do not
+    # prove the archived accounts have no unsettled rights or recovery work.
+    if ! PM_GIT_REVISION=$TARGET compose run --rm --no-deps -T \
+        --entrypoint /app/.venv/bin/python app -m pm_nautilus.test_accounts; then
+        # The new application never started and the previous revision/.env
+        # are intact. Bring back the old service and the same running accounts.
+        "${GIT[@]}" checkout -q --detach "$PREVIOUS_HEAD"
+        compose up -d
+        ROLLBACK_HINT="    已尝试启动旧版并恢复原账户，请核对当前运行状态。备份: $BACKUP"
+        wait_for_revision "$CURRENT" "$ACCOUNT_COUNT"
+        restore_running_accounts
+        RESTORED=$(account_states "$ACCOUNT_COUNT")
+        if [ "$(printf '%s\n' "$RESTORED" | awk '{print $1, $2}')" != "$(printf '%s\n' "$BEFORE" | awk '{print $1, $2}')" ]; then
+            die "旧账本归档核对未通过。旧版已重新启动，账户状态需核对"
+        fi
+        ROLLBACK_HINT=""
+        die "旧账本归档核对未通过。已重新启动旧版并恢复原运行账户。备份: $BACKUP"
+    fi
+fi
 sed -i "s/^PM_GIT_REVISION=.*/PM_GIT_REVISION=$TARGET/" .env
 chown --reference="$BACKUP/env.before" .env
 chmod --reference="$BACKUP/env.before" .env
@@ -251,47 +335,32 @@ ROLLBACK_HINT="    新版本已启动但核对未通过。回到旧版本（旧�
     新版本已运行过，账本可能已有新写入；不要直接用备份覆盖，先核对。备份: $BACKUP"
 
 log "7/9 等待健康检查（最长 ${HEALTH_TIMEOUT}s）"
-deadline=$((SECONDS + HEALTH_TIMEOUT))
-until NEW_HEALTH=$(health 2>/dev/null) &&
-    printf '%s' "$NEW_HEALTH" | json "
-ok = d['revision'] == '$TARGET' and d['availableTestAccountCount'] == $ACCOUNT_COUNT
-sys.exit(0 if ok and d['status'] in ('ok', 'attention') else 1)" 2>/dev/null; do
-    [ "$SECONDS" -lt "$deadline" ] || die "健康检查超时；最后响应: ${NEW_HEALTH:0:300}"
-    sleep 3
-done
+wait_for_revision "$TARGET" "$TARGET_ACCOUNT_COUNT"
 printf '%s' "$NEW_HEALTH" | json "print('    状态', d['status'], '版本', d['revision'][:7], '可用账户', d['availableTestAccountCount'], '后台错误', d['backgroundErrors'])"
 
-RESTARTED=$(account_states "$ACCOUNT_COUNT")
+RESTARTED=$(account_states "$TARGET_ACCOUNT_COUNT")
 printf '%s\n' "$RESTARTED" >"$BACKUP/accounts-restarted"
 if ! printf '%s\n' "$RESTARTED" | awk '$2 != "PAUSED" {exit 1}'; then
     die "重启后有账户不是 PAUSED，与程序设计不符，未恢复任何账户：
 $RESTARTED"
 fi
-if [ "$(printf '%s\n' "$BEFORE" | awk '{print $1, $3}')" != "$(printf '%s\n' "$RESTARTED" | awk '{print $1, $3}')" ]; then
+if [ "$(printf '%s\n' "$BEFORE" | awk -v n="$TARGET_ACCOUNT_COUNT" '$1 <= n {print $1, $3}')" != "$(printf '%s\n' "$RESTARTED" | awk -v n="$ACCOUNT_COUNT" '$1 <= n {print $1, $3}')" ]; then
     info "注意：持仓数与停机前不同（暂停的账户仍会维护卖出和结算），请在页面核对:"
     paste <(printf '%s\n' "$BEFORE") <(printf '%s\n' "$RESTARTED") | sed 's/^/      停机前 | 重启后: /'
 fi
 
 log "8/9 恢复部署前运行中的账户: ${RUNNING:-无}"
-if [ -n "$RUNNING" ]; then
-    CSRF=$(curl_auth -D - -o /dev/null "$BASE/api/dashboard?details=summary" |
-        awk 'tolower($1) == "x-pm-csrf:" {print $2}' | tr -d '\r')
-    [ -n "$CSRF" ] || die "无法取得控制请求令牌"
-    for number in $RUNNING; do
-        result=$(curl_auth -X POST -H "x-pm-csrf: $CSRF" "$BASE/api/test/start?account_id=$number" |
-            json "print(d.get('strategy', {}).get('status'), d.get('error'))")
-        info "账户 $number: $result"
-    done
-fi
+restore_running_accounts
 
 log "9/9 核对"
-AFTER=$(account_states "$ACCOUNT_COUNT")
+AFTER=$(account_states "$TARGET_ACCOUNT_COUNT")
 printf '%s\n' "$AFTER" >"$BACKUP/accounts-after"
 printf '%s\n' "$AFTER" | sed 's/^/    /'
-if [ "$(printf '%s\n' "$AFTER" | awk '{print $1, $2}')" != "$(printf '%s\n' "$BEFORE" | awk '{print $1, $2}')" ]; then
+if [ "$(printf '%s\n' "$AFTER" | awk -v n="$ACCOUNT_COUNT" '$1 <= n {print $1, $2}')" != "$(printf '%s\n' "$BEFORE" | awk -v n="$TARGET_ACCOUNT_COUNT" '$1 <= n {print $1, $2}')" ] ||
+    ! printf '%s\n' "$AFTER" | awk -v n="$ACCOUNT_COUNT" '$1 > n && $2 != "PAUSED" {exit 1}'; then
     die "账户运行状态与停机前不一致（新版本已运行，未回滚），请在页面核对"
 fi
-info "全部 $ACCOUNT_COUNT 个账户的运行状态与停机前一致"
+info "TEST 运行状态已恢复，当前账户数 $TARGET_ACCOUNT_COUNT"
 deadline=$((SECONDS + MARKET_TIMEOUT))
 until health | json "
 sys.exit(0 if all(v['status'] == 'ok' for v in d['marketData'].values()) else 1)" 2>/dev/null; do

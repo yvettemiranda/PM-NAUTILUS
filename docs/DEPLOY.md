@@ -15,7 +15,7 @@
 | 服务器外备份 | 未启用（COS 未开通）；可选方案见第 3.2 节 |
 | 手动快照 | 轻量应用服务器实例的「快照」标签可查可用恢复点。部署使用的停机备份及历史快照记录见 [HANDOFF](../HANDOFF.md)。 |
 
-全量初始化后最多有 11 份账本，路径为 `TEST/state.sqlite`、`TEST/accounts/2…10/state.sqlite` 和 `LIVE/state.sqlite`。单账户模式下，尚未初始化的账户可以没有账本文件。备份整个数据目录以保留所有既有账本、运行模式意图 `execution-mode.json` 和已配置的加密钱包 `wallet/live.vault`。程序运行时直接复制单个 `.sqlite` 文件可能漏掉 WAL 中的数据。
+新安装使用 `TEST/state.sqlite` 和 `LIVE/state.sqlite`。旧版已有的 `TEST/accounts/2…10/state.sqlite` 继续保存在原目录，供历史核查和回滚。备份整个数据目录以保留所有既有账本、运行模式意图 `execution-mode.json` 和已配置的加密钱包 `wallet/live.vault`。程序运行时直接复制单个 `.sqlite` 文件可能漏掉 WAL 中的数据。
 
 ## 2. 日常更新：一键部署
 
@@ -29,7 +29,7 @@ sudo deploy/deploy.sh <完整的 40 位提交 SHA>
 
 部署期间（约 3—5 分钟）不要在网页上启用 LIVE、解锁钱包或切换模式；脚本会在停机前最后一步再查一次，但不能完全排除这段时间里的网页操作。同一时间只允许一个部署，重复运行会被拒绝。
 
-升级应用时如需一并启用 TEST 单账户模式，先暂停选定账户以外的 TEST 账户。保留一份原 `.env` 的受保护副本，再设置 `PM_TEST_ACTIVE_ACCOUNT=1`（以 1 号为例）。部署脚本备份的是部署当时的 `.env`，并按停机前状态恢复已运行的 TEST 账户。仅更改配置时参见[切换 TEST 单账户模式](#切换-test-单账户模式)。
+首次从十账户版本升级时，使用下方的[旧账户归档流程](#从十账户版本升级)。后续版本由现有部署脚本更新。
 
 脚本先显示当前账户状态，输入 `yes` 后依次执行：
 
@@ -37,7 +37,7 @@ sudo deploy/deploy.sh <完整的 40 位提交 SHA>
 2. 检出目标提交，并在旧版本继续运行时构建新镜像
 3. 记录停机前每个 TEST 账户的运行状态和持仓数
 4. 正常停机（最多 45 秒），完整复制数据目录和 `.env` 到 `/var/lib/pm-nautilus-deploy/<时间>-<SHA>/`
-5. 改写 `PM_GIT_REVISION` 并启动新版本
+5. 若本次归档旧账户，用新镜像只读核对停机后的旧账本，再改写 `PM_GIT_REVISION` 并启动新版本
 6. 等待健康检查通过，确认版本号和可用账户数正确
 7. 确认重启后所有账户都是 PAUSED，然后只 START 停机前在运行的账户
 8. 核对运行状态与停机前一致，等待行情恢复
@@ -46,15 +46,25 @@ sudo deploy/deploy.sh <完整的 40 位提交 SHA>
 
 可选环境变量：`PM_APP_DIR`、`PM_BACKUP_ROOT`、`PM_KEEP_BACKUPS`（默认 5）、`PM_HEALTH_TIMEOUT`、`PM_MARKET_TIMEOUT`、`PM_COMPOSE_FILES`（默认 `compose.yaml`，以空格分隔多个文件）。
 
-### 切换 TEST 单账户模式
+### 从十账户版本升级
 
-仅更改账户范围时，先确认后端当前为 TEST、LIVE 未启用、钱包未配置或已锁定。记录需要恢复运行的账户。若要限制为单账户，先暂停即将改为只读的账户。保留现有镜像和 `.env` 的 `PM_GIT_REVISION`，只设置或清除 `PM_TEST_ACTIVE_ACCOUNT`。在程序目录用现有镜像重建容器，普通 Compose `restart` 不会读入新配置。
+TEST 2–10 须暂停且没有持仓、待处理订单、未完成的结算或账本恢复事项。保持旧应用运行以完成升级预检。旧部署脚本只接受升级前后账户数相同，首次升级从已验证的目标提交取新版脚本，在原程序目录运行。下面的临时副本属于 root 且在命令结束后删除。用实际已验证的完整 SHA 替换示例占位符。
 
 ```sh
-sudo docker compose --env-file .env -f compose.yaml up -d --no-build app
+sudo env PM_KEEP_BACKUPS=1000 bash -s -- 'REPLACE_WITH_VERIFIED_FULL_SHA' <<'SCRIPT'
+set -euo pipefail
+cd /opt/pm-nautilus
+[[ "$1" =~ ^[0-9a-f]{40}$ ]]
+git -c safe.directory=/opt/pm-nautilus fetch -q origin
+git -c safe.directory=/opt/pm-nautilus merge-base --is-ancestor "$1" origin/main
+deploy_script=$(mktemp /tmp/pm-nautilus-deploy.XXXXXX)
+trap 'rm -f -- "$deploy_script"' EXIT
+git -c safe.directory=/opt/pm-nautilus show "$1:deploy/deploy.sh" >"$deploy_script"
+bash "$deploy_script" "$1" --yes
+SCRIPT
 ```
 
-待健康检查通过，核对可启动的账户和已加载的引擎。账户重启后保持 PAUSED，只手动 START 本次仍需要运行且允许启动的账户。状态字段和其他账户的维护规则见 [TEST 多账户](TEST_ACCOUNTS.md)。
+升级脚本停机备份后使用新版镜像核对旧账本。若归档核对未通过，脚本恢复旧版和升级前运行的账户，保留备份供排查。通过后从网页和 API 核对 TEST 1，旧账本无需改名或搬迁。状态字段见 [TEST 账户与旧账本](TEST_ACCOUNTS.md)。
 
 ## 3. 备份
 
@@ -171,7 +181,7 @@ sudo mkdir -p runtime/server && sudo chown 10001:10001 runtime/server
 curl -fsS -H 'Host: localhost' http://127.0.0.1:8765/api/health
 ```
 
-空白目录首次启动时，已初始化的 TEST 账户均为 PAUSED，LIVE 未启用。默认初始化十个 TEST 账户。设置了 `PM_TEST_ACTIVE_ACCOUNT` 时，仅选定账户可以 START，其他尚未初始化的账户可以保持空白。
+空白目录首次启动时只初始化 TEST 1，以 PAUSED 开始，LIVE 未启用。
 
 HTTPS：参照 `deploy/nginx.conf.example` 配一个独立虚拟主机，反代到 `127.0.0.1:8765`，先执行 `nginx -t` 再重载。不要直接公开容器端口，也不要通过明文 HTTP 传登录密码。钱包的备份和恢复接口需要样例中单独放宽的上传大小和超时设置。样例开启了 JSON／CSS／JS 的 gzip 压缩。以往采样的接口传输量减少约 70%—90%。CSRF 令牌通过请求和响应头传递。当前服务器以 `/etc/nginx/conf.d/pm-nautilus-gzip.conf` 启用同样设置。
 

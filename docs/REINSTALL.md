@@ -1,12 +1,12 @@
 # 新开发环境配置
 
-当前版本统一从 [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) 获取。十账户改造前的固定基准为 [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027)，提交 `4de107a4dc1a4abaaf08b330eb00803391268e2a`，仅供回看和对照，不是默认安装版本。旧开发分支不再作为入口；完整提交历史仍保留。
+从 [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) 获取当前版本。十账户改造前的[历史基准提交 `4de107a`](https://github.com/yvettemiranda/PM-NAUTILUS/commit/4de107a4dc1a4abaaf08b330eb00803391268e2a)供追溯和对照。
 
 当前已部署的应用 SHA 以 [HANDOFF](../HANDOFF.md) 为准，后续纯文档提交可使 `main` 比应用 SHA 更新；须核对差异只涉及文档，不因此重启镜像。当前验证与服务器采样见 [HANDOFF](../HANDOFF.md) 和 [VALIDATION](VALIDATION.md)。
 
-本指南适用于新电脑、全新系统或独立开发目录，恢复开发环境不会自动迁移服务器参数、十个 TEST 历史、LIVE 账本或钱包。首次实盘另见[从 GitHub 到首次实盘](START_FRESH_LIVE.md)。
+本指南适用于新电脑、全新系统或独立开发目录，恢复开发环境不会自动迁移服务器参数、TEST 历史、LIVE 账本或钱包。首次实盘另见[从 GitHub 到首次实盘](START_FRESH_LIVE.md)。
 
-新目录默认十个 TEST 均为 PAUSED，LIVE 未启用；恢复旧数据目录时还须保留 `execution-mode.json`。记录为 LIVE 的目录重启后保持 TEST 后台停止，钱包仍需解锁、核对和明确启用，不会自动恢复交易。明确恢复 TEST 后台也保持全部账户暂停。完整数据路径及迁移范围见[部署手册](DEPLOY.md)。
+新目录默认创建 PAUSED 的 TEST 1，LIVE 未启用。恢复旧数据目录时保留 `execution-mode.json`。记录为 LIVE 的目录重启后保持 TEST 后台停止，钱包仍需解锁、核对和明确启用。明确恢复 TEST 后台后，TEST 1 保持暂停。完整数据路径及迁移范围见[部署手册](DEPLOY.md)。
 
 ## 1. 克隆项目
 

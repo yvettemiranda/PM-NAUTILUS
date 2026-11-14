@@ -1,13 +1,12 @@
 # PM-NAUTILUS 当前交接
 
-## 版本与仓库入口（2026-11-13 更新）
+## 当前源码与版本入口
 
-只维护两个入口：
+从 `main` 获取单账户 TEST 和历史盘口回测。TEST 沿用原 1 号账本，2–10 号账本保留原路径。回测的网页任务使用独立账本，可导入历史盘口、修改回测参数和查看净值。本地工具另支持与同期 TEST 1 的期初、期末备份对照。见 [历史回测](docs/BACKTEST.md) 及 [部署](docs/DEPLOY.md)。
 
-| 入口 | 含义 |
-| --- | --- |
-| [`main`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/main) | 当前十账户最新版及现行文档，默认开发和下载入口。 |
-| [`baseline/pre-test-10-accounts-20261027`](https://github.com/yvettemiranda/PM-NAUTILUS/tree/baseline/pre-test-10-accounts-20261027) | 十账户改造前的固定源码 `4de107a4dc1a4abaaf08b330eb00803391268e2a`，不继续修改。 |
+十账户改造前基准 [`4de107a`](https://github.com/yvettemiranda/PM-NAUTILUS/commit/4de107a4dc1a4abaaf08b330eb00803391268e2a) 可从 `main` 历史追溯。以下按应用版本记录历史验收。
+
+## 2026-11-13 交接状态
 
 当前已部署应用为 `a543f06e90359d54c5d37513028ce67ea2b39211`，已推送 main，本地全量与双架构 CI 验证通过。原部署流程、十账户运行集合、11 库停机备份对照、在线 validation、页面资源和运维核查通过；首次及下一轮正常定时扫描均成功。持续观测已完成，末次行情全部就绪，但包含启动和只读审计的完整窗口观察到最长约 **9.85 秒**健康请求，也有短暂盘口恢复，不能宣称全部长尾消除或持续无异常。
 

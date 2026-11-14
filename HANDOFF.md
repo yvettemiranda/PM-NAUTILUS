@@ -6,6 +6,18 @@
 
 十账户改造前基准 [`4de107a`](https://github.com/yvettemiranda/PM-NAUTILUS/commit/4de107a4dc1a4abaaf08b330eb00803391268e2a) 可从 `main` 历史追溯。以下按应用版本记录历史验收。
 
+## 2026-11-14 TEST 1 行情录制
+
+当前应用镜像为 `519d6af5ad0f7cf0231ae012806f335fd68a9527`。AMD64、ARM64 宿主与 Docker 验证均通过。本地 macOS 通过 1,610 项 Python（跳过 28 项 Linux 专属测试）、112 项 Node 与 Ruff 检查。[GitHub CI](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/43571680338)
+
+首版 `e94a82d` 于北京时间 15:25 开始录制。压缩版升级前 TEST 1 为 RUNNING、128 个持仓。此次停机备份为 `/var/lib/pm-nautilus-deploy/20261114T074346Z-519d6af`，部署日志为 `/var/log/pm-nautilus-deploy-519d6af.log`。首版部署备份 `/var/lib/pm-nautilus-deploy/20261114T072401Z-e94a82d` 和更早的恢复备份均保留。
+
+更新后 TEST 1 恢复 RUNNING，128 个持仓，62/62 个行情组及 12,253/12,253 个盘口就绪，后台无错误，容器自动重启次数为 0。LIVE 关闭，钱包未配置。两次停机备份与在线账本的只读对照均通过，核对项目包括 TEST 1 参数、本金、代次、交易与净值历史前缀、订单身份，及 2–10 号归档、LIVE 数据表、钱包、执行模式和除版本号外的环境配置。生产页面的授权、静态资源、压缩分段及按日下载均经核验。从网页下载前三个首版分段和首个压缩分段，校验 gzip 和时间链后用同一套 TEST 参数本地从空仓回放，得到 74 笔模拟成交和 22 个净值点，覆盖状态为部分覆盖，含 49 个缺口记录。
+
+录制采用独立 Docker 卷 `pm-nautilus_test-recordings`。默认总量 4 GiB，另保护 12 GiB 或 20% 的磁盘剩余空间。上限触发后需导出并验证文件，再释放本机空间。用首版同一 240 秒样本离线对照，压缩后字节数减少约 77%，结合其前置快照回放时 68 笔模拟成交、6 个净值点和覆盖缺口一致。此四分钟速率粗估约 23 GiB／30 天，长期用量按多日实测为准。半年覆盖和与 TEST 账本的复现率仍需持续采集后核对。见 [录制与导出](docs/BACKTEST.md#test-1-持续录制)。
+
+GitHub 核对为单一 `main` 分支，当前无标签、发布包或 Actions 缓存。服务器移除四份逐字节核对有 gzip 副本的临时解压行情，共 70.8 MiB；压缩副本、分析结果、账本和恢复备份保留。
+
 ## 2026-11-14 单账户与历史盘口回测验收
 
 服务器应用镜像为 `b6f3cfdbb953a40add8a91fdb8f6e6639edb5bd8`。AMD64 与 ARM64 的主机和 Docker 各通过 **1,611 项 Python 测试**，两架构各通过 **112 项 Node 测试**。生产登录保护、六项页面资产、旧 2 号账户入口拒绝、回测参数与 TEST 隔离均通过验证。生产样例完成 3 笔模拟成交，样例初始资金为 1U，期末现金 22.50U。该样例使用人工构造的行情。[GitHub CI](https://github.com/yvettemiranda/PM-NAUTILUS/actions/runs/43558328884)

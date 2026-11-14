@@ -1,6 +1,6 @@
 # 版本维护规则
 
-`main` 是当前开发和部署入口，包含单账户 TEST、历史盘口回测和受保护的 LIVE。部署固定通过验证的完整应用 SHA，已部署版本见 [HANDOFF](../HANDOFF.md)。
+`main` 是当前开发和部署入口，包含单账户 TEST、持续录制、历史盘口回测和受保护的 LIVE。部署固定通过验证的完整应用 SHA，已部署版本见 [HANDOFF](../HANDOFF.md)。
 
 十账户改造前的基准提交 [`4de107a`](https://github.com/yvettemiranda/PM-NAUTILUS/commit/4de107a4dc1a4abaaf08b330eb00803391268e2a) 保留在 `main` 的提交历史中。多账户改造和后续保护也仍可从历史追溯。
 

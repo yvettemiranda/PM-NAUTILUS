@@ -2,7 +2,6 @@
 
 import asyncio
 import fcntl
-import gzip
 import hashlib
 import logging
 import os
@@ -10,6 +9,7 @@ import re
 import secrets
 import stat
 import time
+import zlib
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +23,7 @@ MAX_LINE_BYTES = 16 * MIB
 WRITE_BYTES = 512 * 1024
 WRITE_ROWS = 2048
 WRITE_INTERVAL = 0.25
+GZIP_LEVEL = 4
 DISK_CHECK_INTERVAL = 15
 MAX_TIME_MS = 4_102_444_800_000
 ARCHIVE_NAME = re.compile(r"(?P<start>[0-9]{13})-(?P<end>[0-9]{13})-[0-9a-f]{12}\.ndjson\.gz")
@@ -56,6 +57,8 @@ class Segment:
     stream: BinaryIO
     start_ms: int
     end_ms: int
+    compressor: object
+    footer: bytes = b""
     bytes: int = 0
 
 
@@ -469,9 +472,6 @@ class CaptureRecorder:
             raise CapturePressure("disk_low", needed)
         self._disk_deadline = now + DISK_CHECK_INTERVAL
 
-    def _pack(self, data):
-        return gzip.compress(data, compresslevel=1, mtime=0)
-
     def _json_line(self, value):
         encoded = self._encoder.encode(value)
         if len(encoded) + 1 > MAX_LINE_BYTES:
@@ -479,22 +479,31 @@ class CaptureRecorder:
         return encoded + b"\n"
 
     def _header(self, first):
-        return self._pack(
-            self._json_line(
-                {
-                    "type": "capture_segment",
-                    "version": 1,
-                    "startMs": first,
-                    "captureScope": CAPTURE_SCOPE,
-                    "previous": self._previous_archive.id if self._previous_archive else None,
-                }
-            )
+        return self._json_line(
+            {
+                "type": "capture_segment",
+                "version": 1,
+                "startMs": first,
+                "captureScope": CAPTURE_SCOPE,
+                "previous": self._previous_archive.id if self._previous_archive else None,
+            }
         )
 
-    def _footer(self, nonce, first, last):
-        identifier = f"{first:013d}-{last:013d}-{nonce}.ndjson.gz"
-        body = self._pack(self._json_line({"type": "capture_end", "endMs": last, "id": identifier}))
-        return identifier, body
+    @staticmethod
+    def _identifier(nonce, first, last):
+        return f"{first:013d}-{last:013d}-{nonce}.ndjson.gz"
+
+    def _footer(self, compressor, nonce, first, last):
+        end = compressor.copy()
+        row = self._json_line(
+            {"type": "capture_end", "endMs": last, "id": self._identifier(nonce, first, last)}
+        )
+        return end.compress(row) + end.flush(zlib.Z_FINISH)
+
+    @staticmethod
+    def _chunk(compressor, raw):
+        # Flush the batch to disk while keeping the dictionary for the next batch.
+        return compressor.compress(raw) + compressor.flush(zlib.Z_SYNC_FLUSH)
 
     def _nonce(self, first):
         previous = self._previous_archive
@@ -507,34 +516,44 @@ class CaptureRecorder:
 
     def _write(self, records):
         first, last = records[0]["atMs"], records[-1]["atMs"]
-        compressed = self._pack(b"".join(self._json_line(item) for item in records))
+        raw = b"".join(self._json_line(item) for item in records)
         stage = self._active
-        if stage and (
-            time.monotonic() >= self._segment_deadline
-            or stage.bytes + len(compressed) > self.segment_bytes
-        ):
+        if stage and time.monotonic() >= self._segment_deadline:
             self._close_segment()
             stage = None
-        nonce = stage.nonce if stage else self._nonce(first)
-        header = b"" if stage else self._header(first)
-        _, footer = self._footer(nonce, stage.start_ms if stage else first, last)
-        self._available(len(header) + len(compressed) + len(footer))
+        if stage:
+            # Keep the last successful compressor and footer until the next
+            # batch fits the quota and every byte has reached the active file.
+            compressor = stage.compressor.copy()
+            compressed = self._chunk(compressor, raw)
+            footer = self._footer(compressor, stage.nonce, stage.start_ms, last)
+            if stage.bytes + len(compressed) + len(footer) > self.segment_bytes:
+                self._close_segment()
+                stage = None
+        if stage is None:
+            nonce = self._nonce(first)
+            compressor = zlib.compressobj(level=GZIP_LEVEL, wbits=zlib.MAX_WBITS + 16)
+            compressed = self._chunk(compressor, self._header(first) + raw)
+            footer = self._footer(compressor, nonce, first, last)
+        self._available(len(compressed) + len(footer))
         if stage is None:
             path = self.path / f".capture-{nonce}.part"
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             self._active = stage = Segment(
-                nonce, path, os.fdopen(fd, "wb", buffering=0), first, first
+                nonce, path, os.fdopen(fd, "wb", buffering=0), first, first, compressor
             )
             self._segment_deadline = time.monotonic() + self.segment_seconds
         try:
-            self._write_bytes(stage.stream, header + compressed)
+            self._write_bytes(stage.stream, compressed)
         except OSError:
             self._rollback(stage)
             if not stage.bytes:
                 self._remove_open_segment()
             raise
-        stage.bytes += len(header) + len(compressed)
+        stage.bytes += len(compressed)
         stage.end_ms = last
+        stage.compressor = compressor
+        stage.footer = footer
 
     @staticmethod
     def _rollback(stage):
@@ -557,9 +576,9 @@ class CaptureRecorder:
         if not stage.bytes:
             self._remove_open_segment()
             return
-        identifier, footer = self._footer(stage.nonce, stage.start_ms, stage.end_ms)
+        identifier = self._identifier(stage.nonce, stage.start_ms, stage.end_ms)
         try:
-            self._write_bytes(stage.stream, footer)
+            self._write_bytes(stage.stream, stage.footer)
             os.fsync(stage.stream.fileno())
         except OSError:
             self._rollback(stage)
@@ -569,7 +588,7 @@ class CaptureRecorder:
         path = self.path / identifier
         # Hard link publish is atomic and will not replace another file.
         os.link(stage.path, path)
-        item = Archive(identifier, stage.bytes + len(footer), stage.start_ms, stage.end_ms)
+        item = Archive(identifier, stage.bytes + len(stage.footer), stage.start_ms, stage.end_ms)
         self._catalog += (item,)
         self._sealed_bytes += item.bytes
         self._previous_archive = item

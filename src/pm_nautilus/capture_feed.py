@@ -28,6 +28,8 @@ class MarketCapture:
         self.last_baseline_at = 0
         self.last_time = 0
         self.metadata = {}
+        self.token_refs = {}
+        self.next_token_ref = 1
         self.known_states = {}
         self.tracked_bids = set()
         self.ready = set()
@@ -142,10 +144,16 @@ class MarketCapture:
 
     def _metadata_rows(self, at, updated):
         tags = sorted(self.runtime.official_tags)
-        rows = [
-            dict(type="market", atMs=at, tokens=batch, drain=False)
-            for batch in self._batches(updated, METADATA_BATCH_SIZE)
-        ]
+        rows = []
+        for batch in self._batches(updated, METADATA_BATCH_SIZE):
+            refs = []
+            for token in batch:
+                tid = token.token_id
+                if tid not in self.token_refs:
+                    self.token_refs[tid] = self.next_token_ref
+                    self.next_token_ref += 1
+                refs.append(self.token_refs[tid])
+            rows.append(dict(type="market", atMs=at, tokens=batch, tokenRefs=refs, drain=False))
         if rows:
             rows[-1]["officialTags"] = tags
         elif tags != self._official_tags:
@@ -180,6 +188,8 @@ class MarketCapture:
         dropped = self.ids - ids
         self.ids = ids
         self.metadata = {tid: runtime.tokens[tid] for tid in ids}
+        self.token_refs.clear()
+        self.next_token_ref = 1
         self.ready.clear()
         self.off_grid.clear()
         self.known_states.clear()
@@ -272,6 +282,7 @@ class MarketCapture:
         if self._record(rows):
             for tid in removed:
                 self.metadata.pop(tid, None)
+                self.token_refs.pop(tid, None)
             self._preferences = runtime.preferences
             self._official_tags = sorted(runtime.official_tags)
 
@@ -324,6 +335,8 @@ class MarketCapture:
         at = self.at_ms()
         promotions = set()
         books, changes = [], []
+        touches = set()
+        updated = set()
         for tid, side, levels in affected:
             if tid not in self.ready or tid in self.tracked_bids or side != "SELL":
                 continue
@@ -359,12 +372,23 @@ class MarketCapture:
                     if side == "SELL" and price <= MAX_BUY_PRICE_MICROS
                 ]
             )
-            if selected or was_invalid != bool(invalid) or token.event_id in self.tracked_events:
+            if selected or was_invalid != bool(invalid):
                 changes.append(
                     dict(tokenId=tid, side=side, levels=selected, invalidGrid=bool(invalid))
                 )
+                updated.add(tid)
+            elif token.event_id in self.tracked_events:
+                # Filtered depth has no execution effect, but this accepted
+                # update dirtied its event in the original strategy drain.
+                touches.add(tid)
+        refs = sorted(self.token_refs[tid] for tid in touches - updated)
         if books or changes:
-            self._observe("delta_batch", at, venueMs=venue, books=books, changes=changes)
+            row = dict(venueMs=venue, books=books, changes=changes)
+            if refs:
+                row["touches"] = refs
+            self._observe("delta_batch", at, **row)
+        elif refs:
+            self._observe("touch", at, tokenRefs=refs)
         elif self._candidate_batch_due():
             self.pulse(at)
 
@@ -431,5 +455,6 @@ class MarketCapture:
             self.tracked_bids.difference_update(payouts)
             for tid in payouts:
                 self.metadata.pop(tid, None)
+                self.token_refs.pop(tid, None)
                 self.off_grid.pop(tid, None)
                 self.known_states.pop(tid, None)

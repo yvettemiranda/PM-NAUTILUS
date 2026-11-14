@@ -211,6 +211,65 @@ def test_replay_verifies_touched_segment_even_when_selection_ends_earlier(tmp_pa
             run_backtest(tape, preferences=PREFS, starting_cash="1", end_ms=START + 2_000)
 
 
+@pytest.mark.parametrize("mixed", [False, True])
+def test_compact_touch_preserves_alternate_candidates_after_cash_releases(mixed):
+    baseline = filtered()
+    sibling_market = [
+        item
+        | {
+            "token_id": str(index),
+            "event_id": "event-b",
+            "market_id": "market-b",
+            "condition_id": "condition-b",
+        }
+        for index, item in enumerate(baseline[0]["tokens"], start=3)
+    ]
+    baseline[0]["tokens"].extend(sibling_market)
+    baseline[0]["tokenRefs"] = [1, 2, 3, 4]
+    baseline[1]["books"].extend(
+        [book("3"), book("4") | {"bids": [], "asks": [], "bidCovered": False}]
+    )
+    at = START + 1100
+    expanded = {"tokenId": "4", "side": "SELL", "levels": [], "invalidGrid": False}
+    if mixed:
+        meaningful = {"tokenId": "1", "side": "BUY", "levels": [[450_000, 1]]}
+        legacy_row = {"type": "delta_batch", "atMs": at, "changes": [meaningful, expanded]}
+        compact_row = {"type": "delta_batch", "atMs": at, "changes": [meaningful], "touches": [4]}
+    else:
+        legacy_row = {"type": "delta_batch", "atMs": at, "changes": [expanded]}
+        compact_row = {"type": "touch", "atMs": at, "tokenRefs": [4]}
+    observed = scope()
+    observed["captureScope"]["candidateBatchNs"] = 1_000_000_000
+    prefix = [
+        header() | {"captureScope": SCOPE},
+        observed,
+        *baseline,
+        control(),
+        delta("1", 500, 450_000, 50_000_000),
+    ]
+    older = replay(*prefix, legacy_row, preferences=PREFS)
+    compact = replay(*prefix, compact_row, preferences=PREFS)
+    assert compact["fills"] == older["fills"]
+    assert compact["equity"] == older["equity"]
+    assert [(r["atMs"], r["side"], r["marketId"]) for r in compact["fills"]] == [
+        (START, "BUY", "market"),
+        (START + 500, "SELL", "market"),
+        (at, "BUY", "market-b"),
+    ]
+
+
+def test_touch_rejects_unknown_or_conflicting_alias():
+    baseline = filtered()
+    baseline[0]["tokenRefs"] = [1, 1]
+    rows = [header() | {"captureScope": SCOPE}, scope(), *baseline, control()]
+    with pytest.raises(ValueError, match="合约编号发生改变"):
+        replay(*rows, preferences=PREFS)
+    baseline[0]["tokenRefs"] = [1, 2]
+    rows.append({"type": "touch", "atMs": START + 1, "tokenRefs": [3]})
+    with pytest.raises(ValueError, match="引用了未知合约"):
+        replay(*rows, preferences=PREFS)
+
+
 def test_replay_real_capture_writer_export_matches_test_ledger(tmp_path, monkeypatch):
     directory = tmp_path / "captures"
 

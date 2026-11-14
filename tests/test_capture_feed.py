@@ -41,7 +41,8 @@ def test_recorded_trade_can_be_replayed_and_keeps_bid_depth_after_asks_leave_cap
     async def run():
         runtime, clock, _ = setup(tmp_path)
         runtime.add_tokens(tokens())
-        runtime.update_preferences({"maxBuyPriceCents": "3"}, capital="1")
+        runtime.update_preferences({"maxBuyPriceCents": "5"}, capital="1")
+        runtime.CANDIDATE_BATCH_NS = 1_000_000_000
         clock.set_time(START * NS_PER_MS)
         monkeypatch.setattr("pm_nautilus.capture_feed.time_ns", clock.timestamp_ns)
         tape = Tape()
@@ -52,6 +53,12 @@ def test_recorded_trade_can_be_replayed_and_keeps_bid_depth_after_asks_leave_cap
             assert tape.rows == []
             runtime.start()
             opening = next(row for row in tape.rows if row["type"] == "book_batch")
+            refs = {
+                token.token_id: ref
+                for row in tape.rows
+                if row["type"] == "market"
+                for token, ref in zip(row["tokens"], row["tokenRefs"], strict=True)
+            }
             assert all(
                 not row["asks"] and not row["bids"] and row["bidCovered"] is False
                 for row in opening["books"]
@@ -61,15 +68,31 @@ def test_recorded_trade_can_be_replayed_and_keeps_bid_depth_after_asks_leave_cap
                 frame(
                     change("1", "SELL", "0.02", "50"),
                     change("1", "BUY", "0.016", "10"),
+                    change("2", "SELL", "0.95", "49"),
                     at=START + 1000,
                 ),
                 {"1", "2"},
             )
             promotion = next(row for row in tape.rows if row["type"] == "delta_batch")
             assert promotion["changes"] == []
+            assert promotion["touches"] == [refs["2"]]
             promoted = promotion["books"][0]
             assert promoted["bids"] == [(15_000, 50_000_000), (16_000, 10_000_000)]
             assert promoted["asks"] == [(20_000, 50_000_000)]
+            clock.set_time((START + 1500) * NS_PER_MS)
+            service.message(
+                frame(
+                    change("2", "SELL", "0.95", "50"),
+                    change("2", "BUY", "0.94", "51"),
+                    at=START + 1500,
+                ),
+                {"1", "2"},
+            )
+            assert tape.rows[-1] == {
+                "type": "touch",
+                "atMs": START + 1500,
+                "tokenRefs": [refs["2"]],
+            }
             clock.set_time((START + 2000) * NS_PER_MS)
             service.message(
                 frame(
@@ -88,12 +111,13 @@ def test_recorded_trade_can_be_replayed_and_keeps_bid_depth_after_asks_leave_cap
                     [header() | {"captureScope": CAPTURE_SCOPE}, *tape.rows],
                 ),
                 starting_cash="1",
-                preferences={"maxBuyPriceCents": "3"},
+                preferences={"maxBuyPriceCents": "5"},
             )
             assert [(row["side"], row["price"]) for row in result["fills"]] == [
                 ("BUY", "0.02"),
                 ("SELL", "0.45"),
             ]
+            assert [row["atMs"] for row in result["fills"]] == [START + 1000, START + 2000]
             assert result["summary"]["realizedPnl"] == "21.5"
         finally:
             await service.close()

@@ -2,6 +2,7 @@ import asyncio
 import gzip
 import hashlib
 import json
+import random
 from pathlib import Path
 
 import pytest
@@ -44,7 +45,7 @@ def checksum(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def test_capture_seals_ordered_multi_member_gzip_and_restarts(tmp_path):
+def test_capture_seals_ordered_gzip_and_restarts(tmp_path):
     async def run():
         writer = recorder(tmp_path)
         await start(writer)
@@ -202,6 +203,86 @@ def test_capture_rolls_by_age_while_idle(tmp_path: Path):
         await until(lambda: bool(writer.archives()))
         archive = writer.archives()[0]
         assert read_segment(writer.archive(archive["id"]))[-1]["id"] == archive["id"]
+        await writer.close()
+
+    asyncio.run(run())
+
+
+def test_capture_reuses_gzip_dictionary_across_writes(tmp_path):
+    async def run():
+        writer = recorder(tmp_path)
+        await start(writer)
+        payload = random.Random(4321).randbytes(8_192).hex()
+        events = [line("pulse", i, payload=payload) for i in range(4)]
+        for event in events:
+            assert writer.submit(event)
+            await until(lambda: writer.status()["lastWriteMs"] == event["atMs"])
+        sealed = await writer.seal()
+        archive = writer.archive(sealed["id"])
+        rows = read_segment(archive)
+        assert rows[1:-1] == [line("gap"), *events]
+        assert rows[-1] == {"type": "capture_end", "id": sealed["id"], "endMs": BASE + 3}
+        old_bytes = sum(
+            len(
+                gzip.compress(
+                    json.dumps(row, separators=(",", ":")).encode() + b"\n", compresslevel=1
+                )
+            )
+            for row in rows
+        )
+        assert archive.stat().st_size < old_bytes // 2
+        await writer.close()
+
+    asyncio.run(run())
+
+
+def test_capture_retains_last_valid_footer_when_next_gzip_chunk_exceeds_quota(tmp_path):
+    async def run():
+        first = line("pulse", payload=random.Random(1234).randbytes(1_024).hex())
+        second = line("pulse", 1, payload=random.Random(9876).randbytes(8_192).hex())
+        expected = recorder(tmp_path / "expected")
+        await start(expected)
+        assert expected.submit(first)
+        sealed = await expected.seal()
+        await expected.close()
+
+        writer = recorder(tmp_path / "actual", max_bytes=sealed["bytes"] + 16)
+        await start(writer)
+        assert writer.submit(first)
+        await until(lambda: writer.status()["lastWriteMs"] == BASE)
+        assert writer.submit(second)
+        await until(lambda: writer.status()["status"] == "quota_full" and writer.archives())
+        archive = writer.archives()[0]
+        assert archive["bytes"] <= writer.status()["maxBytes"]
+        assert read_segment(writer.archive(archive["id"]))[1:-1] == [line("gap"), first]
+        await writer.close()
+
+    asyncio.run(run())
+
+
+def test_capture_retains_last_valid_footer_after_failed_partial_write(tmp_path, monkeypatch):
+    async def run():
+        writer = recorder(tmp_path)
+        write_bytes = writer._write_bytes
+        calls = 0
+
+        def write_with_failure(stream, data):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                stream.write(data[:4])
+                raise OSError("partial write")
+            write_bytes(stream, data)
+
+        monkeypatch.setattr(writer, "_write_bytes", write_with_failure)
+        await start(writer)
+        first = line("pulse")
+        assert writer.submit(first)
+        await until(lambda: writer.status()["lastWriteMs"] == BASE)
+        assert writer.submit(line("pulse", 1))
+        await until(lambda: writer.status()["status"] == "error" and writer.archives())
+        archive = writer.archives()[0]
+        assert read_segment(writer.archive(archive["id"]))[1:-1] == [line("gap"), first]
         await writer.close()
 
     asyncio.run(run())

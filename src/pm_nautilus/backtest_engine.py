@@ -256,6 +256,7 @@ class Replay:
         self.in_capture_baseline = False
         self.capture_baseline_ids = set()
         self.capture_bid_missing = set()
+        self.capture_token_refs = {}
 
     def _set_time(self, at):
         self.clock.set_time(at * NS_PER_MS)
@@ -284,6 +285,15 @@ class Replay:
         if type(entries) is not list:
             raise ValueError("tokens 必须是数组")
         tokens = [_token(raw) for raw in entries]
+        if self.capture_scope is not None and "tokenRefs" in row:
+            refs = row["tokenRefs"]
+            if type(refs) is not list or len(refs) != len(tokens):
+                raise ValueError("录制合约编号与市场资料数量不一致")
+            for ref, token in zip(refs, tokens, strict=True):
+                ref = _integer(ref, "录制合约编号", 1)
+                previous = self.capture_token_refs.setdefault(ref, token.token_id)
+                if previous != token.token_id:
+                    raise ValueError("录制合约编号发生改变")
         seen = set()
         for token in tokens:
             old = runtime.tokens.get(token.token_id)
@@ -464,6 +474,21 @@ class Replay:
         if _optional_flag(row, "drain", True):
             runtime.drain()
 
+    def _capture_touch(self, refs, at):
+        if type(refs) is not list or len(refs) > 10_000:
+            raise ValueError("录制盘口更新时间的合约编号必须为数组")
+        runtime = self.runtime
+        for ref in refs:
+            tid = self.capture_token_refs.get(_integer(ref, "录制合约编号", 1))
+            if tid is None or tid not in runtime.tokens:
+                raise ValueError("录制盘口更新时间引用了未知合约")
+            book = runtime.books.get(tid)
+            if book is None or not book.ready or runtime.market_is_unavailable(tid):
+                self.ignored_deltas += 1
+                continue
+            runtime.dirty.add(runtime.cycle_id(runtime.tokens[tid]))
+            self.last_book = at
+
     def _capture_control(self, row):
         status = row["status"]
         if status not in ("RUNNING", "PAUSED"):
@@ -499,6 +524,8 @@ class Replay:
                 self.runtime.CANDIDATE_BATCH_NS = scope["candidateBatchNs"]
             self.in_capture_baseline = _optional_flag(row, "baseline", False)
             self.capture_baseline_ids.clear()
+            if self.in_capture_baseline:
+                self.capture_token_refs.clear()
         elif kind == "availability":
             self._capture_availability(row)
         elif kind == "control":
@@ -510,6 +537,12 @@ class Replay:
             self.runtime.drain()
             if refresh:
                 self._progress_claims()
+        elif kind == "touch":
+            refs = row["tokenRefs"]
+            if not refs:
+                raise ValueError("录制盘口更新时间缺少合约编号")
+            self._capture_touch(refs, at)
+            self.runtime.drain()
         elif kind == "book_batch":
             venue = _integer(row.get("venueMs", at), "盘口时间", maximum=MAX_TIME_MS)
             self._book_batch(row["books"], at, venue)
@@ -569,6 +602,7 @@ class Replay:
             self.capture_gap = True
             self.in_capture_baseline = False
             self.capture_baseline_ids.clear()
+            self.capture_token_refs.clear()
             self.observed_running = False
             self.runtime.pause()
             self.runtime.market_availability.clear()
@@ -626,14 +660,17 @@ class Replay:
         elif kind in ("delta", "delta_batch"):
             venue = _integer(row.get("venueMs", at), "盘口时间", maximum=MAX_TIME_MS)
             books = row.get("books", []) if kind == "delta_batch" and self.capture_scope else []
+            touches = row.get("touches", []) if kind == "delta_batch" and self.capture_scope else []
             if books:
                 self._book_batch(books, at, venue)
             self._deltas(
                 row["changes"] if kind == "delta_batch" else [row],
                 venue * NS_PER_MS,
                 at,
-                allow_empty=bool(books),
+                allow_empty=bool(books or touches),
             )
+            if kind == "delta_batch" and self.capture_scope and "touches" in row:
+                self._capture_touch(touches, at)
             self.runtime.drain()
         elif kind == "gap":
             self._gap(row)
